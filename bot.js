@@ -85,7 +85,7 @@ function saveData(d) { fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); 
 let data = loadData();
 
 const PRESET_RANKS = [
-  { id: '1446192510593662976', rank: 'Moderator' }, { id: '1320483185636802592', rank: 'Moderator' },
+  { id: '1446192510593662976', rank: 'Senior Moderator' }, { id: '1320483185636802592', rank: 'Moderator' },
   { id: '1269872382701604895', rank: 'Moderator' }, { id: '1222684836091658330', rank: 'Server Manager' },
   { id: '1198527966972477505', rank: 'Server Manager' }
 ];
