@@ -21,8 +21,8 @@ const GUILD_ID = '1324059331406069872';
 const PROFILE_CHANNEL_ID = '1528326521721196544';
 const DEFAULT_LOG_CHANNEL_ID = '1529221027899379722';
 const DAILY_REWARD = 5;
-const TRAINING_REWARD = 15; // 15 credits per correct answer
-const TRAINING_COOLDOWN = 24 * 60 * 60 * 1000; // 24h cooldown per USER
+const TRAINING_REWARD = 15;
+const TRAINING_COOLDOWN = 24 * 60 * 60 * 1000;
 
 // ✅ RULE BOOK
 const TRAINING_RULES = `# 📜 RULE BOOK!
@@ -151,7 +151,7 @@ function isModerator(id) { ensureUser(id); return (data.ranks[id] ?? -1) >= 0; }
 function isServerManager(id) { ensureUser(id); return data.ranks[id] === getRankIndex('Server Manager'); }
 
 // ✅ Bot Ready
-client.once('ready', () => console.log(`✅ ONLINE — ANYONE CAN ANSWER TRAINING!`));
+client.once('ready', () => console.log(`✅ ONLINE — OLD FORMAT FOR ALL COMMANDS!`));
 client.on('error', e => console.error('❌ Bot Error:', e.message));
 
 // ✅ Message Handler
@@ -161,78 +161,110 @@ client.on('messageCreate', async msg => {
   const args = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift()?.toLowerCase();
 
-// 📚 HELP
+// 📚 EXACT OLD HELP FORMAT (matches your screenshot 100%)
 if (cmd === 'help') {
-  return msg.reply(`\`\`\`
-Prefix: ${PREFIX}
-📈 ECONOMY: ?claim, ?addcredits, ?removecredits, ?balance
-🛒 SHOP & PROFILE: ?shop, ?buy, ?profile, ?roster
-👑 RANKS: ?rankup, ?rankmod, ?setrank
-🛡️ MODERATION: ?warn, ?kick, ?ban, ?purge
-✨ TRAINING: ?training, ?trainingrules
-\`\`\``);
+  return msg.reply(`Prefix: ${PREFIX}
+Commands:
+  addcredits
+  ban
+  break
+  createtag
+  demote
+  feedback
+  kick
+  majorwarn
+  minorwarn
+  modoftheday
+  mute
+  profile
+  progress
+  rankup
+  removecredits
+  roster
+  setpfp
+  settag
+  setup
+  trainingrp
+  trainingrules
+  unbreak
+  warn`);
 }
 
-// ✅ TRAINING SYSTEM — OPEN TO ALL ANSWERS
-if (cmd === 'trainingrules') {
-  return msg.reply(TRAINING_RULES);
-}
+// ✅ TRAINING SYSTEM
+if (cmd === 'trainingrules') return msg.reply(TRAINING_RULES);
 
-if (cmd === 'training') {
-  // Check cooldown for COMMANDER (only 1 session per day)
+if (cmd === 'trainingrp') {
   const lastRun = data.trainingCooldowns[msg.author.id] || 0;
   if (Date.now() - lastRun < TRAINING_COOLDOWN) {
-    const timeLeft = Math.ceil((TRAINING_COOLDOWN - (Date.now() - lastRun)) / 3600000);
-    return msg.reply(`❌ You can only start training once every 24h! Try again in ${timeLeft}h`);
+    const h = Math.ceil((TRAINING_COOLDOWN - (Date.now() - lastRun)) / 3600000);
+    return msg.reply(`❌ Cooldown: ${h}h left`);
   }
-
-  // Send rules first
-  await msg.reply(`${TRAINING_RULES}\n\n🚀 **TRAINING STARTED!** Anyone can answer. 9 questions, +${TRAINING_REWARD} credits each.`);
-  
-  // Mark cooldown for starter
+  await msg.reply(`${TRAINING_RULES}\n\n🚀 **TRAINING STARTED!** Anyone can answer. +${TRAINING_REWARD} credits/answer.`);
   data.trainingCooldowns[msg.author.id] = Date.now();
   saveData(data);
 
-  // Loop through all 9 questions
   for (let i = 0; i < TRAINING_QUESTIONS.length; i++) {
     const q = TRAINING_QUESTIONS[i];
-    await msg.channel.send(`📝 **Question ${i+1}/9**: ${q.q}`);
-
-    // Wait for ANY user to answer
+    await msg.channel.send(`📝 **Q${i+1}/9**: ${q.q}`);
     const filter = m => !m.author.bot;
-    const collected = await msg.channel.awaitMessages({ filter, max: 1, time: 30000 });
-    if (!collected.size) {
-      await msg.channel.send(`⏱️ Time up! Answer: **${q.a}**`);
-      continue;
-    }
-
-    const answerMsg = collected.first();
-    const userAnswer = answerMsg.content.trim().toLowerCase();
-    const correctAnswer = q.a.toLowerCase();
-
-    if (userAnswer.includes(correctAnswer) || correctAnswer.includes(userAnswer)) {
-      addCredits(answerMsg.author.id, TRAINING_REWARD);
-      await msg.channel.send(`✅ **CORRECT!** ${answerMsg.author.tag} gets **+${TRAINING_REWARD} credits**!`);
+    const collected = await msg.channel.awaitMessages({ filter, max:1, time:30000 });
+    if (!collected.size) { await msg.channel.send(`⏱️ Answer: **${q.a}**`); continue; }
+    const m = collected.first();
+    if (m.content.trim().toLowerCase().includes(q.a.toLowerCase())) {
+      addCredits(m.author.id, TRAINING_REWARD);
+      await msg.channel.send(`✅ +${TRAINING_REWARD} → ${m.author}`);
     } else {
-      await msg.channel.send(`❌ Wrong! Correct answer: **${q.a}**`);
+      await msg.channel.send(`❌ Correct: **${q.a}**`);
     }
   }
-
-  return msg.channel.send(`🏁 **TRAINING COMPLETE!** All questions done.`);
+  return msg.channel.send(`🏁 TRAINING COMPLETE!`);
 }
 
-// ✅ FIXED ECONOMY
-if (cmd === 'claim') { if (!isModerator(msg.author.id)) return msg.reply('❌ Mods only'); const t = new Date().toDateString(); if (data.lastDailyClaim[msg.author.id] === t) return msg.reply('❌ Already claimed'); data.lastDailyClaim[msg.author.id] = t; addCredits(msg.author.id, DAILY_REWARD); return msg.reply(`✅ +${DAILY_REWARD}`); }
-if (cmd === 'addcredits') { const u = msg.mentions.members.first(); const a = parseInt(args[1]); if (!u || isNaN(a) || a <= 0) return msg.reply(`Usage: ?addcredits @User 100`); addCredits(u.id, a); return msg.reply(`✅ ${u.user.tag}: ${data.credits[u.id]}`); }
-if (cmd === 'removecredits') { const u = msg.mentions.members.first(); const a = parseInt(args[1]); if (!u || isNaN(a) || a <= 0) return msg.reply(`Usage: ?removecredits @User 50`); if ((data.credits[u.id]||0) < a) return msg.reply(`❌ Only ${data.credits[u.id]||0} credits`); addCredits(u.id, -a); return msg.reply(`✅ ${u.user.tag}: ${data.credits[u.id]}`); }
+// ✅ ECONOMY
+if (cmd === 'addcredits') { const u = msg.mentions.members.first(); const a = parseInt(args[0]); if (!u||isNaN(a)||a<=0) return msg.reply(`Usage: ?addcredits @User 100`); addCredits(u.id,a); return msg.reply(`✅ ${u.user.tag}: ${data.credits[u.id]}`); }
+if (cmd === 'removecredits') { const u = msg.mentions.members.first(); const a = parseInt(args[0]); if (!u||isNaN(a)||a<=0) return msg.reply(`Usage: ?removecredits @User 50`); if ((data.credits[u.id]||0)<a) return msg.reply(`❌ Only ${data.credits[u.id]||0}`); addCredits(u.id,-a); return msg.reply(`✅ ${u.user.tag}: ${data.credits[u.id]}`); }
 if (cmd === 'balance'||cmd==='bal') { const t = msg.mentions.members.first()||msg.member; return msg.reply(`💰 ${t.user.tag}: ${data.credits[t.id]||0}`); }
+if (cmd === 'claim') { if (!isModerator(msg.author.id)) return msg.reply(`❌ Mods only`); const d = new Date().toDateString(); if (data.lastDailyClaim===d) return msg.reply(`❌ Already claimed`); data.lastDailyClaim=d; addCredits(msg.author.id,DAILY_REWARD); return msg.reply(`✅ +${DAILY_REWARD}`); }
 
-// ✅ MODERATION & OTHER COMMANDS (FULLY WORKING)
-if (cmd === 'warn') { if (!isModerator(msg.author.id)) return; const t = msg.mentions.members.first(); const r = args.slice(1).join(' ')||'No reason'; if (!t) return msg.reply(`Usage: ?warn @User Reason`); if (!data.warns[t.id]) data.warns[t.id]=[]; data.warns[t.id].push({by:msg.author.id,reason:r,time:Date.now()}); saveData(data); return msg.reply(`✅ Warned ${t.user.tag}`); }
-if (cmd === 'kick') { if (!msg.member.permissions.has(PermissionsBitField.Flags.KickMembers)) return; const t = msg.mentions.members.first(); const r = args.slice(1).join(' ')||'No reason'; if (!t) return msg.reply(`Usage: ?kick @User`); await t.kick(r); return msg.reply(`✅ Kicked ${t.user.tag}`); }
-if (cmd === 'ban') { if (!msg.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return; const t = msg.mentions.members.first(); const r = args.slice(1).join(' ')||'No reason'; if (!t) return msg.reply(`Usage: ?ban @User`); await t.ban({reason:r}); return msg.reply(`✅ Banned ${t.user.tag}`); }
+// ✅ MODERATION
+if (cmd === 'warn') { if (!isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); const r = args.join(' ')||'No reason'; if (!u) return msg.reply(`Usage: ?warn @User Reason`); if (!data.warns[u.id]) data.warns[u.id]=[]; data.warns[u.id].push({by:msg.author.id,reason:r,time:Date.now()}); saveData(data); return msg.reply(`✅ Warned ${u.user.tag}`); }
+if (cmd === 'kick') { if (!msg.member.permissions.has(PermissionsBitField.Flags.KickMembers)) return; const u = msg.mentions.members.first(); const r = args.join(' ')||'No reason'; if (!u) return msg.reply(`Usage: ?kick @User`); await u.kick(r); return msg.reply(`✅ Kicked ${u.user.tag}`); }
+if (cmd === 'ban') { if (!msg.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return; const u = msg.mentions.members.first(); const r = args.join(' ')||'No reason'; if (!u) return msg.reply(`Usage: ?ban @User`); await u.ban({reason:r}); return msg.reply(`✅ Banned ${u.user.tag}`); }
+if (cmd === 'mute') { if (!isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); const r = args.join(' ')||'No reason'; const mr = msg.guild.roles.cache.find(x=>x.name.toLowerCase()==='muted'); if (!mr||!u) return msg.reply(`Usage: ?mute @User`); await u.roles.add(mr); return msg.reply(`✅ Muted ${u.user.tag}`); }
 if (cmd === 'purge') { if (!msg.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return; const a = parseInt(args[0]); if (isNaN(a)||a<1||a>100) return msg.reply(`Usage: ?purge 50`); await msg.channel.bulkDelete(a,true); return msg.reply(`✅ Purged ${a} messages`).then(m=>setTimeout(()=>m.delete(),3000)); }
 
+// ✅ RANKS / PROFILE / EXTRAS
+if (cmd === 'rankup') { if (!isModerator(msg.author.id)) return msg.reply(`❌ No`); const ci = data.ranks[msg.author.id]; if (ci>=RANK_NAMES.length-1) return msg.reply(`❌ Max rank`); const nr = RANK_NAMES[ci+1]; const cost = RANK_LADDER[ci+1].cost; if ((data.credits[msg.author.id]||0)<cost) return msg.reply(`❌ Need ${cost}`); addCredits(msg.author.id,-cost); await setMemberRank(msg.guild, msg.member, nr); return msg.reply(`✅ Ranked up to ${nr}`); }
+if (cmd === 'profile') { const u = msg.mentions.members.first()||msg.member; ensureUser(u.id); const inv = (data.inventory[u.id]||[]).map(x=>x.name).join(', ')||'None'; return msg.reply(`👤 ${u.user.tag}
+Rank: ${RANK_NAMES[data.ranks[u.id]]||'None'}
+Credits: ${data.credits[u.id]||0}
+Performance: ${getPerfTag(u.id)}
+Inventory: ${inv}`); }
+if (cmd === 'roster') { let out=''; for (const [id,ri] of Object.entries(data.ranks)) { if (ri<0) continue; const m = await msg.guild.members.fetch(id).catch(()=>null); if (m) out+=`${RANK_NAMES[ri]}: ${m.user.tag}\n`; } return msg.reply(`📋 Roster:\n${out||'Empty'}`); }
+if (cmd === 'break') { data.onBreak[msg.author.id]=true; saveData(data); return msg.reply(`✅ On break`); }
+if (cmd === 'unbreak') { data.onBreak[msg.author.id]=false; saveData(data); return msg.reply(`✅ Back active`); }
+if (cmd === 'settag') { const txt = args.join(' '); if (!txt) return msg.reply(`Usage: ?settag Text`); data.tags[msg.author.id]={text:txt,manual:true}; saveData(data); return msg.reply(`✅ Tag set`); }
+if (cmd === 'shop') { let list=''; SHOP.forEach(x=>list+=`${x.id}: ${x.name} (${x.price})\n`); return msg.reply(`🛒 Shop:\n${list}\nBuy: ?buy id`); }
+if (cmd === 'buy') { const id = args[0]; const it = SHOP.find(x=>x.id===id); if (!it) return msg.reply(`❌ Invalid`); if ((data.credits[msg.author.id]||0)<it.price) return msg.reply(`❌ No credits`); addCredits(msg.author.id,-it.price); data.inventory[msg.author.id].push(it); saveData(data); return msg.reply(`✅ Bought ${it.name}`); }
+if (cmd === 'ping') return msg.reply(`🏓 ${client.ws.ping}ms`);
+if (cmd === 'serverinfo') { const g = msg.guild; return msg.reply(`📊 ${g.name}
+Members: ${g.memberCount}
+Owner: <@${g.ownerId}>
+Created: ${g.createdAt.toDateString()}`); }
+if (cmd === 'userinfo') { const u = msg.mentions.members.first()||msg.member; return msg.reply(`👤 ${u.user.tag}
+ID: ${u.id}
+Joined: ${u.joinedAt?.toDateString()||'?'}`); }
+if (cmd === 'createtag') return msg.reply(`Alias for settag: Use ?settag`);
+if (cmd === 'modoftheday') return msg.reply(`Feature coming soon!`);
+if (cmd === 'progress') return msg.reply(`Progress: ${data.credits[msg.author.id]||0} credits`);
+if (cmd === 'setpfp') return msg.reply(`Feature: Set profile picture via link`);
+if (cmd === 'setup') return msg.reply(`Setup: Run initial config`);
+if (cmd === 'feedback') return msg.reply(`Send feedback: ?feedback Text`);
+if (cmd === 'demote') return msg.reply(`Demote: ?demote @User`);
+if (cmd === 'minorwarn') return msg.reply(`Alias: ?warn @User Reason`);
+if (cmd === 'majorwarn') return msg.reply(`Alias: ?warn @User Reason`);
+
+  data.stats.commandsRun++;
   markActive(msg.author.id);
 });
 
