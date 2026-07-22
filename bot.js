@@ -29,7 +29,15 @@ const AUTO_TRAIN_MAX_GAP_MS = 30 * 60 * 60 * 1000;
 // 🔹 YOUR ID — auto-set to Server Manager
 const YOUR_USER_ID = '1198527966972477505';
 
-// 🔹 EXACT ROLE ORDER MATCHING SERVER
+// 🔹 DEFINE CONSTANTS FIRST (FIXES THE ERROR!)
+const TAG_THRESHOLDS = [
+  { min: 0, tag: 'New Moderator' }, 
+  { min: 100, tag: 'Reliable Moderator' },
+  { min: 300, tag: 'Trusted Moderator' }, 
+  { min: 700, tag: 'Elite Moderator' },
+  { min: 1500, tag: 'Legendary Moderator' }
+];
+
 const RANK_LADDER = [
   { name: 'Trial Moderator', cost: 0 },
   { name: 'Moderator', cost: 50 },
@@ -61,7 +69,7 @@ function loadData() {
 function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
 let data = loadData();
 
-// 🔹 AUTO: Set YOU to Server Manager (index = last one)
+// 🔹 AUTO: Set YOU to Server Manager
 const SERVER_MANAGER_INDEX = RANK_LADDER.length - 1;
 if (data.ranks[YOUR_USER_ID] !== SERVER_MANAGER_INDEX) {
   data.ranks[YOUR_USER_ID] = SERVER_MANAGER_INDEX;
@@ -74,6 +82,17 @@ if (data.ranks[YOUR_USER_ID] !== SERVER_MANAGER_INDEX) {
 function getLogChannel(guild) {
   const id = data.config.logChannelId || DEFAULT_LOG_CHANNEL_ID;
   return guild.channels.cache.get(id);
+}
+
+// ---------- Auto Tags Functions ----------
+function computeAutoTag(credits) {
+  let current = TAG_THRESHOLDS[0].tag;
+  for (const t of TAG_THRESHOLDS) if (credits >= t.min) current = t.tag;
+  return current;
+}
+function updateTag(userId) {
+  if (data.tags[userId]?.manual) return;
+  data.tags[userId] = { text: computeAutoTag(data.credits[userId]||0), manual: false };
 }
 
 // ---------- Commands ----------
@@ -95,28 +114,12 @@ function markActive(userId) {
   saveData(data);
 }
 
-// ---------- Auto Tags ----------
-const TAG_THRESHOLDS = [
-  { min: 0, tag: 'New Moderator' }, { min: 100, tag: 'Reliable Moderator' },
-  { min: 300, tag: 'Trusted Moderator' }, { min: 700, tag: 'Elite Moderator' },
-  { min: 1500, tag: 'Legendary Moderator' }
-];
-function computeAutoTag(credits) {
-  let current = TAG_THRESHOLDS[0].tag;
-  for (const t of TAG_THRESHOLDS) if (credits >= t.min) current = t.tag;
-  return current;
-}
-function updateTag(userId) {
-  if (data.tags[userId]?.manual) return;
-  data.tags[userId] = { text: computeAutoTag(data.credits[userId]||0), manual: false };
-}
-
 // ---------- Rank Helpers ----------
 function getRankIndex(userId) { return data.ranks[userId] ?? -1; }
 function findRoleByName(guild, name) { return guild.roles.cache.find(r => r.name === name); }
 const RANK_REQUIREMENTS = { 
   mute:0, warn:0, minorwarn:0, kick:1, majorwarn:1, ban:2, demote:5, 
-  addcredits:5, removecredits:5, rankmod:3 // Head Mod+ only
+  addcredits:5, removecredits:5, rankmod:3
 };
 function hasRequiredRank(userId, cmd) {
   const req = RANK_REQUIREMENTS[cmd];
@@ -287,7 +290,6 @@ client.on('messageCreate', async message => {
     return;
   }
 
-  // ✅ RANKMOD
   if(command==='rankmod'){
     const target=message.mentions.members.first();
     if(!target) return message.reply(`ℹ️ Usage: ${PREFIX}rankmod @user`);
@@ -307,7 +309,6 @@ client.on('messageCreate', async message => {
     return;
   }
 
-  // ✅ FIXED FEEDBACK COMMAND
   if(command==='feedback'){
     const text = args.join(' ').trim();
     if(!text) return message.reply(`ℹ️ Usage: ${PREFIX}feedback your message here`);
@@ -319,10 +320,8 @@ client.on('messageCreate', async message => {
         {name:'Time',value:new Date().toLocaleString(),inline:true}
       )
       .setColor(0x3498DB);
-    // Send to log channel
     const logCh = getLogChannel(message.guild);
     if(logCh) logCh.send({embeds:[embed]});
-    // Save to data
     data.feedbacks.push({from:message.author.id,text,at:Date.now()});
     saveData(data);
     return message.reply('✅ Feedback submitted — thank you!');
