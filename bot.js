@@ -22,7 +22,7 @@ const RANK_LADDER = [
 const RANK_NAMES = RANK_LADDER.map(r => r.name);
 function getRankIndex(name) { return RANK_NAMES.indexOf(name); }
 
-// ✅ FINAL CLEAN SHOP — Exactly what you want
+// ✅ FINAL CLEAN SHOP — No Junk Items
 const SHOP = [
   { id: 'custom_tag', name: 'Custom Tag', desc: 'Set your own profile tag', price: 100 },
   { id: 'color_role', name: 'Custom Color Role', desc: 'Unique colored name/role', price: 250 },
@@ -122,14 +122,44 @@ async function setMemberRank(guild, member, rankName) {
   return { old: RANK_NAMES[oldIdx] || 'None', new: rankName };
 }
 
-client.once('ready', () => console.log('✅ Ready — FINAL CLEAN SHOP, no junk!'));
+client.once('ready', () => console.log('✅ Ready — All Commands Visible!'));
 
 client.on('messageCreate', async msg => {
   if (msg.author.bot || !msg.guild || !msg.content.startsWith(PREFIX)) return;
   const args = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift()?.toLowerCase();
 
-  if (cmd === 'help') return msg.reply(`\`\`\`Prefix: ${PREFIX}\n?addcredits @user <ANY NUMBER>\n?removecredits @user <AMT>\n?claim (+${DAILY_REWARD})\n?shop (Clean & Useful Only)\n?buy <item-id>\n?roster, ?setrank, ?rankup, ?profile\`\`\``);
+  // ✅ FULL FIXED HELP MENU — SHOWS SHOP + ALL COMMANDS
+  if (cmd === 'help') return msg.reply(`\`\`\`
+Prefix: ${PREFIX}
+Type ?help command for details.
+
+Commands:
+?addcredits    - Give credits to ANY user (ANY amount!)
+?removecredits - Take credits from users
+?claim         - Get +${DAILY_REWARD} daily free credits
+?shop          - 🛒 View clean item shop
+?buy <id>      - Spend credits & buy rewards
+?profile       - View profile, credits & inventory
+?rankup        - Rank up (costs credits)
+?rankmod       - Promote to Trial Moderator
+?roster        - ✅ Full list (NO blanks!)
+?setrank       - [Server Manager] Set ANY rank
+?settag        - Custom profile tag
+?setup         - Admin configuration
+
+--- Moderation ---
+?ban           - Ban user
+?kick          - Kick user
+?mute          - 10m timeout
+?warn          - 2w timeout
+?minorwarn     - 1w timeout
+?majorwarn     - 3w timeout
+?demote        - Demote moderator
+?break         - Pause inactivity check
+?unbreak       - Resume inactivity
+?feedback      - Send feedback
+\`\`\``);
 
   if (cmd === 'claim') {
     if (!isModerator(msg.author.id)) return msg.reply('❌ Mods only');
@@ -207,7 +237,7 @@ client.on('messageCreate', async msg => {
     return msg.reply({ embeds: [embed] });
   }
 
-  if (['break','unbreak','warn','mute','kick','ban','feedback','rankmod'].includes(cmd)) markActive(msg.author.id);
+  if (['break','unbreak','warn','mute','kick','ban','feedback','rankmod','settag','setup','demote','minorwarn','majorwarn'].includes(cmd)) markActive(msg.author.id);
 });
 
 client.login(process.env.BOT_TOKEN);
