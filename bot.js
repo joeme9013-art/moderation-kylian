@@ -148,7 +148,7 @@ INITIAL_PRESETS.forEach(u => {
 });
 saveData(data);
 
-// ✅ FIXED: No more infinite loop! ensureUser never calls tag functions
+// ✅ FIXED: No more infinite loop!
 function ensureUser(userId) {
   if (data.ranks[userId] === undefined) data.ranks[userId] = -1;
   if (data.credits[userId] === undefined) data.credits[userId] = 0;
@@ -212,7 +212,7 @@ function isModerator(id) { ensureUser(id); return (data.ranks[id]??-1) >= 0; }
 function isServerManager(id) { ensureUser(id); return data.ranks[id] === getRankIndex('Server Manager'); }
 
 // ✅ Error Safe
-client.once('ready', () => console.log(`✅ Logged in — NO CRASHES!`));
+client.once('ready', () => console.log(`✅ Logged in — FULL HELP MENU + NO CRASHES!`));
 client.on('error', err => console.error('❌ Bot Error:', err.message));
 
 client.on('messageCreate', async msg => {
@@ -221,11 +221,25 @@ client.on('messageCreate', async msg => {
   const args = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift()?.toLowerCase();
 
+  // ✅ FULL HELP MENU RESTORED
   if (cmd === 'help') return msg.reply(`\`\`\`
 Prefix: ${PREFIX}
-?addcredits ?removecredits ?claim (+${DAILY_REWARD})
-?shop ?buy <id> ?profile ?rankup
-?rankmod ?roster ?setrank [Manager]
+?addcredits    - Give credits to a user
+?removecredits - Take credits from a user
+?claim         - Get daily +${DAILY_REWARD} credits
+?shop          - View credit shop
+?buy <id>      - Buy an item from shop
+?profile       - View your profile & badges
+?rankup        - Upgrade your rank
+?rankmod       - Promote someone to Trial Moderator
+?roster        - View full mod list with badges
+?setrank       - [Server Manager] Set any rank
+?settag        - Set custom profile tag
+?setup         - Configure bot channels
+
+Moderation Commands:
+?ban, ?kick, ?mute, ?warn, ?minorwarn, ?majorwarn, ?demote
+?break, ?unbreak, ?feedback
 \`\`\``);
 
   if (cmd === 'claim') {
@@ -233,7 +247,7 @@ Prefix: ${PREFIX}
     const today = new Date().toDateString();
     if (data.lastDailyClaim[msg.author.id] === today) return msg.reply('❌ Already claimed today');
     data.lastDailyClaim[msg.author.id] = today; addCredits(msg.author.id, DAILY_REWARD);
-    return msg.reply(`✅ +${DAILY_REWARD} credits!`);
+    return msg.reply(`✅ +${DAILY_REWARD} daily credits!`);
   }
 
   if (cmd === 'addcredits') {
@@ -258,7 +272,7 @@ Prefix: ${PREFIX}
     addCredits(msg.author.id, -item.price);
     data.inventory[msg.author.id].push(item);
     saveData(data);
-    return msg.reply(`✅ Bought **${item.icon||''} ${item.name}**`);
+    return msg.reply(`✅ Bought **${item.icon||''} ${item.name}** — visible in roster/profile!`);
   }
 
   if (cmd === 'roster') {
@@ -287,6 +301,8 @@ Prefix: ${PREFIX}
       ).setColor(0x5865F2);
     return msg.reply({ embeds: [embed] });
   }
+
+  if (['rankup','setrank','warn','mute','kick','ban','demote','rankmod','settag','setup','break','unbreak','feedback'].includes(cmd)) markActive(msg.author.id);
 });
 
 client.login(process.env.BOT_TOKEN || '');
