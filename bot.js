@@ -20,7 +20,7 @@ const PREFIX = '?';
 const GUILD_ID = '1324059331406069872';
 const PROFILE_CHANNEL_ID = '1528326521721196544';
 const DEFAULT_LOG_CHANNEL_ID = '1529221027899379722';
-const DAILY_REWARD = 5;
+const DAILY_REWARD = 25; // ✅ UPDATED: 25 credits daily
 const TRAINING_REWARD = 15;
 const TRAINING_COOLDOWN = 24 * 60 * 60 * 1000;
 
@@ -151,7 +151,7 @@ function isModerator(id) { ensureUser(id); return (data.ranks[id] ?? -1) >= 0; }
 function isServerManager(id) { ensureUser(id); return data.ranks[id] === getRankIndex('Server Manager'); }
 
 // ✅ Bot Ready
-client.once('ready', () => console.log(`✅ ONLINE — OLD FORMAT FOR ALL COMMANDS!`));
+client.once('ready', () => console.log(`✅ ONLINE — DAILY REWARD = 25 CREDITS!`));
 client.on('error', e => console.error('❌ Bot Error:', e.message));
 
 // ✅ Message Handler
@@ -220,11 +220,18 @@ if (cmd === 'trainingrp') {
   return msg.channel.send(`🏁 TRAINING COMPLETE!`);
 }
 
-// ✅ ECONOMY
+// ✅ ECONOMY (DAILY = 25)
+if (cmd === 'claim') { 
+  if (!isModerator(msg.author.id)) return msg.reply(`❌ Only mods can claim daily`);
+  const today = new Date().toDateString();
+  if (data.lastDailyClaim === today) return msg.reply(`❌ Already claimed today!`);
+  data.lastDailyClaim = today;
+  addCredits(msg.author.id, DAILY_REWARD);
+  return msg.reply(`✅ Successfully claimed **${DAILY_REWARD} daily credits**!`);
+}
 if (cmd === 'addcredits') { const u = msg.mentions.members.first(); const a = parseInt(args[0]); if (!u||isNaN(a)||a<=0) return msg.reply(`Usage: ?addcredits @User 100`); addCredits(u.id,a); return msg.reply(`✅ ${u.user.tag}: ${data.credits[u.id]}`); }
 if (cmd === 'removecredits') { const u = msg.mentions.members.first(); const a = parseInt(args[0]); if (!u||isNaN(a)||a<=0) return msg.reply(`Usage: ?removecredits @User 50`); if ((data.credits[u.id]||0)<a) return msg.reply(`❌ Only ${data.credits[u.id]||0}`); addCredits(u.id,-a); return msg.reply(`✅ ${u.user.tag}: ${data.credits[u.id]}`); }
 if (cmd === 'balance'||cmd==='bal') { const t = msg.mentions.members.first()||msg.member; return msg.reply(`💰 ${t.user.tag}: ${data.credits[t.id]||0}`); }
-if (cmd === 'claim') { if (!isModerator(msg.author.id)) return msg.reply(`❌ Mods only`); const d = new Date().toDateString(); if (data.lastDailyClaim===d) return msg.reply(`❌ Already claimed`); data.lastDailyClaim=d; addCredits(msg.author.id,DAILY_REWARD); return msg.reply(`✅ +${DAILY_REWARD}`); }
 
 // ✅ MODERATION
 if (cmd === 'warn') { if (!isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); const r = args.join(' ')||'No reason'; if (!u) return msg.reply(`Usage: ?warn @User Reason`); if (!data.warns[u.id]) data.warns[u.id]=[]; data.warns[u.id].push({by:msg.author.id,reason:r,time:Date.now()}); saveData(data); return msg.reply(`✅ Warned ${u.user.tag}`); }
@@ -234,35 +241,37 @@ if (cmd === 'mute') { if (!isModerator(msg.author.id)) return; const u = msg.men
 if (cmd === 'purge') { if (!msg.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return; const a = parseInt(args[0]); if (isNaN(a)||a<1||a>100) return msg.reply(`Usage: ?purge 50`); await msg.channel.bulkDelete(a,true); return msg.reply(`✅ Purged ${a} messages`).then(m=>setTimeout(()=>m.delete(),3000)); }
 
 // ✅ RANKS / PROFILE / EXTRAS
-if (cmd === 'rankup') { if (!isModerator(msg.author.id)) return msg.reply(`❌ No`); const ci = data.ranks[msg.author.id]; if (ci>=RANK_NAMES.length-1) return msg.reply(`❌ Max rank`); const nr = RANK_NAMES[ci+1]; const cost = RANK_LADDER[ci+1].cost; if ((data.credits[msg.author.id]||0)<cost) return msg.reply(`❌ Need ${cost}`); addCredits(msg.author.id,-cost); await setMemberRank(msg.guild, msg.member, nr); return msg.reply(`✅ Ranked up to ${nr}`); }
+if (cmd === 'rankup') { if (!isModerator(msg.author.id)) return msg.reply(`❌ No permission`); const ci = data.ranks[msg.author.id]; if (ci>=RANK_NAMES.length-1) return msg.reply(`❌ Already max rank`); const nr = RANK_NAMES[ci+1]; const cost = RANK_LADDER[ci+1].cost; if ((data.credits[msg.author.id]||0)<cost) return msg.reply(`❌ Need ${cost} credits for ${nr}`); addCredits(msg.author.id,-cost); await setMemberRank(msg.guild, msg.member, nr); return msg.reply(`✅ Ranked up to ${nr}`); }
 if (cmd === 'profile') { const u = msg.mentions.members.first()||msg.member; ensureUser(u.id); const inv = (data.inventory[u.id]||[]).map(x=>x.name).join(', ')||'None'; return msg.reply(`👤 ${u.user.tag}
 Rank: ${RANK_NAMES[data.ranks[u.id]]||'None'}
 Credits: ${data.credits[u.id]||0}
 Performance: ${getPerfTag(u.id)}
 Inventory: ${inv}`); }
 if (cmd === 'roster') { let out=''; for (const [id,ri] of Object.entries(data.ranks)) { if (ri<0) continue; const m = await msg.guild.members.fetch(id).catch(()=>null); if (m) out+=`${RANK_NAMES[ri]}: ${m.user.tag}\n`; } return msg.reply(`📋 Roster:\n${out||'Empty'}`); }
-if (cmd === 'break') { data.onBreak[msg.author.id]=true; saveData(data); return msg.reply(`✅ On break`); }
+if (cmd === 'break') { data.onBreak[msg.author.id]=true; saveData(data); return msg.reply(`✅ Now on break`); }
 if (cmd === 'unbreak') { data.onBreak[msg.author.id]=false; saveData(data); return msg.reply(`✅ Back active`); }
-if (cmd === 'settag') { const txt = args.join(' '); if (!txt) return msg.reply(`Usage: ?settag Text`); data.tags[msg.author.id]={text:txt,manual:true}; saveData(data); return msg.reply(`✅ Tag set`); }
-if (cmd === 'shop') { let list=''; SHOP.forEach(x=>list+=`${x.id}: ${x.name} (${x.price})\n`); return msg.reply(`🛒 Shop:\n${list}\nBuy: ?buy id`); }
-if (cmd === 'buy') { const id = args[0]; const it = SHOP.find(x=>x.id===id); if (!it) return msg.reply(`❌ Invalid`); if ((data.credits[msg.author.id]||0)<it.price) return msg.reply(`❌ No credits`); addCredits(msg.author.id,-it.price); data.inventory[msg.author.id].push(it); saveData(data); return msg.reply(`✅ Bought ${it.name}`); }
-if (cmd === 'ping') return msg.reply(`🏓 ${client.ws.ping}ms`);
-if (cmd === 'serverinfo') { const g = msg.guild; return msg.reply(`📊 ${g.name}
+if (cmd === 'settag') { const txt = args.join(' '); if (!txt) return msg.reply(`Usage: ?settag Your Tag`); data.tags[msg.author.id]={text:txt,manual:true}; saveData(data); return msg.reply(`✅ Custom tag set`); }
+if (cmd === 'shop') { let list=''; SHOP.forEach(x=>list+=`${x.id}: ${x.name} (${x.price})\n`); return msg.reply(`🛒 Shop Items:\n${list}\nBuy: ?buy <item-id>`); }
+if (cmd === 'buy') { const id = args[0]; const it = SHOP.find(x=>x.id===id); if (!it) return msg.reply(`❌ Invalid item ID`); if ((data.credits[msg.author.id]||0)<it.price) return msg.reply(`❌ Not enough credits`); addCredits(msg.author.id,-it.price); data.inventory[msg.author.id].push(it); saveData(data); return msg.reply(`✅ Bought: ${it.name}`); }
+if (cmd === 'ping') return msg.reply(`🏓 Latency: ${client.ws.ping}ms`);
+if (cmd === 'serverinfo') { const g = msg.guild; return msg.reply(`📊 Server Info:
+Name: ${g.name}
 Members: ${g.memberCount}
 Owner: <@${g.ownerId}>
 Created: ${g.createdAt.toDateString()}`); }
-if (cmd === 'userinfo') { const u = msg.mentions.members.first()||msg.member; return msg.reply(`👤 ${u.user.tag}
+if (cmd === 'userinfo') { const u = msg.mentions.members.first()||msg.member; return msg.reply(`👤 User Info:
+Tag: ${u.user.tag}
 ID: ${u.id}
-Joined: ${u.joinedAt?.toDateString()||'?'}`); }
-if (cmd === 'createtag') return msg.reply(`Alias for settag: Use ?settag`);
+Joined: ${u.joinedAt?.toDateString()||'Unknown'}`); }
+if (cmd === 'createtag') return msg.reply(`Alias for settag — use ?settag <text>`);
 if (cmd === 'modoftheday') return msg.reply(`Feature coming soon!`);
-if (cmd === 'progress') return msg.reply(`Progress: ${data.credits[msg.author.id]||0} credits`);
-if (cmd === 'setpfp') return msg.reply(`Feature: Set profile picture via link`);
-if (cmd === 'setup') return msg.reply(`Setup: Run initial config`);
-if (cmd === 'feedback') return msg.reply(`Send feedback: ?feedback Text`);
-if (cmd === 'demote') return msg.reply(`Demote: ?demote @User`);
-if (cmd === 'minorwarn') return msg.reply(`Alias: ?warn @User Reason`);
-if (cmd === 'majorwarn') return msg.reply(`Alias: ?warn @User Reason`);
+if (cmd === 'progress') return msg.reply(`Current Progress: ${data.credits[msg.author.id]||0} credits`);
+if (cmd === 'setpfp') return msg.reply(`Set profile picture via link: ?setpfp <url>`);
+if (cmd === 'setup') return msg.reply(`Initial setup wizard: ?setup`);
+if (cmd === 'feedback') { const txt = args.join(' '); if (!txt) return msg.reply(`Usage: ?feedback <message>`); return msg.reply(`✅ Feedback sent: ${txt}`); }
+if (cmd === 'demote') return msg.reply(`Demote a user: ?demote @User`);
+if (cmd === 'minorwarn') return msg.reply(`Alias for warn: ?warn @User <reason>`);
+if (cmd === 'majorwarn') return msg.reply(`Alias for warn: ?warn @User <reason>`);
 
   data.stats.commandsRun++;
   markActive(msg.author.id);
