@@ -3,7 +3,7 @@ const { Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder } = require
 const fs = require('fs');
 const path = require('path');
 
-// ✅ RAILWAY SAFE PATH — No more "ENOENT" errors!
+// ✅ RAILWAY SAFE PATH
 const DATA_FILE = path.resolve('./data.json');
 
 const client = new Client({
@@ -45,7 +45,7 @@ const RANK_LADDER = [
 const RANK_NAMES = RANK_LADDER.map(r => r.name);
 function getRankIndex(name) { return RANK_NAMES.indexOf(name); }
 
-// ✅ EXACTLY 25 ITEMS — Honest Names, No Lies
+// ✅ EXACTLY 25 ITEMS — Honest Names
 const SHOP = [
   { id: 'custom_tag', name: 'Custom Tag', desc: 'Set your own profile tag', price: 100 },
   { id: 'color_role', name: 'Custom Color Role', desc: 'Unique colored name/role', price: 250 },
@@ -88,7 +88,7 @@ const PERF_RULES = {
   verge: { maxCredits: 50, minDaysInactive: 3, minWarns: 2 }
 };
 
-// ✅ SAFE DATA LOAD/SAVE — Never crashes, auto-creates file
+// ✅ SAFE DATA LOAD/SAVE
 function loadData() {
   const defaultData = {
     credits: {}, warns: {}, tags: {}, ranks: {}, lastActive: {}, inactivityWarns: {},
@@ -98,7 +98,6 @@ function loadData() {
 
   try {
     if (!fs.existsSync(DATA_FILE)) {
-      console.log('📄 Creating new data file...');
       fs.writeFileSync(DATA_FILE, JSON.stringify(defaultData, null, 2));
       return defaultData;
     }
@@ -111,10 +110,11 @@ function loadData() {
       ranks: { ...defaultData.ranks, ...d.ranks },
       inventory: { ...defaultData.inventory, ...d.inventory },
       lastActive: { ...defaultData.lastActive, ...d.lastActive },
-      performance: { ...defaultData.performance, ...d.performance }
+      performance: { ...defaultData.performance, ...d.performance },
+      tags: { ...defaultData.tags, ...d.tags }
     };
   } catch (err) {
-    console.error('⚠️ Data reset safe-fail:', err.message);
+    console.error('⚠️ Data safe-load:', err.message);
     return defaultData;
   }
 }
@@ -144,17 +144,17 @@ INITIAL_PRESETS.forEach(u => {
   if (data.credits[u.id] === undefined) data.credits[u.id] = u.credits ?? (u.rank === 'Server Manager' ? 9999 : 0);
   if (!data.performance[u.id]) data.performance[u.id] = { tag: PERFECT_TAGS.GOOD };
   if (!data.inventory[u.id]) data.inventory[u.id] = [];
-  if (!data.tags[u.id]) data.tags[u.id] = { text: getFullTag(u.id), manual: false };
+  if (!data.tags[u.id]) data.tags[u.id] = { text: `${getBaseTag(data.credits[u.id]||0)} | ${PERFECT_TAGS.GOOD}`, manual: false };
 });
 saveData(data);
 
-// ✅ Auto-setup ANYONE — All mods save automatically
+// ✅ FIXED: No more infinite loop! ensureUser never calls tag functions
 function ensureUser(userId) {
   if (data.ranks[userId] === undefined) data.ranks[userId] = -1;
   if (data.credits[userId] === undefined) data.credits[userId] = 0;
   if (!data.performance[userId]) data.performance[userId] = { tag: PERFECT_TAGS.GOOD };
   if (!data.inventory[userId]) data.inventory[userId] = [];
-  if (!data.tags[userId]) data.tags[userId] = { text: getFullTag(userId), manual: false };
+  if (!data.tags[userId]) data.tags[userId] = { text: `${getBaseTag(0)} | ${PERFECT_TAGS.GOOD}`, manual: false };
 }
 
 function getBaseTag(credits = 0) {
@@ -163,7 +163,6 @@ function getBaseTag(credits = 0) {
   return base;
 }
 function getPerfTag(id) {
-  ensureUser(id);
   const credits = data.credits[id] || 0;
   const daysInactive = (Date.now() - (data.lastActive[id] || 0)) / 86400000;
   const warns = (data.warns[id] || []).length;
@@ -186,7 +185,11 @@ function getUserDisplay(userId, name) {
   });
   return `${name} — ${getFullTag(userId)} ${badges.join(' ')}`;
 }
-function refreshTag(id) { ensureUser(id); if (!data.tags[id]?.manual) data.tags[id].text = getFullTag(id); saveData(data); }
+function refreshTag(id) {
+  ensureUser(id);
+  if (!data.tags[id]?.manual) data.tags[id].text = getFullTag(id);
+  saveData(data);
+}
 function addCredits(id, amt) { ensureUser(id); amt = Math.max(0, Number(amt)||0); data.credits[id] += amt; refreshTag(id); }
 function markActive(id) { ensureUser(id); data.lastActive[id] = Date.now(); data.inactivityWarns[id] = 0; }
 async function setMemberRank(guild, member, rankName) {
@@ -205,11 +208,12 @@ async function setMemberRank(guild, member, rankName) {
   saveData(data);
   return { old: RANK_NAMES[oldIdx]||'None', new: rankName };
 }
+function isModerator(id) { ensureUser(id); return (data.ranks[id]??-1) >= 0; }
+function isServerManager(id) { ensureUser(id); return data.ranks[id] === getRankIndex('Server Manager'); }
 
-// ✅ Ready & Error Proof
-client.once('ready', () => console.log(`✅ Logged in as ${client.user.tag} — RAILWAY SAFE!`));
+// ✅ Error Safe
+client.once('ready', () => console.log(`✅ Logged in — NO CRASHES!`));
 client.on('error', err => console.error('❌ Bot Error:', err.message));
-client.on('uncaughtException', err => { console.error('⚠️ Crash prevented:', err.message); });
 
 client.on('messageCreate', async msg => {
   if (msg.author.bot || !msg.guild || !msg.content.startsWith(PREFIX)) return;
@@ -222,7 +226,6 @@ Prefix: ${PREFIX}
 ?addcredits ?removecredits ?claim (+${DAILY_REWARD})
 ?shop ?buy <id> ?profile ?rankup
 ?rankmod ?roster ?setrank [Manager]
-Moderation: ?ban ?kick ?mute ?warn ?demote
 \`\`\``);
 
   if (cmd === 'claim') {
@@ -242,9 +245,8 @@ Moderation: ?ban ?kick ?mute ?warn ?demote
   }
 
   if (cmd === 'shop') {
-    const embed = new EmbedBuilder().setTitle('🛒 Shop').setColor(0xFFD700)
-      .setDescription(`Use ${PREFIX}buy <id> — All items permanent!`);
-    SHOP.forEach(i => embed.addFields({ name: `${i.icon||''} ${i.name} [${i.id}] — ${i.price}`, value: i.desc }));
+    const embed = new EmbedBuilder().setTitle('🛒 Shop').setColor(0xFFD700);
+    SHOP.forEach(i => embed.addFields({ name: `${i.icon||''} ${i.name} — ${i.price}`, value: i.desc }));
     return msg.reply({ embeds: [embed] });
   }
 
@@ -256,7 +258,7 @@ Moderation: ?ban ?kick ?mute ?warn ?demote
     addCredits(msg.author.id, -item.price);
     data.inventory[msg.author.id].push(item);
     saveData(data);
-    return msg.reply(`✅ Bought **${item.icon||''} ${item.name}** — visible in roster/profile!`);
+    return msg.reply(`✅ Bought **${item.icon||''} ${item.name}**`);
   }
 
   if (cmd === 'roster') {
@@ -285,11 +287,6 @@ Moderation: ?ban ?kick ?mute ?warn ?demote
       ).setColor(0x5865F2);
     return msg.reply({ embeds: [embed] });
   }
-
-  if (['rankup','setrank','warn','mute','kick','ban','demote','rankmod'].includes(cmd)) markActive(msg.author.id);
 });
-
-function isModerator(id) { ensureUser(id); return (data.ranks[id]??-1) >= 0; }
-function isServerManager(id) { ensureUser(id); return data.ranks[id] === getRankIndex('Server Manager'); }
 
 client.login(process.env.BOT_TOKEN || '');
