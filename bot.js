@@ -46,60 +46,15 @@ const TRAINING_QUESTIONS = [
 ];
 
 const TRAINING_EXAMPLES = [
-  {
-    q: "Scenario: A user posts explicit NSFW images in chat. What do you do?",
-    options: ["A. 5 minute timeout", "B. 1 day timeout", "C. Permanent ban", "D. Warn only"],
-    correct: "B",
-    answer: "1 day timeout"
-  },
-  {
-    q: "Scenario: Someone spams 10+ messages quickly. What is the punishment?",
-    options: ["A. 1 hour timeout", "B. 1 day timeout", "C. 60 second timeout", "D. Kick"],
-    correct: "C",
-    answer: "60 second timeout"
-  },
-  {
-    q: "Scenario: A user shares private personal info of another member. What applies?",
-    options: ["A. Warn/Remove content", "B. 1 day timeout", "C. Ban", "D. Mute"],
-    correct: "A",
-    answer: "Warn, remove content"
-  },
-  {
-    q: "Scenario: A user bullies and insults others repeatedly. What is the penalty?",
-    options: ["A. 5 minute timeout", "B. 1 hour timeout", "C. 1 day timeout", "D. Ban"],
-    correct: "B",
-    answer: "1 hour timeout"
-  },
-  {
-    q: "Scenario: Someone raids with mass invites/mentions. What action?",
-    options: ["A. 1 day timeout", "B. Kick", "C. Permanent ban", "D. Warn"],
-    correct: "C",
-    answer: "permanent ban"
-  },
-  {
-    q: "Scenario: A user makes racist comments/slurs. What is the punishment?",
-    options: ["A. 5 minute timeout", "B. 1 hour timeout", "C. Warn", "D. Kick"],
-    correct: "A",
-    answer: "5 minute timeout"
-  },
-  {
-    q: "Scenario: Someone promotes illegal political groups/N@z!s. What happens?",
-    options: ["A. Warn", "B. 60s timeout", "C. 1 day timeout", "D. Ban"],
-    correct: "C",
-    answer: "1 day timeout"
-  },
-  {
-    q: "Scenario: A user without permission swears constantly. What applies?",
-    options: ["A. Warn/Stop", "B. 5 min timeout", "C. 1 day timeout", "D. Kick"],
-    correct: "A",
-    answer: "Warn and tell them to stop"
-  },
-  {
-    q: "Scenario: You see someone being friendly and following all rules. What do you do?",
-    options: ["A. Nothing/Encourage", "B. Mute", "C. Warn", "D. Kick"],
-    correct: "A",
-    answer: "Encourage them"
-  }
+  { q: "Scenario: A user posts explicit NSFW images in chat. What do you do?", options: ["A. 5 minute timeout", "B. 1 day timeout", "C. Permanent ban", "D. Warn only"], correct: "B", answer: "1 day timeout" },
+  { q: "Scenario: Someone spams 10+ messages quickly. What is the punishment?", options: ["A. 1 hour timeout", "B. 1 day timeout", "C. 60 second timeout", "D. Kick"], correct: "C", answer: "60 second timeout" },
+  { q: "Scenario: A user shares private personal info of another member. What applies?", options: ["A. Warn/Remove content", "B. 1 day timeout", "C. Ban", "D. Mute"], correct: "A", answer: "Warn, remove content" },
+  { q: "Scenario: A user bullies and insults others repeatedly. What is the penalty?", options: ["A. 5 minute timeout", "B. 1 hour timeout", "C. 1 day timeout", "D. Ban"], correct: "B", answer: "1 hour timeout" },
+  { q: "Scenario: Someone raids with mass invites/mentions. What action?", options: ["A. 1 day timeout", "B. Kick", "C. Permanent ban", "D. Warn"], correct: "C", answer: "permanent ban" },
+  { q: "Scenario: A user makes racist comments/slurs. What is the punishment?", options: ["A. 5 minute timeout", "B. 1 hour timeout", "C. Warn", "D. Kick"], correct: "A", answer: "5 minute timeout" },
+  { q: "Scenario: Someone promotes illegal political groups/N@z!s. What happens?", options: ["A. Warn", "B. 60s timeout", "C. 1 day timeout", "D. Ban"], correct: "C", answer: "1 day timeout" },
+  { q: "Scenario: A user without permission swears constantly. What applies?", options: ["A. Warn/Stop", "B. 5 min timeout", "C. 1 day timeout", "D. Kick"], correct: "A", answer: "Warn and tell them to stop" },
+  { q: "Scenario: You see someone being friendly and following all rules. What do you do?", options: ["A. Nothing/Encourage", "B. Mute", "C. Warn", "D. Kick"], correct: "A", answer: "Encourage them" }
 ];
 
 const RANK_LADDER = [
@@ -152,7 +107,7 @@ function isOwner(id) { return id === BOT_OWNER_ID; }
 function isServerManager(id) { return isOwner(id) || data.ranks[id] === getRankIndex('Server Manager'); }
 function isModerator(id) { ensureUser(id); return isServerManager(id) || data.ranks[id] >= 0; }
 
-client.once('ready', () => console.log(`✅ ONLINE — EXACT PHOTO 2 FORMAT • TRAINING DROPDOWN FIXED`));
+client.once('ready', () => console.log(`✅ ONLINE — EXACT FORMAT`));
 
 client.on('messageCreate', async msg => {
   if (msg.author.bot || !msg.guild || !msg.content.startsWith(PREFIX)) return;
@@ -160,7 +115,6 @@ client.on('messageCreate', async msg => {
   const args = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift()?.toLowerCase();
 
-// 📚 HELP — PERFECT FORMATTING, TRAINING DROPDOWN EXACTLY RIGHT
 if (cmd === 'help') {
   return msg.reply(`Prefix: ${PREFIX}
 
@@ -233,7 +187,6 @@ if (cmd === 'trainingexamples') {
   return msg.channel.send(`SCENARIO TRAINING COMPLETE!`);
 }
 
-// All other commands exactly same
 if (cmd === 'claim') {
   if (!isModerator(msg.author.id)) return msg.reply(`Mods only`);
   const today = new Date().toDateString();
