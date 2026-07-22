@@ -23,13 +23,14 @@ const INACTIVITY_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_INACTIVITY_WARNS = 3;
 const MOD_OF_DAY_BONUS = 50;
+const DAILY_REWARD = 5; // 5 credits daily
 const AUTO_TRAIN_ANSWER_WINDOW_MS = 60 * 1000;
 const AUTO_TRAIN_MIN_GAP_MS = 12 * 60 * 60 * 1000;
 const AUTO_TRAIN_MAX_GAP_MS = 30 * 60 * 60 * 1000;
 
 const YOUR_USER_ID = '1198527966972477505';
 
-// 🔹 EXACT ROLE LIST
+// 🔹 EXACT ROLE LIST (for recognition)
 const RANK_LADDER = [
   { name: 'Trial Moderator', cost: 0 },
   { name: 'Moderator', cost: 50 },
@@ -64,14 +65,15 @@ function loadData() {
     return {
       credits: {}, warns: {}, tags: {}, ranks: {}, lastActive: {},
       inactivityWarns: {}, config: { profileChannelId: PROFILE_CHANNEL_ID, logChannelId: DEFAULT_LOG_CHANNEL_ID },
-      dailyCredits: {}, pfps: {}, onBreak: {}, trainingStats: {}, feedbacks: [],
-      performance: {}
+      dailyCredits: {}, pfps: {}, onBreak: {}, feedbacks: [], performance: {},
+      lastDailyClaim: {} // track daily reward
     };
   }
   const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  parsed.lastActive ??= {}; parsed.inactivityWarns ??= {}; parsed.config ??= { profileChannelId: PROFILE_CHANNEL_ID, logChannelId: DEFAULT_LOG_CHANNEL_ID };
+  parsed.lastActive ??= {}; parsed.inactivityWarns ??= {};
+  parsed.config ??= { profileChannelId: PROFILE_CHANNEL_ID, logChannelId: DEFAULT_LOG_CHANNEL_ID };
   parsed.dailyCredits ??= {}; parsed.pfps ??= {}; parsed.onBreak ??= {};
-  parsed.trainingStats ??= {}; parsed.feedbacks ??= []; parsed.performance ??= {};
+  parsed.feedbacks ??= []; parsed.performance ??= {}; parsed.lastDailyClaim ??= {};
   return parsed;
 }
 function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
@@ -89,7 +91,14 @@ if (data.ranks[YOUR_USER_ID] !== SERVER_MANAGER_INDEX) {
 // ---------- Helpers ----------
 function getLogChannel(guild) { return guild.channels.cache.get(data.config.logChannelId || DEFAULT_LOG_CHANNEL_ID); }
 function getProfileChannel(guild) { return guild.channels.cache.get(data.config.profileChannelId || PROFILE_CHANNEL_ID); }
-function findRoleByName(guild, name) { return guild.roles.cache.find(r => r.name.trim().toLowerCase() === name.trim().toLowerCase()); }
+function findRoleByName(guild, name) { 
+  if (!guild) return null;
+  return guild.roles.cache.find(r => r.name.trim().toLowerCase() === name.trim().toLowerCase()); 
+}
+// ✅ MODERATOR RECOGNITION
+function isModerator(userId) {
+  return getRankIndex(userId) >= 0;
+}
 
 function computeAutoTag(credits) {
   let current = TAG_THRESHOLDS[0].tag;
@@ -115,66 +124,61 @@ function updateTag(userId) {
   saveData(data);
 }
 
-// ---------- COMMAND CATEGORIES & HELP ----------
-const COMMAND_CATEGORIES = {
-  Moderation: ['mute', 'kick', 'ban', 'warn', 'minorwarn', 'majorwarn', 'rankmod', 'demote'],
-  Progression: ['rankup', 'addcredits', 'removecredits', 'profile', 'roster', 'modoftheday'],
-  Training: ['trainingrp'],
-  Utility: ['feedback', 'break', 'unbreak', 'settag', 'setpfp'],
-  Admin: ['setup']
-};
-const ALL_COMMANDS = Object.values(COMMAND_CATEGORIES).flat();
-
-function showHelp(commandOrCategory) {
-  if (!commandOrCategory) {
-    return `\`\`\`
+// ---------- ✅ SIMPLE HELP (NO CATEGORIES) ----------
+function showHelp() {
+  return `\`\`\`
 Prefix: ${PREFIX}
-
 Type ${PREFIX}help command for more info on a command.
-You can also type ${PREFIX}help category for more info on a category.
 
-Categories:
-${Object.keys(COMMAND_CATEGORIES).map(cat => `• ${cat}`).join('\n')}
+Commands:
+${PREFIX}addcredits   - Give credits to a user
+${PREFIX}removecredits - Take credits from a user
+${PREFIX}ban          - Ban a user
+${PREFIX}break        - Pause inactivity checks
+${PREFIX}unbreak      - Return from break
+${PREFIX}claim        - Claim daily reward (${DAILY_REWARD} credits)
+${PREFIX}demote       - Lower a moderator's rank
+${PREFIX}feedback     - Send feedback
+${PREFIX}kick         - Kick a user
+${PREFIX}majorwarn    - 3-week timeout
+${PREFIX}minorwarn    - 1-week timeout
+${PREFIX}mute         - 10-minute timeout
+${PREFIX}profile      - View your/another's profile
+${PREFIX}progress     - View training stats
+${PREFIX}rankmod      - Add new Trial Moderator
+${PREFIX}rankup       - Upgrade your rank
+${PREFIX}roster       - List all moderators
+${PREFIX}settag       - Set custom tag
+${PREFIX}setpfp       - Set profile picture
+${PREFIX}setup        - Configure bot (Admin only)
+${PREFIX}warn         - 2-week timeout
 \`\`\``;
-  }
-  // Category help
-  if (COMMAND_CATEGORIES[commandOrCategory]) {
-    return `\`\`\`
-${commandOrCategory} Commands:
-${COMMAND_CATEGORIES[commandOrCategory].map(c => `  ${PREFIX}${c}`).join('\n')}
-\`\`\``;
-  }
-  // Command help
-  if (ALL_COMMANDS.includes(commandOrCategory)) {
-    const info = {
-      mute: 'Timeout user 10min → Usage: ?mute @user',
-      kick: 'Kick user → Usage: ?kick @user',
-      ban: 'Ban user → Usage: ?ban @user',
-      warn: '2-week timeout → Usage: ?warn @user',
-      minorwarn: '1-week timeout → Usage: ?minorwarn @user',
-      majorwarn: '3-week timeout → Usage: ?majorwarn @user',
-      rankmod: 'Add new Trial Mod → Usage: ?rankmod @user',
-      demote: 'Lower rank → Usage: ?demote @user',
-      rankup: 'Upgrade rank (costs credits) → Usage: ?rankup',
-      addcredits: 'Give credits → Usage: ?addcredits @user amount',
-      removecredits: 'Take credits → Usage: ?removecredits @user amount',
-      profile: 'View/Send profile → Usage: ?profile [@user]',
-      roster: 'List all mods → Usage: ?roster',
-      modoftheday: 'Pick Mod of Day → Admin only',
-      trainingrp: 'Start A/B/C/D training → Usage: ?trainingrp',
-      feedback: 'Send feedback → Usage: ?feedback text',
-      break: 'Pause inactivity checks → Usage: ?break',
-      unbreak: 'Return from break → Usage: ?unbreak',
-      settag: 'Set custom tag → Usage: ?settag [@user] text',
-      setpfp: 'Set profile image → Usage: ?setpfp link',
-      setup: 'Configure bot → Admin only: logchannel / profilechannel'
-    };
-    return `\`\`\`
-${PREFIX}${commandOrCategory}
-${info[commandOrCategory] || 'No description'}
-\`\`\``;
-  }
-  return `❌ Not found. Use ${PREFIX}help to list categories.`;
+}
+function showCommandHelp(cmd) {
+  const info = {
+    addcredits: `Usage: ${PREFIX}addcredits @user amount → Give credits`,
+    removecredits: `Usage: ${PREFIX}removecredits @user amount → Remove credits`,
+    ban: `Usage: ${PREFIX}ban @user → Ban user`,
+    break: `Usage: ${PREFIX}break → Pause inactivity`,
+    unbreak: `Usage: ${PREFIX}unbreak → Resume activity tracking`,
+    claim: `Usage: ${PREFIX}claim → Get ${DAILY_REWARD} credits once every 24h`,
+    demote: `Usage: ${PREFIX}demote @user → Lower rank`,
+    feedback: `Usage: ${PREFIX}feedback text → Send feedback`,
+    kick: `Usage: ${PREFIX}kick @user → Kick user`,
+    majorwarn: `Usage: ${PREFIX}majorwarn @user → 3-week timeout`,
+    minorwarn: `Usage: ${PREFIX}minorwarn @user → 1-week timeout`,
+    mute: `Usage: ${PREFIX}mute @user → 10-minute timeout`,
+    profile: `Usage: ${PREFIX}profile [@user] → View profile`,
+    progress: `Usage: ${PREFIX}progress [@user] → Training stats`,
+    rankmod: `Usage: ${PREFIX}rankmod @user → Make Trial Mod`,
+    rankup: `Usage: ${PREFIX}rankup → Spend credits to rank up`,
+    roster: `Usage: ${PREFIX}roster → List all mods`,
+    settag: `Usage: ${PREFIX}settag [@user] text → Set custom tag`,
+    setpfp: `Usage: ${PREFIX}setpfp image-link → Set profile pic`,
+    setup: `Usage: ${PREFIX}setup logchannel/#profilechannel → Admin only`,
+    warn: `Usage: ${PREFIX}warn @user → 2-week timeout`
+  };
+  return `\`\`\`${PREFIX}${cmd}\n${info[cmd] || 'No description'}\`\`\``;
 }
 
 // ---------- Core Systems ----------
@@ -197,7 +201,7 @@ function hasRequiredRank(userId, cmd) {
   return req === undefined ? true : getRankIndex(userId) >= req;
 }
 
-// ---------- TRAINING (A/B/C/D) ----------
+// ---------- TRAINING (REMOVED TRAININGRP COMMAND) ----------
 const quiz = [
   { q: 'NSFW content?', options: ['A: 1h', 'B: 1d timeout', 'C: Ban', 'D: Warn'], answer: 'B', rule: 'Rule 1 → 1 day timeout' },
   { q: 'Spam?', options: ['A: Kick', 'B: 10m', 'C: 60s timeout', 'D: Ban'], answer: 'C', rule: 'Rule 2 → 60s' },
@@ -206,7 +210,6 @@ const quiz = [
   { q: 'Bullying?', options: ['A: 1h timeout', 'B: 5m', 'C: Ban', 'D: Mute'], answer: 'A', rule: 'Rule 6 → 1h' }
 ];
 function shuffle(arr) { const c=[...arr]; for(let i=c.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[c[i],c[j]]=[c[j],c[i]];} return c; }
-const activeSessions = new Set();
 function recordTrainingResult(id, correct) {
   const s = data.trainingStats[id]||{taken:0,correct:0}; s.taken++; if(correct)s.correct++;
   data.trainingStats[id]=s; saveData(data);
@@ -253,7 +256,7 @@ async function runAutoTraining(guild) {
   const q=quiz[Math.floor(Math.random()*quiz.length)];
   await chan.send(`📚 **Surprise Training!**\n${q.q}\n${q.options.join('\n')}\nAnswer A/B/C/D in 60s`);
   try{
-    const collected=await chan.awaitMessages({filter:m=>!m.bot&&data.ranks[m.author.id],max:1,time:AUTO_TRAIN_ANSWER_WINDOW_MS,errors:['time']});
+    const collected=await chan.awaitMessages({filter:m=>!m.bot&&isModerator(m.author.id),max:1,time:AUTO_TRAIN_ANSWER_WINDOW_MS,errors:['time']});
     const ans=collected.first(); const ok=ans.content.trim().toUpperCase()===q.answer;
     recordTrainingResult(ans.author.id,ok);
     if(ok){ addCredits(ans.author.id,CREDIT_REWARDS.correctAnswer); chan.send(`✅ ${q.rule}`); }
@@ -298,7 +301,7 @@ client.once('ready', () => {
     setInterval(()=>pickModeratorOfTheDay(guild),CHECK_INTERVAL_MS);
     scheduleNextAutoTraining(guild);
   }
-  console.log('✅ Bot Ready — Help System Fixed + All Commands Working');
+  console.log('✅ Bot Ready — Simple Help, No TrainingRP, Daily Reward, Mod Recognition');
 });
 
 client.on('messageCreate', async message => {
@@ -306,19 +309,31 @@ client.on('messageCreate', async message => {
   const args=message.content.slice(PREFIX.length).trim().split(/\s+/);
   const command=args.shift()?.toLowerCase();
 
-  // 🔹 HELP SYSTEM (EXACTLY AS REQUESTED)
+  // 🔹 HELP
   if(command==='help'){
-    return message.reply(showHelp(args[0]?.toLowerCase()));
+    if(args[0]) return message.reply(showCommandHelp(args[0]));
+    return message.reply(showHelp());
+  }
+
+  // 🔹 DAILY CLAIM (5 CREDITS)
+  if(command==='claim'){
+    if(!isModerator(message.author.id)) return message.reply('❌ Only moderators can claim daily rewards');
+    const today = new Date().toDateString();
+    if(data.lastDailyClaim[message.author.id] === today) return message.reply('❌ Already claimed today! Come back tomorrow');
+    data.lastDailyClaim[message.author.id] = today;
+    addCredits(message.author.id, DAILY_REWARD);
+    return message.reply(`✅ Claimed **${DAILY_REWARD}** daily credits!`);
   }
 
   // Permission check
+  const ALL_COMMANDS = ['addcredits','removecredits','ban','break','unbreak','demote','feedback','kick','majorwarn','minorwarn','mute','profile','progress','rankmod','rankup','roster','settag','setpfp','setup','warn'];
   if(ALL_COMMANDS.includes(command)) markActive(message.author.id);
   if(RANK_REQUIREMENTS[command]!==undefined&&!hasRequiredRank(message.author.id,command)){
     const reqName=RANK_LADDER[RANK_REQUIREMENTS[command]].name;
     return message.reply(`🚫 Need **${reqName}** or higher`);
   }
 
-  // 🔹 SETUP COMMAND
+  // 🔹 SETUP
   if(command==='setup'){
     if(!message.member.permissions.has(PermissionsBitField.Flags.Administrator))
       return message.reply('❌ Admin only');
@@ -338,7 +353,7 @@ client.on('messageCreate', async message => {
   }
 
   if(command==='break'){
-    if(getRankIndex(message.author.id)<0) return message.reply('❌ Not on mod team');
+    if(!isModerator(message.author.id)) return message.reply('❌ Not on mod team');
     data.onBreak[message.author.id]=Date.now(); saveData(data);
     return message.reply('🌴 Break enabled — inactivity paused');
   }
@@ -350,16 +365,16 @@ client.on('messageCreate', async message => {
   if(command==='rankmod'){
     const target=message.mentions.members.first();
     if(!target) return message.reply(`Usage: ${PREFIX}rankmod @user`);
-    if(getRankIndex(target.id)>=0) return message.reply('❌ Already a moderator');
+    if(isModerator(target.id)) return message.reply('❌ Already a moderator');
     const trialRole=findRoleByName(message.guild, 'Trial Moderator');
     if(!trialRole) return message.reply('❌ Role "Trial Moderator" not found');
     try {
       await target.roles.add(trialRole);
       data.ranks[target.id]=0; data.credits[target.id]=0;
-      data.performance[target.id]={tag:'Good'}; // START GOOD
+      data.performance[target.id]={tag:'Good'};
       updateTag(target.id); saveData(data);
       return message.reply(`✅ ${target} → **Trial Moderator** | Performance: **Good**`);
-    }catch(e){ console.error(e); return message.reply('❌ Failed — check bot role hierarchy'); }
+    }catch(e){ return message.reply('❌ Failed — check bot role hierarchy'); }
   }
 
   if(command==='feedback'){
@@ -494,24 +509,6 @@ client.on('messageCreate', async message => {
     }catch{ return message.reply('❌ Role update failed — check bot hierarchy'); }
     data.credits[userId]-=next.cost; data.ranks[userId]=currIdx+1; updateTag(userId); saveData(data);
     return message.reply(`🎉 Promoted to **${next.name}**! Remaining: ${data.credits[userId]} credits`);
-  }
-
-  if(command==='trainingrp'){
-    if(activeSessions.has(message.author.id)) return message.reply('❌ Session already in progress');
-    activeSessions.add(message.author.id);
-    let score=0; const qs=shuffle(quiz);
-    await message.reply(`📘 Training — answer **A/B/C/D**`);
-    for(const q of qs){
-      await message.channel.send(`\n**${q.q}**\n${q.options.join('\n')}`);
-      try{
-        const coll=await message.channel.awaitMessages({filter:m=>m.author.id===message.author.id,max:1,time:30000,errors:['time']});
-        const ok=coll.first().content.trim().toUpperCase()===q.answer;
-        if(ok){ score++; addCredits(message.author.id,CREDIT_REWARDS.correctAnswer); await message.channel.send(`✅ ${q.rule}`); }
-        else await message.channel.send(`❌ ${q.rule}`);
-      }catch{ await message.channel.send(`⏱️ Time up — ${q.rule}`); }
-    }
-    activeSessions.delete(message.author.id);
-    return message.channel.send(`🏁 Done! Score: ${score}/${qs.length}`);
   }
 });
 
