@@ -1,9 +1,15 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, PermissionsBitField } = require('discord.js');
+const { Client, GatewayIntentBits, PermissionsBitField, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
 const DATA_FILE = path.resolve('./data.json');
+const PREFIX = '?'; // kept for fallback, but slash is primary
+const DAILY_REWARD = 25;
+const TRAINING_Q_REWARD = 15;
+const TRAINING_EX_REWARD = 30;
+const TRAINING_COOLDOWN = 24 * 60 * 60 * 1000;
+const BOT_OWNER_ID = '1222684836091658330';
 
 const client = new Client({
   intents: [
@@ -11,15 +17,27 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
-  ]
+    GatewayIntentBits.DirectMessages, // ✅ Enable DMs
+  ],
+  partials: ['CHANNEL'] // ✅ Required for DMs
 });
 
-const PREFIX = '?';
-const DAILY_REWARD = 25;
-const TRAINING_Q_REWARD = 15;
-const TRAINING_EX_REWARD = 30;
-const TRAINING_COOLDOWN = 24 * 60 * 60 * 1000;
-const BOT_OWNER_ID = '1222684836091658330';
+// ─────────────────────────────────────────────────────────────
+// EXACT HELP TEXT FORMAT — NO DEVIATION
+// ─────────────────────────────────────────────────────────────
+const HELP_TEXT = `Prefix: ${PREFIX}
+
+ECONOMY: claim, addcredits, removecredits, balance, richlist
+SHOP & PROFILE: shop, buy, profile, roster, settag
+RANKS: rankup, rankmod, setrank, mystats
+MODERATION: warn, warnings, clearwarns, kick, ban, unban, mute, unmute, purge
+EXTRAS: ping, uptime, serverinfo, userinfo, avatar, say, embed
+TRAINING:
+  training
+  trainingexamples
+trainingrules
+
+Type /help command for more info on a command.`;
 
 const TRAINING_RULES = `RULE BOOK!
 1. NSFW → 1 day Timeout
@@ -82,6 +100,9 @@ const SHOP = [
   { id: 'signature', name: 'Signature', price: 200 }
 ];
 
+// ─────────────────────────────────────────────────────────────
+// DATA HELPERS
+// ─────────────────────────────────────────────────────────────
 function loadData() {
   const defaultData = { credits: {}, warns: {}, tags: {}, ranks: {}, lastDailyClaim: {}, inventory: {}, trainingCooldowns: {} };
   try {
@@ -107,125 +128,167 @@ function isOwner(id) { return id === BOT_OWNER_ID; }
 function isServerManager(id) { return isOwner(id) || data.ranks[id] === getRankIndex('Server Manager'); }
 function isModerator(id) { ensureUser(id); return isServerManager(id) || data.ranks[id] >= 0; }
 
-client.once('ready', () => console.log(`✅ ONLINE — EXACT FORMAT`));
+// ─────────────────────────────────────────────────────────────
+// SLASH COMMAND DEFINITIONS
+// ─────────────────────────────────────────────────────────────
+const commands = [
+  new SlashCommandBuilder().setName('help').setDescription('Shows all commands'),
+  new SlashCommandBuilder().setName('training').setDescription('Start moderator training'),
+  new SlashCommandBuilder().setName('trainingexamples').setDescription('Start scenario training'),
+  new SlashCommandBuilder().setName('trainingrules').setDescription('Show training rules'),
+  new SlashCommandBuilder().setName('claim').setDescription('Claim daily credits'),
+  new SlashCommandBuilder().setName('addcredits').setDescription('Add credits to user')
+    .addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true))
+    .addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true)),
+  new SlashCommandBuilder().setName('removecredits').setDescription('Remove credits from user')
+    .addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true))
+    .addIntegerOption(o=>o.setName('amount').setDescription('Amount').setRequired(true)),
+  new SlashCommandBuilder().setName('balance').setDescription('Check balance')
+    .addUserOption(o=>o.setName('user').setDescription('User')),
+  new SlashCommandBuilder().setName('richlist').setDescription('Top richest users'),
+  new SlashCommandBuilder().setName('shop').setDescription('View shop'),
+  new SlashCommandBuilder().setName('buy').setDescription('Buy item')
+    .addStringOption(o=>o.setName('item').setDescription('Item ID').setRequired(true)),
+  new SlashCommandBuilder().setName('profile').setDescription('View profile')
+    .addUserOption(o=>o.setName('user').setDescription('User')),
+  new SlashCommandBuilder().setName('roster').setDescription('View moderator roster'),
+  new SlashCommandBuilder().setName('settag').setDescription('Set your profile tag')
+    .addStringOption(o=>o.setName('tag').setDescription('Tag text').setRequired(true)),
+  new SlashCommandBuilder().setName('rankup').setDescription('Rank up using credits'),
+  new SlashCommandBuilder().setName('rankmod').setDescription('Promote to Trial Moderator')
+    .addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true)),
+  new SlashCommandBuilder().setName('setrank').setDescription('Set user rank')
+    .addUserOption(o=>o.setName('user').setDescription('Target user').setRequired(true))
+    .addStringOption(o=>o.setName('rank').setDescription('Rank name').setRequired(true)),
+  new SlashCommandBuilder().setName('mystats').setDescription('View your stats'),
+  new SlashCommandBuilder().setName('warn').setDescription('Warn a user')
+    .addUserOption(o=>o.setName('user').setDescription('Target').setRequired(true))
+    .addStringOption(o=>o.setName('reason').setDescription('Reason')),
+  new SlashCommandBuilder().setName('warnings').setDescription('View user warnings')
+    .addUserOption(o=>o.setName('user').setDescription('User')),
+  new SlashCommandBuilder().setName('clearwarns').setDescription('Clear user warnings')
+    .addUserOption(o=>o.setName('user').setDescription('User').setRequired(true)),
+  new SlashCommandBuilder().setName('ping').setDescription('Bot latency'),
+  new SlashCommandBuilder().setName('uptime').setDescription('Bot uptime'),
+  new SlashCommandBuilder().setName('serverinfo').setDescription('Server info'),
+  new SlashCommandBuilder().setName('userinfo').setDescription('User info')
+    .addUserOption(o=>o.setName('user').setDescription('User')),
+  new SlashCommandBuilder().setName('avatar').setDescription('View avatar')
+    .addUserOption(o=>o.setName('user').setDescription('User')),
+];
 
-client.on('messageCreate', async msg => {
-  if (msg.author.bot || !msg.guild || !msg.content.startsWith(PREFIX)) return;
-  ensureUser(msg.author.id);
-  const args = msg.content.slice(PREFIX.length).trim().split(/\s+/);
-  const cmd = args.shift()?.toLowerCase();
-
-if (cmd === 'help') {
-  return msg.reply(`Prefix: ${PREFIX}
-
-ECONOMY: claim, addcredits, removecredits, balance, richlist
-SHOP & PROFILE: shop, buy, profile, roster, settag
-RANKS: rankup, rankmod, setrank, mystats
-MODERATION: warn, warnings, clearwarns, kick, ban, unban, mute, unmute, purge
-EXTRAS: ping, uptime, serverinfo, userinfo, avatar, say, embed
-TRAINING:
-  training
-  trainingexamples
-trainingrules
-
-Type ${PREFIX}help command for more info on a command.`);
-}
-
-if (cmd === 'trainingrules') return msg.reply(TRAINING_RULES);
-
-if (cmd === 'training') {
-  const lastRun = data.trainingCooldowns[msg.author.id] || 0;
-  if (Date.now() - lastRun < TRAINING_COOLDOWN) {
-    const h = Math.ceil((TRAINING_COOLDOWN - (Date.now() - lastRun)) / 3600000);
-    return msg.reply(`Cooldown: ${h}h left`);
-  }
-  await msg.reply(`${TRAINING_RULES}\n\nTRAINING STARTED! +${TRAINING_Q_REWARD} credits each.`);
-  data.trainingCooldowns[msg.author.id] = Date.now();
-  saveData();
-
-  for (let i = 0; i < TRAINING_QUESTIONS.length; i++) {
-    const q = TRAINING_QUESTIONS[i];
-    await msg.channel.send(`Q${i+1}/9: ${q.q}`);
-    const collected = await msg.channel.awaitMessages({ filter: m => !m.author.bot, max:1, time:30000 });
-    if (!collected.size) { await msg.channel.send(`Answer: ${q.a}`); continue; }
-    const m = collected.first();
-    const userAns = m.content.toLowerCase().replace(/\s+/g, '');
-    const correctAns = q.a.toLowerCase().replace(/\s+/g, '');
-    if (userAns.includes(correctAns) || correctAns.includes(userAns)) {
-      addCredits(m.author.id, TRAINING_Q_REWARD);
-      await msg.channel.send(`+${TRAINING_Q_REWARD} credits → ${m.author.tag}`);
-    } else {
-      await msg.channel.send(`Correct: ${q.a}`);
-    }
-  }
-  return msg.channel.send(`TRAINING COMPLETE!`);
-}
-
-if (cmd === 'trainingexamples') {
-  const lastRun = data.trainingCooldowns[msg.author.id] || 0;
-  if (Date.now() - lastRun < TRAINING_COOLDOWN) {
-    const h = Math.ceil((TRAINING_COOLDOWN - (Date.now() - lastRun)) / 3600000);
-    return msg.reply(`Cooldown: ${h}h left`);
-  }
-  await msg.reply(`${TRAINING_RULES}\n\nSCENARIO TRAINING STARTED! Pick A/B/C/D. +${TRAINING_EX_REWARD} credits each!`);
-  data.trainingCooldowns[msg.author.id] = Date.now();
-  saveData();
-
-  for (let i = 0; i < TRAINING_EXAMPLES.length; i++) {
-    const ex = TRAINING_EXAMPLES[i];
-    await msg.channel.send(`EXAMPLE ${i+1}/9: ${ex.q}\n${ex.options.join('\n')}`);
-    const collected = await msg.channel.awaitMessages({ filter: m => !m.author.bot, max:1, time:45000 });
-    if (!collected.size) { await msg.channel.send(`Correct: ${ex.correct} → ${ex.answer}`); continue; }
-    const m = collected.first();
-    if (m.content.toUpperCase().trim() === ex.correct) {
-      addCredits(m.author.id, TRAINING_EX_REWARD);
-      await msg.channel.send(`+${TRAINING_EX_REWARD} credits → ${m.author.tag}`);
-    } else {
-      await msg.channel.send(`Wrong! Correct: ${ex.correct} → ${ex.answer}`);
-    }
-  }
-  return msg.channel.send(`SCENARIO TRAINING COMPLETE!`);
-}
-
-if (cmd === 'claim') {
-  if (!isModerator(msg.author.id)) return msg.reply(`Mods only`);
-  const today = new Date().toDateString();
-  if (data.lastDailyClaim === today) return msg.reply(`Already claimed today`);
-  data.lastDailyClaim = today;
-  addCredits(msg.author.id, DAILY_REWARD);
-  return msg.reply(`Claimed ${DAILY_REWARD} credits!`);
-}
-if (cmd === 'addcredits') { if (!isServerManager(msg.author.id)) return msg.reply(`Manager only`); const u = msg.mentions.members.first(); const a = +args[0]; if (!u||!a||a<=0) return msg.reply(`Usage: ?addcredits @User 100`); addCredits(u.id,a); return msg.reply(`${u.user.tag}: ${data.credits[u.id]}`); }
-if (cmd === 'removecredits') { if (!isServerManager(msg.author.id)) return msg.reply(`Manager only`); const u = msg.mentions.members.first(); const a = +args[0]; if (!u||!a||a<=0) return msg.reply(`Usage: ?removecredits @User 50`); addCredits(u.id,-a); return msg.reply(`${u.user.tag}: ${data.credits[u.id]}`); }
-if (cmd === 'balance'||cmd==='bal') { const t = msg.mentions.members.first()||msg.member; return msg.reply(`${t.user.tag}: ${data.credits[t.id]||0}`); }
-if (cmd === 'richlist') { const sorted = Object.entries(data.credits).sort((a,b)=>b[1]-a[1]).slice(0,10); const list = sorted.map(([id,c],i)=>`#${i+1} <@${id}> — ${c} credits`).join('\n')||'No data'; return msg.reply(`Top 10 Richest\n${list}`); }
-if (cmd === 'shop') { const list = SHOP.map(x=>`${x.id}: ${x.name} — ${x.price} credits`).join('\n'); return msg.reply(`SHOP\n\n${list}\n\nBuy with: ?buy <item-id>`); }
-if (cmd === 'buy') { const item = SHOP.find(x=>x.id===args[0]?.toLowerCase()); if (!item) return msg.reply(`Invalid item`); if (data.credits[msg.author.id]<item.price) return msg.reply(`Not enough credits`); addCredits(msg.author.id,-item.price); data.inventory[msg.author.id].push(item); saveData(); return msg.reply(`Bought ${item.name}`); }
-if (cmd === 'profile') { const u = msg.mentions.members.first()||msg.member; ensureUser(u.id); const inv = data.inventory[u.id].map(x=>x.name).join(', ')||'Empty'; return msg.reply(`${u.user.tag}\nRank: ${RANK_NAMES[data.ranks[u.id]]||'None'}\nCredits: ${data.credits[u.id]||0}\nInventory: ${inv}`); }
-if (cmd === 'roster') { let out = ''; for (const [id,ri] of Object.entries(data.ranks)) { if (ri<0) continue; const m = await msg.guild.members.fetch(id).catch(()=>null); if (m) out += `${RANK_NAMES[ri]}: ${m.user.tag}\n`; } return msg.reply(`ROSTER\n${out||'No mods found'}`); }
-if (cmd === 'settag') { const txt = args.join(' '); if (!txt) return msg.reply(`Usage: ?settag Your Tag`); data.tags[msg.author.id]=txt; saveData(); return msg.reply(`Tag set: ${txt}`); }
-if (cmd === 'rankup') { if (!isModerator(msg.author.id)) return msg.reply(`Mods only`); const curr = data.ranks[msg.author.id]; if (curr>=RANK_NAMES.length-1) return msg.reply(`Max rank`); const next = RANK_NAMES[curr+1]; const cost = RANK_LADDER[curr+1].cost; if (data.credits[msg.author.id]<cost) return msg.reply(`Need ${cost} credits for ${next}`); addCredits(msg.author.id,-cost); data.ranks[msg.author.id]=curr+1; saveData(); return msg.reply(`Ranked up to ${next}!`); }
-if (cmd === 'rankmod') { if (!isServerManager(msg.author.id)) return msg.reply(`Manager only`); const u = msg.mentions.members.first(); if (!u) return msg.reply(`Usage: ?rankmod @User`); data.ranks[u.id]=getRankIndex('Trial Moderator'); saveData(); return msg.reply(`${u.user.tag} → Trial Moderator`); }
-if (cmd === 'setrank') { if (!isServerManager(msg.author.id)) return msg.reply(`Manager only`); const u = msg.mentions.members.first(); const rn = args.slice(1).join(' '); if (!u||!RANK_NAMES.includes(rn)) return msg.reply(`Usage: ?setrank @User RankName`); data.ranks[u.id]=getRankIndex(rn); saveData(); return msg.reply(`${u.user.tag} → ${rn}`); }
-if (cmd === 'mystats') { return msg.reply(`YOUR STATS\nCredits: ${data.credits[msg.author.id]||0}\nRank: ${RANK_NAMES[data.ranks[msg.author.id]]||'None'}\nWarnings: ${data.warns[msg.author.id].length}`); }
-if (cmd === 'warn') { if (!isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); const r = args.join(' ')||'No reason'; if (!u) return msg.reply(`Usage: ?warn @User Reason`); data.warns[u.id].push({by:msg.author.id,reason:r}); saveData(); return msg.reply(`Warned ${u.user.tag}`); }
-if (cmd === 'warnings') { const u = msg.mentions.members.first()||msg.member; const list = data.warns[u.id].map((w,i)=>`${i+1}. ${w.reason}`).join('\n')||'None'; return msg.reply(`${u.user.tag} Warnings\n${list}`); }
-if (cmd === 'clearwarns') { if (!isServerManager(msg.author.id)) return; const u = msg.mentions.members.first(); if (!u) return msg.reply(`Usage: ?clearwarns @User`); data.warns[u.id]=[]; saveData(); return msg.reply(`Cleared warnings for ${u.user.tag}`); }
-if (cmd === 'kick') { if (!msg.member.permissions.has(PermissionsBitField.Flags.KickMembers) && !isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); if (!u) return msg.reply(`Usage: ?kick @User`); await u.kick(); return msg.reply(`Kicked ${u.user.tag}`); }
-if (cmd === 'ban') { if (!msg.member.permissions.has(PermissionsBitField.Flags.BanMembers) && !isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); if (!u) return msg.reply(`Usage: ?ban @User`); await u.ban(); return msg.reply(`Banned ${u.user.tag}`); }
-if (cmd === 'unban') { if (!msg.member.permissions.has(PermissionsBitField.Flags.BanMembers) && !isServerManager(msg.author.id)) return; const id = args[0]; if (!id) return msg.reply(`Usage: ?unban UserID`); await msg.guild.members.unban(id); return msg.reply(`Unbanned ${id}`); }
-if (cmd === 'mute') { if (!isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); const mr = msg.guild.roles.cache.find(r=>r.name.toLowerCase()==='muted'); if (!u||!mr) return msg.reply(`Usage: ?mute @User`); await u.roles.add(mr); return msg.reply(`Muted ${u.user.tag}`); }
-if (cmd === 'unmute') { if (!isModerator(msg.author.id)) return; const u = msg.mentions.members.first(); const mr = msg.guild.roles.cache.find(r=>r.name.toLowerCase()==='muted'); if (!u||!mr) return msg.reply(`Usage: ?unmute @User`); await u.roles.remove(mr); return msg.reply(`Unmuted ${u.user.tag}`); }
-if (cmd === 'purge') { if (!msg.member.permissions.has(PermissionsBitField.Flags.ManageMessages) && !isServerManager(msg.author.id)) return; const a = parseInt(args[0]); if (isNaN(a)||a<1||a>100) return msg.reply(`Usage: ?purge 1-100`); await msg.channel.bulkDelete(a,true); return msg.reply(`Purged ${a} messages`); }
-if (cmd === 'ping') return msg.reply(`${client.ws.ping}ms`);
-if (cmd === 'uptime') { const s = process.uptime(); return msg.reply(`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`); }
-if (cmd === 'serverinfo') { const g = msg.guild; return msg.reply(`${g.name} | ${g.memberCount} members`); }
-if (cmd === 'userinfo') { const u = msg.mentions.users.first()||msg.author; return msg.reply(`${u.tag}\nID: ${u.id}`); }
-if (cmd === 'avatar') { const u = msg.mentions.members.first()||msg.author; return msg.reply(u.displayAvatarURL({size:1024})); }
-if (cmd === 'say') { if (!isModerator(msg.author.id)) return; return msg.channel.send(args.join(' ')); }
-if (cmd === 'embed') { if (!isModerator(msg.author.id)) return; return msg.reply({embeds:[{color:0x2B2D31,description:args.join(' ')}]}); }
-
-  saveData();
+// ─────────────────────────────────────────────────────────────
+// READY & REGISTER COMMANDS
+// ─────────────────────────────────────────────────────────────
+client.once('ready', async () => {
+  console.log(`✅ ONLINE — SLASH + DM SUPPORT • EXACT FORMAT`);
+  const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+  try {
+    await rest.post(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log('✅ Slash commands registered globally');
+  } catch (e) { console.error(e); }
 });
 
-client.login(process.env.BOT_TOKEN || '');
+// ─────────────────────────────────────────────────────────────
+// SLASH COMMAND HANDLER — WORKS IN SERVER + DM
+// ─────────────────────────────────────────────────────────────
+client.on('interactionCreate', async int => {
+  if (!int.isChatInputCommand()) return;
+  const { commandName, options, user } = int;
+  ensureUser(user.id);
+
+  try {
+    // HELP — EXACT FORMAT
+    if (commandName === 'help') return int.reply({ content: HELP_TEXT, ephemeral: false });
+
+    if (commandName === 'trainingrules') return int.reply(TRAINING_RULES);
+
+    if (commandName === 'training') {
+      const lastRun = data.trainingCooldowns[user.id] || 0;
+      if (Date.now() - lastRun < TRAINING_COOLDOWN) {
+        const h = Math.ceil((TRAINING_COOLDOWN - (Date.now() - lastRun)) / 3600000);
+        return int.reply(`Cooldown: ${h}h left`);
+      }
+      await int.reply(`${TRAINING_RULES}\n\nTRAINING STARTED! +${TRAINING_Q_REWARD} credits each.`);
+      data.trainingCooldowns[user.id] = Date.now();
+      saveData();
+      const ch = int.channel;
+      for (let i = 0; i < TRAINING_QUESTIONS.length; i++) {
+        const q = TRAINING_QUESTIONS[i];
+        await ch.send(`Q${i+1}/9: ${q.q}`);
+        const c = await ch.awaitMessages({ filter: m=>!m.author.bot, max:1, time:30000 });
+        if (!c.size) { await ch.send(`Answer: ${q.a}`); continue; }
+        const m = c.first();
+        const ok = m.content.toLowerCase().replace(/\s/g,'').includes(q.a.toLowerCase().replace(/\s/g,''));
+        if (ok) { addCredits(m.author.id, TRAINING_Q_REWARD); await ch.send(`+${TRAINING_Q_REWARD} → ${m.author}`); }
+        else await ch.send(`Correct: ${q.a}`);
+      }
+      return ch.send(`TRAINING COMPLETE!`);
+    }
+
+    if (commandName === 'trainingexamples') {
+      const lastRun = data.trainingCooldowns[user.id] || 0;
+      if (Date.now() - lastRun < TRAINING_COOLDOWN) {
+        const h = Math.ceil((TRAINING_COOLDOWN - (Date.now() - lastRun)) / 3600000);
+        return int.reply(`Cooldown: ${h}h left`);
+      }
+      await int.reply(`${TRAINING_RULES}\n\nSCENARIO TRAINING STARTED! +${TRAINING_EX_REWARD} each!`);
+      data.trainingCooldowns[user.id] = Date.now();
+      saveData();
+      const ch = int.channel;
+      for (let i = 0; i < TRAINING_EXAMPLES.length; i++) {
+        const ex = TRAINING_EXAMPLES[i];
+        await ch.send(`EXAMPLE ${i+1}/9: ${ex.q}\n${ex.options.join('\n')}`);
+        const c = await ch.awaitMessages({ filter: m=>!m.author.bot, max:1, time:45000 });
+        if (!c.size) { await ch.send(`Correct: ${ex.correct} → ${ex.answer}`); continue; }
+        const m = c.first();
+        if (m.content.toUpperCase().trim() === ex.correct) { addCredits(m.author.id, TRAINING_EX_REWARD); await ch.send(`+${TRAINING_EX_REWARD} → ${m.author}`); }
+        else await ch.send(`Wrong! Correct: ${ex.correct} → ${ex.answer}`);
+      }
+      return ch.send(`SCENARIO TRAINING COMPLETE!`);
+    }
+
+    // Economy
+    if (commandName === 'claim') {
+      if (!isModerator(user.id)) return int.reply(`Mods only`);
+      const today = new Date().toDateString();
+      if (data.lastDailyClaim === today) return int.reply(`Already claimed today`);
+      data.lastDailyClaim = today; addCredits(user.id, DAILY_REWARD);
+      return int.reply(`Claimed ${DAILY_REWARD} credits!`);
+    }
+    if (commandName === 'addcredits') { if (!isServerManager(user.id)) return int.reply(`Manager only`); const u = options.getUser('user'); const a = options.getInteger('amount'); addCredits(u.id,a); return int.reply(`${u.tag}: ${data.credits[u.id]}`); }
+    if (commandName === 'removecredits') { if (!isServerManager(user.id)) return int.reply(`Manager only`); const u = options.getUser('user'); const a = options.getInteger('amount'); addCredits(u.id,-a); return int.reply(`${u.tag}: ${data.credits[u.id]}`); }
+    if (commandName === 'balance') { const u = options.getUser('user')||user; ensureUser(u.id); return int.reply(`${u.tag}: ${data.credits[u.id]||0}`); }
+    if (commandName === 'richlist') { const sorted = Object.entries(data.credits).sort((a,b)=>b[1]-a[1]).slice(0,10); const list = sorted.map(([id,c],i)=>`#${i+1} <@${id}> — ${c}`).join('\n')||'No data'; return int.reply(`Top 10 Richest\n${list}`); }
+    if (commandName === 'shop') { const list = SHOP.map(x=>`${x.id}: ${x.name} — ${x.price} credits`).join('\n'); return int.reply(`SHOP\n\n${list}\n\nBuy with: /buy <item>`); }
+    if (commandName === 'buy') { const item = SHOP.find(x=>x.id===options.getString('item')?.toLowerCase()); if (!item) return int.reply(`Invalid item`); if (data.credits[user.id]<item.price) return int.reply(`Not enough credits`); addCredits(user.id,-item.price); data.inventory[user.id].push(item); saveData(); return int.reply(`Bought ${item.name}`); }
+    if (commandName === 'profile') { const u = options.getUser('user')||user; ensureUser(u.id); const inv = data.inventory[u.id].map(x=>x.name).join(', ')||'Empty'; return int.reply(`${u.tag}\nRank: ${RANK_NAMES[data.ranks[u.id]]||'None'}\nCredits: ${data.credits[u.id]||0}\nInventory: ${inv}`); }
+    if (commandName === 'roster') { let out = ''; for (const [id,ri] of Object.entries(data.ranks)) { if (ri<0) continue; const m = await client.users.fetch(id).catch(()=>null); if (m) out += `${RANK_NAMES[ri]}: ${m.tag}\n`; } return int.reply(`ROSTER\n${out||'No mods found'}`); }
+    if (commandName === 'settag') { data.tags[user.id] = options.getString('tag'); saveData(); return int.reply(`Tag set: ${data.tags[user.id]}`); }
+    if (commandName === 'rankup') { if (!isModerator(user.id)) return int.reply(`Mods only`); const curr = data.ranks[user.id]; if (curr>=RANK_NAMES.length-1) return int.reply(`Max rank`); const next = RANK_NAMES[curr+1]; const cost = RANK_LADDER[curr+1].cost; if (data.credits[user.id]<cost) return int.reply(`Need ${cost} credits for ${next}`); addCredits(user.id,-cost); data.ranks[user.id]=curr+1; saveData(); return int.reply(`Ranked up to ${next}!`); }
+    if (commandName === 'rankmod') { if (!isServerManager(user.id)) return int.reply(`Manager only`); const u = options.getUser('user'); data.ranks[u.id]=getRankIndex('Trial Moderator'); saveData(); return int.reply(`${u.tag} → Trial Moderator`); }
+    if (commandName === 'setrank') { if (!isServerManager(user.id)) return int.reply(`Manager only`); const u = options.getUser('user'); const rn = options.getString('rank'); if (!RANK_NAMES.includes(rn)) return int.reply(`Invalid rank`); data.ranks[u.id]=getRankIndex(rn); saveData(); return int.reply(`${u.tag} → ${rn}`); }
+    if (commandName === 'mystats') { return int.reply(`YOUR STATS\nCredits: ${data.credits[user.id]||0}\nRank: ${RANK_NAMES[data.ranks[user.id]]||'None'}\nWarnings: ${data.warns[user.id].length}`); }
+    if (commandName === 'warn') { if (!isModerator(user.id)) return; const u = options.getUser('user'); const r = options.getString('reason')||'No reason'; data.warns[u.id].push({by:user.id,reason:r}); saveData(); return int.reply(`Warned ${u.tag}`); }
+    if (commandName === 'warnings') { const u = options.getUser('user')||user; const list = data.warns[u.id].map((w,i)=>`${i+1}. ${w.reason}`).join('\n')||'None'; return int.reply(`${u.tag} Warnings\n${list}`); }
+    if (commandName === 'clearwarns') { if (!isServerManager(user.id)) return; const u = options.getUser('user'); data.warns[u.id]=[]; saveData(); return int.reply(`Cleared warnings for ${u.tag}`); }
+    if (commandName === 'ping') return int.reply(`${client.ws.ping}ms`);
+    if (commandName === 'uptime') { const s = process.uptime(); return int.reply(`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`); }
+    if (commandName === 'serverinfo') { if (!int.guild) return int.reply(`Only works in servers`); return int.reply(`${int.guild.name} | ${int.guild.memberCount} members`); }
+    if (commandName === 'userinfo') { const u = options.getUser('user')||user; return int.reply(`${u.tag}\nID: ${u.id}`); }
+    if (commandName === 'avatar') { const u = options.getUser('user')||user; return int.reply(u.displayAvatarURL({size:1024})); }
+
+    saveData();
+  } catch (e) { console.error(e); int.reply({content:`Error running command`,ephemeral:true}).catch(()=>{}); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// OPTIONAL PREFIX COMMANDS (FALLBACK)
+// ─────────────────────────────────────────────────────────────
+client.on('messageCreate', async msg => {
+  if (msg.author.bot || !msg.content.startsWith(PREFIX)) return;
+  // Simple fallback only
+  if (msg.content === `${PREFIX}help`) return msg.reply(HELP_TEXT);
+});
+
+client.login(process.env.BOT_TOKEN);
