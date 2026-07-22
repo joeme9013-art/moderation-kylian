@@ -16,9 +16,9 @@ const DATA_FILE = './data.json';
 const GUILD_ID = '1324059331406069872';
 const MOD_OF_THE_DAY_CHANNEL_ID = '1528326035605819402';
 const DEFAULT_LOG_CHANNEL_ID = '1529221027899379722';
-const AUTO_TRAINING_CHANNEL_ID = '1528327903371202653'; // ✅ UPDATED
+const AUTO_TRAINING_CHANNEL_ID = '1528327903371202653';
 
-const INACTIVITY_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const INACTIVITY_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_INACTIVITY_WARNS = 3;
 const MOD_OF_DAY_BONUS = 50;
@@ -26,35 +26,62 @@ const AUTO_TRAIN_ANSWER_WINDOW_MS = 60 * 1000;
 const AUTO_TRAIN_MIN_GAP_MS = 12 * 60 * 60 * 1000;
 const AUTO_TRAIN_MAX_GAP_MS = 30 * 60 * 60 * 1000;
 
+// 🔹 YOUR ID — auto-set to Server Manager
+const YOUR_USER_ID = '1198527966972477505';
+
+// 🔹 EXACT ROLE ORDER MATCHING SERVER
+const RANK_LADDER = [
+  { name: 'Trial Moderator', cost: 0 },
+  { name: 'Moderator', cost: 50 },
+  { name: 'Senior Moderator', cost: 150 },
+  { name: 'Head Moderator', cost: 300 },
+  { name: 'Trial Admin', cost: 500 },
+  { name: 'Admin', cost: 750 },
+  { name: 'Senior Admin', cost: 1050 },
+  { name: 'Head Admin', cost: 1400 },
+  { name: 'Assistant Server Manager', cost: 1700 },
+  { name: 'Server Manager', cost: 2000 }
+];
+
 // ---------- Data ----------
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
     return {
       credits: {}, warns: {}, tags: {}, ranks: {}, lastActive: {},
       inactivityWarns: {}, config: {}, dailyCredits: {}, pfps: {},
-      onBreak: {}, trainingStats: {},
+      onBreak: {}, trainingStats: {}, feedbacks: []
     };
   }
   const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   parsed.lastActive ??= {}; parsed.inactivityWarns ??= {}; parsed.config ??= {};
   parsed.dailyCredits ??= {}; parsed.pfps ??= {}; parsed.onBreak ??= {};
-  parsed.trainingStats ??= {};
+  parsed.trainingStats ??= {}; parsed.feedbacks ??= [];
   return parsed;
 }
 function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
 let data = loadData();
+
+// 🔹 AUTO: Set YOU to Server Manager (index = last one)
+const SERVER_MANAGER_INDEX = RANK_LADDER.length - 1;
+if (data.ranks[YOUR_USER_ID] !== SERVER_MANAGER_INDEX) {
+  data.ranks[YOUR_USER_ID] = SERVER_MANAGER_INDEX;
+  data.credits[YOUR_USER_ID] = 9999;
+  updateTag(YOUR_USER_ID);
+  saveData(data);
+  console.log(`✅ You set to: ${RANK_LADDER[SERVER_MANAGER_INDEX].name}`);
+}
 
 function getLogChannel(guild) {
   const id = data.config.logChannelId || DEFAULT_LOG_CHANNEL_ID;
   return guild.channels.cache.get(id);
 }
 
-// ---------- Commands & Credits ----------
+// ---------- Commands ----------
 const commands = [
   'addcredits', 'ban', 'break', 'createtag', 'demote', 'feedback', 'kick',
   'majorwarn', 'minorwarn', 'modoftheday', 'mute', 'profile', 'progress',
-  'rankup', 'removecredits', 'roster', 'setpfp', 'settag', 'setup',
-  'trainingrp', 'unbreak', 'warn',
+  'rankmod', 'rankup', 'removecredits', 'roster', 'setpfp', 'settag', 'setup',
+  'trainingrp', 'unbreak', 'warn'
 ];
 const CREDIT_REWARDS = { mute: 10, kick: 20, ban: 30, correctAnswer: 5 };
 function addCredits(userId, amount) {
@@ -72,7 +99,7 @@ function markActive(userId) {
 const TAG_THRESHOLDS = [
   { min: 0, tag: 'New Moderator' }, { min: 100, tag: 'Reliable Moderator' },
   { min: 300, tag: 'Trusted Moderator' }, { min: 700, tag: 'Elite Moderator' },
-  { min: 1500, tag: 'Legendary Moderator' },
+  { min: 1500, tag: 'Legendary Moderator' }
 ];
 function computeAutoTag(credits) {
   let current = TAG_THRESHOLDS[0].tag;
@@ -84,17 +111,13 @@ function updateTag(userId) {
   data.tags[userId] = { text: computeAutoTag(data.credits[userId]||0), manual: false };
 }
 
-// ---------- Rank System ----------
-const RANK_LADDER = [
-  { name: 'Trial Moderator', cost: 0 }, { name: 'Moderator', cost: 50 },
-  { name: 'Senior Moderator', cost: 150 }, { name: 'Head Moderator', cost: 300 },
-  { name: 'Trial Admin', cost: 500 }, { name: 'Admin', cost: 750 },
-  { name: 'Senior Admin', cost: 1050 }, { name: 'Head Admin', cost: 1400 },
-  { name: 'Assistant Server Manager', cost: 1700 }, { name: 'Server Manager', cost: 2000 },
-];
+// ---------- Rank Helpers ----------
 function getRankIndex(userId) { return data.ranks[userId] ?? -1; }
 function findRoleByName(guild, name) { return guild.roles.cache.find(r => r.name === name); }
-const RANK_REQUIREMENTS = { mute:0, warn:0, minorwarn:0, kick:1, majorwarn:1, ban:2, demote:5, addcredits:5, removecredits:5 };
+const RANK_REQUIREMENTS = { 
+  mute:0, warn:0, minorwarn:0, kick:1, majorwarn:1, ban:2, demote:5, 
+  addcredits:5, removecredits:5, rankmod:3 // Head Mod+ only
+};
 function hasRequiredRank(userId, cmd) {
   const req = RANK_REQUIREMENTS[cmd];
   return req === undefined ? true : getRankIndex(userId) >= req;
@@ -223,7 +246,7 @@ client.once('ready', () => {
 client.on('messageCreate', async message => {
   if(message.author.bot||!message.guild||!message.content.startsWith(PREFIX)) return;
   const args=message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const command=args.shift();
+  const command=args.shift()?.toLowerCase();
   if(commands.includes(command)) markActive(message.author.id);
   if(RANK_REQUIREMENTS[command]!==undefined&&!hasRequiredRank(message.author.id,command)){
     const reqName=RANK_LADDER[RANK_REQUIREMENTS[command]].name;
@@ -264,6 +287,47 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  // ✅ RANKMOD
+  if(command==='rankmod'){
+    const target=message.mentions.members.first();
+    if(!target) return message.reply(`ℹ️ Usage: ${PREFIX}rankmod @user`);
+    if(getRankIndex(target.id)>=0) return message.reply(`❌ Already on mod team.`);
+    const trialRole=findRoleByName(message.guild, 'Trial Moderator');
+    if(!trialRole) return message.reply(`❌ Role "Trial Moderator" not found.`);
+    try {
+      await target.roles.add(trialRole);
+      data.ranks[target.id]=0; data.credits[target.id]=0; data.lastActive[target.id]=Date.now();
+      data.inactivityWarns[target.id]=0; updateTag(target.id); saveData(data);
+      const embed=new EmbedBuilder().setTitle('✅ New Moderator')
+        .setDescription(`${target} → **Trial Moderator**`)
+        .addFields({name:'By',value:message.author.tag,inline:true}).setColor(0x2ECC71);
+      message.reply({embeds:[embed]});
+      getLogChannel(message.guild)?.send(`🔰 **NEW MOD:** ${message.author} → ${target}`);
+    }catch(err){ console.error(err); message.reply(`❌ Failed — check permissions/hierarchy`); }
+    return;
+  }
+
+  // ✅ FIXED FEEDBACK COMMAND
+  if(command==='feedback'){
+    const text = args.join(' ').trim();
+    if(!text) return message.reply(`ℹ️ Usage: ${PREFIX}feedback your message here`);
+    const embed = new EmbedBuilder()
+      .setTitle('📝 New Feedback')
+      .setDescription(text)
+      .addFields(
+        {name:'From',value:`${message.author.tag} (${message.author.id})`,inline:true},
+        {name:'Time',value:new Date().toLocaleString(),inline:true}
+      )
+      .setColor(0x3498DB);
+    // Send to log channel
+    const logCh = getLogChannel(message.guild);
+    if(logCh) logCh.send({embeds:[embed]});
+    // Save to data
+    data.feedbacks.push({from:message.author.id,text,at:Date.now()});
+    saveData(data);
+    return message.reply('✅ Feedback submitted — thank you!');
+  }
+
   if(command==='addcredits'||command==='removecredits'){
     const target=message.mentions.members.first();
     const amt=parseInt(args[1],10);
@@ -289,9 +353,7 @@ client.on('messageCreate', async message => {
       if(command==='ban') await target.ban({reason:`${command} by ${message.author.tag}`});
       addCredits(message.author.id,CREDIT_REWARDS[command]);
       message.reply(`✅ ${target.user.tag} ${command}d. +${CREDIT_REWARDS[command]} credits`);
-    }catch{
-      message.reply('❌ Failed — check permissions/role position.');
-    }
+    }catch{ message.reply('❌ Failed — check permissions/role position.'); }
     return;
   }
 
