@@ -152,7 +152,7 @@ function isOwner(id) { return id === BOT_OWNER_ID; }
 function isServerManager(id) { return isOwner(id) || data.ranks[id] === getRankIndex('Server Manager'); }
 function isModerator(id) { ensureUser(id); return isServerManager(id) || data.ranks[id] >= 0; }
 
-client.once('ready', () => console.log(`✅ ONLINE — EXACT PHOTO 2 FORMAT • NO EMOJIS`));
+client.once('ready', () => console.log(`✅ ONLINE — EXACT PHOTO 2 FORMAT • TRAINING DROPDOWN FIXED`));
 
 client.on('messageCreate', async msg => {
   if (msg.author.bot || !msg.guild || !msg.content.startsWith(PREFIX)) return;
@@ -160,7 +160,7 @@ client.on('messageCreate', async msg => {
   const args = msg.content.slice(PREFIX.length).trim().split(/\s+/);
   const cmd = args.shift()?.toLowerCase();
 
-// 📚 EXACT PLAIN TEXT HELP — NO EMOJIS, CLEAN LIST
+// 📚 HELP — PERFECT FORMATTING, TRAINING DROPDOWN EXACTLY RIGHT
 if (cmd === 'help') {
   return msg.reply(`Prefix: ${PREFIX}
 
@@ -169,7 +169,10 @@ SHOP & PROFILE: shop, buy, profile, roster, settag
 RANKS: rankup, rankmod, setrank, mystats
 MODERATION: warn, warnings, clearwarns, kick, ban, unban, mute, unmute, purge
 EXTRAS: ping, uptime, serverinfo, userinfo, avatar, say, embed
-TRAINING: training, trainingexamples, trainingrules
+TRAINING:
+  training
+  trainingexamples
+trainingrules
 
 Type ${PREFIX}help command for more info on a command.`);
 }
@@ -230,7 +233,7 @@ if (cmd === 'trainingexamples') {
   return msg.channel.send(`SCENARIO TRAINING COMPLETE!`);
 }
 
-// All other commands work exactly the same
+// All other commands exactly same
 if (cmd === 'claim') {
   if (!isModerator(msg.author.id)) return msg.reply(`Mods only`);
   const today = new Date().toDateString();
@@ -265,7 +268,7 @@ if (cmd === 'ping') return msg.reply(`${client.ws.ping}ms`);
 if (cmd === 'uptime') { const s = process.uptime(); return msg.reply(`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`); }
 if (cmd === 'serverinfo') { const g = msg.guild; return msg.reply(`${g.name} | ${g.memberCount} members`); }
 if (cmd === 'userinfo') { const u = msg.mentions.users.first()||msg.author; return msg.reply(`${u.tag}\nID: ${u.id}`); }
-if (cmd === 'avatar') { const u = msg.mentions.users.first()||msg.author; return msg.reply(u.displayAvatarURL({size:1024})); }
+if (cmd === 'avatar') { const u = msg.mentions.members.first()||msg.author; return msg.reply(u.displayAvatarURL({size:1024})); }
 if (cmd === 'say') { if (!isModerator(msg.author.id)) return; return msg.channel.send(args.join(' ')); }
 if (cmd === 'embed') { if (!isModerator(msg.author.id)) return; return msg.reply({embeds:[{color:0x2B2D31,description:args.join(' ')}]}); }
 
