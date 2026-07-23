@@ -106,22 +106,47 @@ function markActive(userId) {
 }
 
 // ---------- Auto tag system ----------
-const TAG_THRESHOLDS = [
-  { min: 0, tag: 'New Moderator' },
-  { min: 100, tag: 'Reliable Moderator' },
-  { min: 300, tag: 'Trusted Moderator' },
-  { min: 700, tag: 'Elite Moderator' },
-  { min: 1500, tag: 'Legendary Moderator' },
+// Tags are computed from performance (credits earned minus warns), with a
+// special override when someone is one inactivity warning away from demotion.
+// Everyone starts at 0 credits / 0 warns, which maps to "Good".
+const TAG_TIERS = [
+  { max: -150, tag: 'Terrible' },
+  { max: -1, tag: 'Bad' },
+  { max: 299, tag: 'Good' },
+  { max: 699, tag: 'Great' },
+  { max: Infinity, tag: 'Excellent' },
 ];
-function computeAutoTag(credits) {
-  let current = TAG_THRESHOLDS[0].tag;
-  for (const t of TAG_THRESHOLDS) if (credits >= t.min) current = t.tag;
-  return current;
+function computeAutoTag(userId) {
+  const credits = data.credits[userId] || 0;
+  const warnCount = (data.warns[userId] || []).length;
+  const inactivityWarnCount = data.inactivityWarns[userId] || 0;
+
+  // One inactivity warning away from being demoted — overrides everything else
+  if (inactivityWarnCount > 0 && inactivityWarnCount >= MAX_INACTIVITY_WARNS - 1) {
+    return 'Verge of Demotion';
+  }
+
+  const score = credits - warnCount * 40;
+  for (const tier of TAG_TIERS) {
+    if (score <= tier.max) return tier.tag;
+  }
+  return 'Good';
 }
 function updateTag(userId) {
-  if (data.tags[userId]?.manual) return;
-  const credits = data.credits[userId] || 0;
-  data.tags[userId] = { text: computeAutoTag(credits), manual: false };
+  if (data.tags[userId]?.manual) return; // manually-set/bought tags aren't overwritten
+  data.tags[userId] = { text: computeAutoTag(userId), manual: false };
+}
+// Color to accent embeds by current tag, for a quick visual read on standing
+const TAG_COLORS = {
+  Excellent: 0x2ecc71,
+  Great: 0x3498db,
+  Good: 0x95a5a6,
+  Bad: 0xe67e22,
+  Terrible: 0xe74c3c,
+  'Verge of Demotion': 0xc0392b,
+};
+function colorForTag(tagText) {
+  return TAG_COLORS[tagText] || 0x5865f2;
 }
 
 // ---------- Rank ladder — looked up by ROLE NAME, no IDs needed ----------
@@ -137,23 +162,13 @@ const RANK_LADDER = [
   { name: 'Assistant Server Manager', cost: 1700 },
   { name: 'Server Manager', cost: 2000 },
 ];
-// Roles excluded from the auto-training ping (top two ranks)
-const PING_EXCLUDED_RANKS = ['Assistant Server Manager', 'Server Manager'];
+
 
 function getRankIndex(userId) {
   return data.ranks[userId] ?? -1;
 }
 function findRoleByName(guild, name) {
   return guild.roles.cache.find((r) => r.name === name) || null;
-}
-function buildTrainingPingString(guild) {
-  const mentions = [];
-  for (const rank of RANK_LADDER) {
-    if (PING_EXCLUDED_RANKS.includes(rank.name)) continue;
-    const role = findRoleByName(guild, rank.name);
-    if (role) mentions.push(`<@&${role.id}>`);
-  }
-  return mentions.join(' ');
 }
 
 // ---------- Shop — practical perks for moderators, not just cosmetics ----------
@@ -186,6 +201,7 @@ const SEED_MODERATORS = [
   { userId: '1320483185636802592', rankName: 'Moderator', credits: 0 },
   { userId: '1222684836091658330', rankName: 'Server Manager', credits: 0 },
   { userId: '1198527966972477505', rankName: 'Server Manager', credits: 0 },
+  { userId: '1528326521721196544', rankName: 'Moderator', credits: 0 },
 ];
 
 async function seedInitialModerators(guild) {
@@ -276,6 +292,7 @@ async function applyWarn(message, type) {
 
   data.warns[target.id] = data.warns[target.id] || [];
   data.warns[target.id].push({ type, by: message.author.id, at: Date.now(), expiresAt: Date.now() + ms });
+  updateTag(target.id);
   saveData(data);
 
   message.reply(`${target} has been given a **${type}** — timed out for ${weeks} week(s).`);
@@ -368,6 +385,7 @@ async function checkInactivity(guild) {
 
     data.inactivityWarns[userId] = (data.inactivityWarns[userId] || 0) + 1;
     const warnCount = data.inactivityWarns[userId];
+    updateTag(userId);
 
     const member = await guild.members.fetch(userId).catch(() => null);
     if (!member) continue;
@@ -376,6 +394,7 @@ async function checkInactivity(guild) {
       const newRank = await demoteMember(guild, member);
       data.inactivityWarns[userId] = 0;
       data.lastActive[userId] = now;
+      updateTag(userId);
       saveData(data);
 
       const msg = newRank
@@ -410,13 +429,15 @@ async function pickModeratorOfTheDay(guild) {
 
   if (member) {
     addCredits(winnerId, MOD_OF_DAY_BONUS);
-    const tag = data.tags[winnerId]?.text || computeAutoTag(data.credits[winnerId] || 0);
+    const tag = data.tags[winnerId]?.text || computeAutoTag(winnerId);
     const embed = new EmbedBuilder()
       .setTitle('🏆 Moderator of the Day')
-      .setDescription(`${member} earned **${winnerCredits} credits** today — the most of any moderator!`)
-      .addFields({ name: 'Current Tag', value: tag, inline: true })
+      .setDescription(`${member} earned **${winnerCredits} credits** today — the most of any moderator! 🎉`)
+      .addFields({ name: 'Current Standing', value: tag, inline: true })
       .setColor(0xffd700)
-      .setThumbnail(member.user.displayAvatarURL());
+      .setThumbnail(member.user.displayAvatarURL())
+      .setFooter({ text: 'Keep up the great work!' })
+      .setTimestamp();
     channel.send({ embeds: [embed] });
   }
 
@@ -424,17 +445,20 @@ async function pickModeratorOfTheDay(guild) {
   saveData(data);
 }
 
-// ---------- Random-timed auto-training (pings all ranks except top 2) ----------
+// ---------- Random-timed auto-training (no pings, just a channel post) ----------
 async function runAutoTraining(guild) {
   const channel = guild.channels.cache.get(AUTO_TRAINING_CHANNEL_ID);
   if (!channel) return;
 
   const item = quiz[Math.floor(Math.random() * quiz.length)];
-  const pingString = buildTrainingPingString(guild);
 
-  await channel.send(
-    `${pingString}\n📚 **Surprise Training Question!** First correct answer wins credits.\n${item.q}\nYou have 60 seconds.`
-  );
+  const embed = new EmbedBuilder()
+    .setTitle('📚 Surprise Training Question')
+    .setDescription(`${item.q}\n\nFirst correct answer wins credits. You have 60 seconds.`)
+    .setColor(0x3498db)
+    .setFooter({ text: 'No pressure — just type your answer in this channel.' });
+
+  await channel.send({ embeds: [embed] });
 
   try {
     const collected = await channel.awaitMessages({
@@ -453,12 +477,21 @@ async function runAutoTraining(guild) {
 
     if (isClose) {
       addCredits(responder.author.id, CREDIT_REWARDS.correctAnswer);
-      channel.send(`✅ ${responder.author} got it right! ${item.rule} (+${CREDIT_REWARDS.correctAnswer} credits)`);
+      const resultEmbed = new EmbedBuilder()
+        .setDescription(`✅ **${responder.author.tag}** got it right!\n${item.rule}\n+${CREDIT_REWARDS.correctAnswer} credits`)
+        .setColor(0x2ecc71);
+      channel.send({ embeds: [resultEmbed] });
     } else {
-      channel.send(`❌ Not quite. ${item.rule}`);
+      const resultEmbed = new EmbedBuilder()
+        .setDescription(`❌ Not quite.\n${item.rule}`)
+        .setColor(0xe74c3c);
+      channel.send({ embeds: [resultEmbed] });
     }
   } catch {
-    channel.send(`⏱️ No one answered in time. ${item.rule}`);
+    const resultEmbed = new EmbedBuilder()
+      .setDescription(`⏱️ No one answered in time.\n${item.rule}`)
+      .setColor(0x95a5a6);
+    channel.send({ embeds: [resultEmbed] });
   }
 }
 
@@ -481,6 +514,53 @@ client.once('ready', () => {
   }
 });
 
+// ---------- Per-command help text (shown by ?help <command>, same bracket style as ?help) ----------
+const COMMAND_INFO = {
+  addcredits: { usage: '?addcredits @user <amount>', desc: 'Add credits to a moderator. Admin+.' },
+  avatar: { usage: '?avatar [@user]', desc: "Show a user's avatar." },
+  balance: { usage: '?balance [@user]', desc: 'Check credit balance.' },
+  ban: { usage: '?ban @user', desc: 'Ban a member. Senior Moderator+.' },
+  break: { usage: '?break', desc: 'Pause inactivity tracking while you\'re away.' },
+  buy: { usage: '?buy <item id>', desc: 'Purchase a perk from the shop.' },
+  claim: { usage: '?claim', desc: 'Claim your daily credits (24h cooldown).' },
+  clearwarns: { usage: '?clearwarns @user', desc: 'Wipe a user\'s warn history. Senior Moderator+.' },
+  demote: { usage: '?demote @user', desc: 'Demote a moderator one rank down. Admin+.' },
+  embed: { usage: '?embed <text>', desc: 'Post a styled embed message. Admin+.' },
+  feedback: { usage: '?feedback <message>', desc: 'Send feedback to the log channel.' },
+  kick: { usage: '?kick @user', desc: 'Kick a member. Moderator+.' },
+  majorwarn: { usage: '?majorwarn @user', desc: 'Issue a major warn (3 week timeout). Moderator+.' },
+  minorwarn: { usage: '?minorwarn @user', desc: 'Issue a minor warn (1 week timeout). Trial Moderator+.' },
+  modoftheday: { usage: '?modoftheday', desc: 'Manually trigger Moderator of the Day. Admin only.' },
+  mute: { usage: '?mute @user [duration]', desc: 'Timeout a member. Durations: 1m 5m 10m 30m 1h 3h 6h 12h 24h.' },
+  mystats: { usage: '?mystats', desc: 'Alias for ?progress.' },
+  ping: { usage: '?ping', desc: 'Check bot latency.' },
+  profile: { usage: '?profile [@user]', desc: 'View a moderator profile card.' },
+  progress: { usage: '?progress [@user]', desc: 'View training question accuracy.' },
+  purge: { usage: '?purge <1-100>', desc: 'Bulk delete recent messages. Moderator+.' },
+  rankmod: { usage: '?rankmod @user', desc: 'Induct a new member as Trial Moderator. Head Admin+.' },
+  rankup: { usage: '?rankup', desc: 'Spend credits to promote yourself one rank.' },
+  removecredits: { usage: '?removecredits @user <amount>', desc: 'Remove credits from a moderator. Admin+.' },
+  richlist: { usage: '?richlist', desc: 'Top 10 credit holders.' },
+  roster: { usage: '?roster', desc: 'View the full moderator team by rank.' },
+  serverinfo: { usage: '?serverinfo', desc: 'Show server stats.' },
+  setpfp: { usage: '?setpfp <image/gif URL>', desc: 'Set the image shown on your profile card.' },
+  setrank: { usage: '?setrank @user <rank name>', desc: 'Directly set a moderator\'s rank. Head Admin+.' },
+  settag: { usage: '?settag <text> or ?settag @user <text>', desc: 'Set a manual tag. Setting others requires Head Moderator+.' },
+  setup: { usage: '?setup logchannel #channel', desc: 'Set the logging channel. Admin only.' },
+  shop: { usage: '?shop', desc: 'View purchasable perks.' },
+  training: { usage: '?training', desc: 'Alias for ?trainingrp.' },
+  trainingexamples: { usage: '?trainingexamples', desc: 'See sample training questions.' },
+  trainingrp: { usage: '?trainingrp', desc: 'Start a full rulebook training quiz.' },
+  trainingrules: { usage: '?trainingrules', desc: 'View the full rulebook.' },
+  unban: { usage: '?unban <user ID>', desc: 'Unban a user by ID. Admin+.' },
+  unbreak: { usage: '?unbreak', desc: 'End your break and resume inactivity tracking.' },
+  unmute: { usage: '?unmute @user', desc: 'Remove an active timeout.' },
+  uptime: { usage: '?uptime', desc: 'Show how long the bot has been online.' },
+  userinfo: { usage: '?userinfo [@user]', desc: 'Show account/join info for a user.' },
+  warn: { usage: '?warn @user', desc: 'Issue a standard warn (2 week timeout). Trial Moderator+.' },
+  warnings: { usage: '?warnings [@user]', desc: 'List a user\'s warn history.' },
+};
+
 // ---------- Main handler ----------
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
@@ -494,6 +574,20 @@ client.on('messageCreate', async (message) => {
 
   // ---------- help ----------
   if (command === 'help') {
+    const sub = args[0];
+    if (sub && COMMAND_INFO[sub]) {
+      const info = COMMAND_INFO[sub];
+      message.reply(
+        '```\n' + `Command: ${sub}\n` +
+        `Usage: ${info.usage}\n` +
+        `Description: ${info.desc}\n` + '```'
+      );
+      return;
+    }
+    if (sub) {
+      message.reply(`No help entry found for \`${sub}\`. Check \`${PREFIX}help\` for the full list.`);
+      return;
+    }
     const list = [...uniqueCommands].sort().join('\n  ');
     message.reply(
       '```\n' + 'No Category:\n' + `  ${list}\n\n` +
@@ -647,6 +741,7 @@ client.on('messageCreate', async (message) => {
       } else {
         warns.shift(); // removes the oldest warn
         data.warns[message.author.id] = warns;
+        updateTag(message.author.id);
         resultMsg += ` Your oldest warn was removed.`;
       }
     } else if (item.type === 'breakPass') {
@@ -695,6 +790,7 @@ client.on('messageCreate', async (message) => {
       return;
     }
     data.warns[target.id] = [];
+    updateTag(target.id);
     saveData(data);
     message.reply(`✅ Cleared all warns for ${target}.`);
     getLogChannel(message.guild)?.send(`🧹 ${message.author} cleared all warns for ${target}.`);
@@ -810,7 +906,7 @@ client.on('messageCreate', async (message) => {
   if (command === 'profile') {
     const target = message.mentions.members.first() || message.member;
     const credits = data.credits[target.id] || 0;
-    const tag = data.tags[target.id]?.text || computeAutoTag(0);
+    const tag = data.tags[target.id]?.text || computeAutoTag(target.id);
     const rankIndex = getRankIndex(target.id);
     const rankName = rankIndex >= 0 ? RANK_LADDER[rankIndex].name : 'Not on the mod team';
     const warnCount = (data.warns[target.id] || []).length;
@@ -819,16 +915,18 @@ client.on('messageCreate', async (message) => {
     const onBreak = !!data.onBreak[target.id];
 
     const embed = new EmbedBuilder()
-      .setTitle(`${target.user.tag}'s Profile`)
+      .setTitle(`📇 ${target.user.tag}`)
+      .setThumbnail(target.user.displayAvatarURL())
       .addFields(
-        { name: 'Rank', value: rankName, inline: true },
-        { name: 'Tag', value: tag, inline: true },
-        { name: 'Credits', value: `${credits}`, inline: true },
-        { name: 'Warns on record', value: `${warnCount}`, inline: true },
-        { name: 'Inactivity warnings', value: `${inactivityWarnCount}/${MAX_INACTIVITY_WARNS}`, inline: true },
-        { name: 'Status', value: onBreak ? '🌴 On break' : '✅ Active', inline: true },
+        { name: '🏅 Rank', value: rankName, inline: true },
+        { name: '📊 Standing', value: tag, inline: true },
+        { name: '💳 Credits', value: `${credits}`, inline: true },
+        { name: '⚠️ Warns', value: `${warnCount}`, inline: true },
+        { name: '🔔 Inactivity', value: `${inactivityWarnCount}/${MAX_INACTIVITY_WARNS}`, inline: true },
+        { name: '🌡️ Status', value: onBreak ? '🌴 On break' : '✅ Active', inline: true },
       )
-      .setColor(data.profileColor?.[target.id] || 0x5865f2);
+      .setColor(data.profileColor?.[target.id] || colorForTag(tag))
+      .setFooter({ text: 'Moderator Profile' });
     if (pfp) embed.setImage(pfp);
     message.reply({ embeds: [embed] });
     return;
@@ -861,16 +959,19 @@ client.on('messageCreate', async (message) => {
       if (!rankName) continue;
       const member = await guild.members.fetch(userId).catch(() => null);
       if (!member) continue;
-      const tag = data.tags[userId]?.text || computeAutoTag(data.credits[userId] || 0);
+      const tag = data.tags[userId]?.text || computeAutoTag(userId);
       const breakTag = data.onBreak[userId] ? ' 🌴' : '';
-      grouped[rankName].push(`${member.user.tag} — *${tag}*${breakTag}`);
+      grouped[rankName].push(`• ${member.user.tag} — *${tag}*${breakTag}`);
     }
 
-    const embed = new EmbedBuilder().setTitle('📋 Moderator Team Roster').setColor(0x2ecc71);
+    const embed = new EmbedBuilder()
+      .setTitle('📋 Moderator Team Roster')
+      .setColor(0x2ecc71)
+      .setFooter({ text: `${Object.keys(data.ranks).length} total moderators` });
     for (const rank of [...RANK_LADDER].reverse()) {
       const members = grouped[rank.name];
       if (members.length > 0) {
-        embed.addFields({ name: rank.name, value: members.join('\n') });
+        embed.addFields({ name: `🏅 ${rank.name}`, value: members.join('\n') });
       }
     }
     message.reply({ embeds: [embed] });
