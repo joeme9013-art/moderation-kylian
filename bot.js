@@ -12,7 +12,11 @@ const client = new Client({
 });
 
 const PREFIX = '?';
-const DATA_FILE = './data.json';
+// Points at a Railway Volume mount if RAILWAY_VOLUME_MOUNT_PATH is set (persists across redeploys),
+// otherwise falls back to a local file for testing on your own machine.
+const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/data.json`
+  : './data.json';
 const GUILD_ID = '1324059331406069872';
 const MOD_OF_THE_DAY_CHANNEL_ID = '1528326035605819402';
 const DEFAULT_LOG_CHANNEL_ID = '1529221027899379722';
@@ -36,7 +40,8 @@ function loadData() {
       credits: {}, warns: {}, tags: {}, ranks: {},
       lastActive: {}, inactivityWarns: {}, config: {},
       dailyCredits: {}, pfps: {}, onBreak: {}, trainingStats: {},
-      lastClaim: {}, ownedItems: {},
+      lastClaim: {}, ownedItems: {}, creditBoost: {}, profileColor: {},
+      breakPassExpires: {},
     };
   }
   const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -49,6 +54,9 @@ function loadData() {
   parsed.trainingStats ??= {};
   parsed.lastClaim ??= {};
   parsed.ownedItems ??= {};
+  parsed.creditBoost ??= {};
+  parsed.profileColor ??= {};
+  parsed.breakPassExpires ??= {};
   return parsed;
 }
 function saveData(data) {
@@ -67,7 +75,7 @@ const commands = [
   'clearwarns', 'createtag', 'demote', 'embed', 'feedback', 'kick',
   'majorwarn', 'minorwarn', 'modoftheday', 'mute', 'mystats',
   'modoftheday', 'ping', 'profile', 'progress', 'purge', 'rankmod',
-  'rankup', 'removecredits', 'richlist', 'roster', 'say', 'serverinfo',
+  'rankup', 'removecredits', 'richlist', 'roster', 'serverinfo',
   'setpfp', 'setrank', 'settag', 'setup', 'shop', 'training',
   'trainingexamples', 'trainingrp', 'trainingrules', 'unban', 'unbreak',
   'unmute', 'uptime', 'userinfo', 'warn', 'warnings',
@@ -79,10 +87,16 @@ const uniqueCommands = [...new Set(commands)];
 const CREDIT_REWARDS = { mute: 10, kick: 20, ban: 30, correctAnswer: 5 };
 
 function addCredits(userId, amount) {
-  data.credits[userId] = Math.max(0, (data.credits[userId] || 0) + amount);
-  data.dailyCredits[userId] = (data.dailyCredits[userId] || 0) + amount;
+  let finalAmount = amount;
+  if (amount > 0 && data.creditBoost?.[userId]) {
+    finalAmount = amount * 2;
+    delete data.creditBoost[userId]; // one-time use
+  }
+  data.credits[userId] = Math.max(0, (data.credits[userId] || 0) + finalAmount);
+  data.dailyCredits[userId] = (data.dailyCredits[userId] || 0) + finalAmount;
   updateTag(userId);
   saveData(data);
+  return finalAmount;
 }
 
 function markActive(userId) {
@@ -142,13 +156,62 @@ function buildTrainingPingString(guild) {
   return mentions.join(' ');
 }
 
-// ---------- Shop (cosmetic tags bought with credits) ----------
+// ---------- Shop — practical perks for moderators, not just cosmetics ----------
+// type determines what ?buy actually does:
+//   'removeWarn'   — removes the target's oldest warn from their record
+//   'breakPass'    — grants a 48h inactivity-check exemption without needing ?break
+//   'creditBoost'  — next single mod action (mute/kick/ban) or training answer pays double
+//   'profileColor' — sets a custom embed color on their ?profile card
+//   'tag'          — sets a manual tag on their profile (the old cosmetic option, kept as the cheapest tier)
 const SHOP_ITEMS = [
-  { id: 'sparkle', name: 'Sparkle Tag', cost: 80, tagText: '✨ Sparkle Moderator ✨' },
-  { id: 'shield', name: 'Shield Tag', cost: 150, tagText: '🛡️ Shield Bearer' },
-  { id: 'flame', name: 'Flame Tag', cost: 250, tagText: '🔥 On Fire' },
-  { id: 'crown', name: 'Crown Tag', cost: 500, tagText: '👑 Crowned Moderator' },
+  { id: 'tag-veteran', name: 'Veteran Tag', cost: 60, type: 'tag', tagText: '🎖️ Veteran Moderator' },
+  { id: 'warn-clear', name: 'Warning Removal Token', cost: 120, type: 'removeWarn',
+    desc: 'Removes your oldest warn from your record.' },
+  { id: 'break-pass', name: '48h Break Pass', cost: 100, type: 'breakPass',
+    desc: 'Skips inactivity checks for 48 hours — no need to use ?break.' },
+  { id: 'credit-boost', name: 'Double Credits Token', cost: 150, type: 'creditBoost',
+    desc: 'Your next mod action or training answer pays double credits.' },
+  { id: 'profile-gold', name: 'Gold Profile Color', cost: 200, type: 'profileColor', color: 0xffd700,
+    desc: 'Gives your ?profile card a gold accent color.' },
+  { id: 'profile-crimson', name: 'Crimson Profile Color', cost: 200, type: 'profileColor', color: 0xdc143c,
+    desc: 'Gives your ?profile card a crimson accent color.' },
+  { id: 'tag-elite', name: 'Elite Tag', cost: 350, type: 'tag', tagText: '👑 Elite Team Member' },
 ];
+
+// ---------- One-time seed: initial moderator roster ----------
+// Applied once on first boot (guarded by data.config.seeded) so it never
+// overwrites progress on later restarts/redeploys.
+const SEED_MODERATORS = [
+  { userId: '1446192510593662976', rankName: 'Senior Moderator', credits: 250 },
+  { userId: '1320483185636802592', rankName: 'Moderator', credits: 0 },
+  { userId: '1222684836091658330', rankName: 'Server Manager', credits: 0 },
+  { userId: '1198527966972477505', rankName: 'Server Manager', credits: 0 },
+];
+
+async function seedInitialModerators(guild) {
+  if (data.config.seeded) return; // already done, never repeat this even across redeploys
+
+  for (const entry of SEED_MODERATORS) {
+    const rankIndex = RANK_LADDER.findIndex((r) => r.name === entry.rankName);
+    if (rankIndex === -1) continue;
+
+    const member = await guild.members.fetch(entry.userId).catch(() => null);
+    const role = findRoleByName(guild, entry.rankName);
+
+    if (member && role) {
+      await member.roles.add(role).catch(() => {});
+    }
+
+    data.ranks[entry.userId] = rankIndex;
+    data.credits[entry.userId] = entry.credits;
+    data.lastActive[entry.userId] = Date.now();
+    updateTag(entry.userId);
+  }
+
+  data.config.seeded = true;
+  saveData(data);
+  console.log('Seeded initial moderator roster.');
+}
 
 // ---------- Permission requirements per command (minimum rank index) ----------
 const RANK_REQUIREMENTS = {
@@ -156,7 +219,7 @@ const RANK_REQUIREMENTS = {
   kick: 1, majorwarn: 1, purge: 1,
   ban: 2, clearwarns: 2,
   unban: 5, addcredits: 5, removecredits: 5, demote: 5,
-  say: 3, embed: 3,
+  embed: 3,
   setrank: 7, rankmod: 7,
 };
 function hasRequiredRank(userId, command) {
@@ -179,6 +242,21 @@ function checkRankGate(message, command) {
 // ---------- Warn durations (in weeks) ----------
 const WARN_DURATIONS = { warn: 2, minorwarn: 1, majorwarn: 3 };
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+// ---------- Mute duration presets ----------
+// Usage: ?mute @user 10m   (defaults to 10m if no duration given or duration not recognized)
+const MUTE_DURATIONS = {
+  '1m': 1 * 60 * 1000,
+  '5m': 5 * 60 * 1000,
+  '10m': 10 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '3h': 3 * 60 * 60 * 1000,
+  '6h': 6 * 60 * 60 * 1000,
+  '12h': 12 * 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+};
+const DEFAULT_MUTE_MS = MUTE_DURATIONS['10m'];
 
 async function applyWarn(message, type) {
   const target = message.mentions.members.first();
@@ -269,7 +347,18 @@ async function checkInactivity(guild) {
   const now = Date.now();
 
   for (const userId of Object.keys(data.ranks)) {
-    if (data.onBreak[userId]) continue;
+    if (data.onBreak[userId]) {
+      // If this break came from a purchased 48h pass, auto-clear it once expired
+      const passExpiry = data.breakPassExpires?.[userId];
+      if (passExpiry && Date.now() >= passExpiry) {
+        delete data.onBreak[userId];
+        delete data.breakPassExpires[userId];
+        data.lastActive[userId] = Date.now();
+        saveData(data);
+      } else {
+        continue; // still on break (manual or unexpired pass) — skip entirely
+      }
+    }
 
     const rankIndex = getRankIndex(userId);
     if (rankIndex <= 0) continue;
@@ -385,6 +474,7 @@ client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
   const guild = client.guilds.cache.get(GUILD_ID) || client.guilds.cache.first();
   if (guild) {
+    seedInitialModerators(guild);
     setInterval(() => checkInactivity(guild), CHECK_INTERVAL_MS);
     setInterval(() => pickModeratorOfTheDay(guild), CHECK_INTERVAL_MS);
     scheduleNextAutoTraining(guild);
@@ -516,10 +606,12 @@ client.on('messageCreate', async (message) => {
 
   // ---------- shop ----------
   if (command === 'shop') {
-    const lines = SHOP_ITEMS.map((item) => `**${item.id}** — ${item.name} (${item.cost} credits) → tag: "${item.tagText}"`);
+    const lines = SHOP_ITEMS.map((item) =>
+      `**${item.id}** — ${item.name} (${item.cost} credits)\n   ${item.desc || `Sets your tag to "${item.tagText}"`}`
+    );
     const embed = new EmbedBuilder()
-      .setTitle('🛒 Tag Shop')
-      .setDescription(lines.join('\n') + `\n\nBuy with \`${PREFIX}buy <item id>\``)
+      .setTitle('🛒 Moderator Perk Shop')
+      .setDescription(lines.join('\n\n') + `\n\nBuy with \`${PREFIX}buy <item id>\``)
       .setColor(0x1abc9c);
     message.reply({ embeds: [embed] });
     return;
@@ -542,9 +634,38 @@ client.on('messageCreate', async (message) => {
     if (!data.ownedItems[message.author.id].includes(item.id)) {
       data.ownedItems[message.author.id].push(item.id);
     }
-    data.tags[message.author.id] = { text: item.tagText, manual: true };
+
+    let resultMsg = `✅ You bought **${item.name}**!`;
+
+    if (item.type === 'tag') {
+      data.tags[message.author.id] = { text: item.tagText, manual: true };
+      resultMsg += ` Your tag is now: ${item.tagText}`;
+    } else if (item.type === 'removeWarn') {
+      const warns = data.warns[message.author.id] || [];
+      if (warns.length === 0) {
+        resultMsg += ` You had no warns to remove — token saved for later use is not supported, so this purchase had no effect. Consider asking a Head Moderator+ for a refund.`;
+      } else {
+        warns.shift(); // removes the oldest warn
+        data.warns[message.author.id] = warns;
+        resultMsg += ` Your oldest warn was removed.`;
+      }
+    } else if (item.type === 'breakPass') {
+      data.onBreak[message.author.id] = Date.now();
+      data.breakPassExpires = data.breakPassExpires || {};
+      data.breakPassExpires[message.author.id] = Date.now() + 48 * 60 * 60 * 1000;
+      resultMsg += ` You're exempt from inactivity checks for the next 48 hours.`;
+    } else if (item.type === 'creditBoost') {
+      data.creditBoost = data.creditBoost || {};
+      data.creditBoost[message.author.id] = true;
+      resultMsg += ` Your next mod action or training answer will pay double credits.`;
+    } else if (item.type === 'profileColor') {
+      data.profileColor = data.profileColor || {};
+      data.profileColor[message.author.id] = item.color;
+      resultMsg += ` Your profile card now uses this color.`;
+    }
+
     saveData(data);
-    message.reply(`✅ You bought **${item.name}**! Your tag is now: ${item.tagText}`);
+    message.reply(resultMsg);
     return;
   }
 
@@ -584,11 +705,19 @@ client.on('messageCreate', async (message) => {
   if (command === 'mute' || command === 'kick' || command === 'ban') {
     const target = message.mentions.members.first();
     if (!target) {
-      message.reply(`Mention someone, e.g. \`${PREFIX}${command} @user\`.`);
+      message.reply(`Mention someone, e.g. \`${PREFIX}${command} @user${command === 'mute' ? ' [duration]' : ''}\`.`);
       return;
     }
     try {
-      if (command === 'mute') await target.timeout(10 * 60 * 1000, `Muted by ${message.author.tag}`);
+      if (command === 'mute') {
+        const durationArg = args[1]?.toLowerCase();
+        const ms = MUTE_DURATIONS[durationArg] || DEFAULT_MUTE_MS;
+        await target.timeout(ms, `Muted by ${message.author.tag}`);
+        addCredits(message.author.id, CREDIT_REWARDS.mute);
+        const label = durationArg && MUTE_DURATIONS[durationArg] ? durationArg : '10m (default)';
+        message.reply(`${target.user.tag} was muted for **${label}**. You earned ${CREDIT_REWARDS.mute} credits.`);
+        return;
+      }
       if (command === 'kick') await target.kick(`Kicked by ${message.author.tag}`);
       if (command === 'ban') await target.ban({ reason: `Banned by ${message.author.tag}` });
     } catch {
@@ -699,7 +828,7 @@ client.on('messageCreate', async (message) => {
         { name: 'Inactivity warnings', value: `${inactivityWarnCount}/${MAX_INACTIVITY_WARNS}`, inline: true },
         { name: 'Status', value: onBreak ? '🌴 On break' : '✅ Active', inline: true },
       )
-      .setColor(0x5865f2);
+      .setColor(data.profileColor?.[target.id] || 0x5865f2);
     if (pfp) embed.setImage(pfp);
     message.reply({ embeds: [embed] });
     return;
@@ -1002,17 +1131,6 @@ client.on('messageCreate', async (message) => {
       .setImage(target.user.displayAvatarURL({ size: 512 }))
       .setColor(0x5865f2);
     message.reply({ embeds: [embed] });
-    return;
-  }
-
-  if (command === 'say') {
-    const text = args.join(' ').trim();
-    if (!text) {
-      message.reply(`Usage: \`${PREFIX}say <text>\``);
-      return;
-    }
-    await message.delete().catch(() => {});
-    message.channel.send(text);
     return;
   }
 
