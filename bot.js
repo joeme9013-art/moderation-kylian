@@ -69,6 +69,22 @@ function getLogChannel(guild) {
   return guild.channels.cache.get(id);
 }
 
+// Builds a log embed matching the app's own style: emoji title, body text,
+// then "From" (who did it) and "Time" (local date/time string) fields.
+function buildLogEmbed(emoji, title, description, actor, color = 0x5865f2) {
+  return new EmbedBuilder()
+    .setTitle(`${emoji} ${title}`)
+    .setDescription(description)
+    .addFields(
+      { name: 'From', value: `${actor.tag} (${actor.id})`, inline: false },
+      { name: 'Time', value: new Date().toLocaleString('en-US'), inline: false },
+    )
+    .setColor(color);
+}
+function sendLog(guild, emoji, title, description, actor, color) {
+  getLogChannel(guild)?.send({ embeds: [buildLogEmbed(emoji, title, description, actor, color)] });
+}
+
 // ---------- Commands list (alphabetical, shown by ?help) ----------
 const commands = [
   'addcredits', 'avatar', 'balance', 'ban', 'break', 'buy', 'claim',
@@ -296,7 +312,8 @@ async function applyWarn(message, type) {
   saveData(data);
 
   message.reply(`${target} has been given a **${type}** — timed out for ${weeks} week(s).`);
-  getLogChannel(message.guild)?.send(`📋 ${target} received a **${type}** from ${message.author} (${weeks} week timeout).`);
+  sendLog(message.guild, '⚠️', `New ${type === 'warn' ? 'Warn' : type === 'minorwarn' ? 'Minor Warn' : 'Major Warn'}`,
+    `${target.user.tag} was warned — timed out for ${weeks} week(s).`, message.author, 0xe67e22);
 }
 
 // ---------- Demotion ----------
@@ -631,7 +648,7 @@ client.on('messageCreate', async (message) => {
     data.onBreak[message.author.id] = Date.now();
     saveData(data);
     message.reply('🌴 You are now on break — inactivity warnings are fully paused. Use `?unbreak` when you\'re back.');
-    getLogChannel(message.guild)?.send(`🌴 ${message.author} started a break.`);
+    sendLog(message.guild, '🌴', 'Break Started', `${message.author.tag} started a break.`, message.author, 0x1abc9c);
     return;
   }
   if (command === 'unbreak') {
@@ -643,7 +660,7 @@ client.on('messageCreate', async (message) => {
     markActive(message.author.id);
     saveData(data);
     message.reply('👋 Welcome back! Inactivity tracking has resumed.');
-    getLogChannel(message.guild)?.send(`👋 ${message.author} ended their break.`);
+    sendLog(message.guild, '👋', 'Break Ended', `${message.author.tag} ended their break.`, message.author, 0x1abc9c);
     return;
   }
 
@@ -694,7 +711,9 @@ client.on('messageCreate', async (message) => {
     const delta = command === 'addcredits' ? amount : -amount;
     addCredits(target.id, delta);
     message.reply(`${command === 'addcredits' ? '➕' : '➖'} ${target.user.tag}'s credits ${command === 'addcredits' ? 'increased' : 'decreased'} by ${amount}. New total: ${data.credits[target.id] || 0}.`);
-    getLogChannel(message.guild)?.send(`💳 ${message.author} ${command === 'addcredits' ? 'added' : 'removed'} ${amount} credits ${command === 'addcredits' ? 'to' : 'from'} ${target}.`);
+    sendLog(message.guild, '💳', command === 'addcredits' ? 'Credits Added' : 'Credits Removed',
+      `${amount} credits ${command === 'addcredits' ? 'added to' : 'removed from'} ${target.user.tag}. New total: ${data.credits[target.id] || 0}.`,
+      message.author, command === 'addcredits' ? 0x2ecc71 : 0xe74c3c);
     return;
   }
 
@@ -793,7 +812,7 @@ client.on('messageCreate', async (message) => {
     updateTag(target.id);
     saveData(data);
     message.reply(`✅ Cleared all warns for ${target}.`);
-    getLogChannel(message.guild)?.send(`🧹 ${message.author} cleared all warns for ${target}.`);
+    sendLog(message.guild, '🧹', 'Warns Cleared', `All warns cleared for ${target.user.tag}.`, message.author, 0x2ecc71);
     return;
   }
 
@@ -804,6 +823,9 @@ client.on('messageCreate', async (message) => {
       message.reply(`Mention someone, e.g. \`${PREFIX}${command} @user${command === 'mute' ? ' [duration]' : ''}\`.`);
       return;
     }
+    // Capture the tag/id before kick or ban removes them from the guild cache
+    const targetTag = target.user.tag;
+    const targetId = target.id;
     try {
       if (command === 'mute') {
         const durationArg = args[1]?.toLowerCase();
@@ -811,7 +833,9 @@ client.on('messageCreate', async (message) => {
         await target.timeout(ms, `Muted by ${message.author.tag}`);
         addCredits(message.author.id, CREDIT_REWARDS.mute);
         const label = durationArg && MUTE_DURATIONS[durationArg] ? durationArg : '10m (default)';
-        message.reply(`${target.user.tag} was muted for **${label}**. You earned ${CREDIT_REWARDS.mute} credits.`);
+        message.reply(`${targetTag} was muted for **${label}**. You earned ${CREDIT_REWARDS.mute} credits.`);
+        sendLog(message.guild, '🔇', 'Member Muted',
+          `${targetTag} (${targetId}) was muted for ${label}.`, message.author, 0xf39c12);
         return;
       }
       if (command === 'kick') await target.kick(`Kicked by ${message.author.tag}`);
@@ -821,7 +845,9 @@ client.on('messageCreate', async (message) => {
       return;
     }
     addCredits(message.author.id, CREDIT_REWARDS[command]);
-    message.reply(`${target.user.tag} was ${command}d. You earned ${CREDIT_REWARDS[command]} credits.`);
+    message.reply(`${targetTag} was ${command}d. You earned ${CREDIT_REWARDS[command]} credits.`);
+    sendLog(message.guild, command === 'kick' ? '👢' : '🔨', command === 'kick' ? 'Member Kicked' : 'Member Banned',
+      `${targetTag} (${targetId}) was ${command}ed.`, message.author, command === 'kick' ? 0xe67e22 : 0xc0392b);
     return;
   }
 
@@ -849,7 +875,7 @@ client.on('messageCreate', async (message) => {
     try {
       await message.guild.members.unban(userId, `Unbanned by ${message.author.tag}`);
       message.reply(`✅ Unbanned user ID ${userId}.`);
-      getLogChannel(message.guild)?.send(`🔓 ${message.author} unbanned <@${userId}>.`);
+      sendLog(message.guild, '🔓', 'Member Unbanned', `User ID ${userId} was unbanned.`, message.author, 0x2ecc71);
     } catch {
       message.reply('Failed to unban — check the ID and bot permissions.');
     }
@@ -887,7 +913,7 @@ client.on('messageCreate', async (message) => {
     data.tags[target.id] = { text: newTag, manual: true };
     saveData(data);
     message.reply(`Tag for ${target} set to **${newTag}**.`);
-    getLogChannel(message.guild)?.send(`🏷️ ${target}'s tag was set to **${newTag}** by ${message.author}.`);
+    sendLog(message.guild, '🏷️', 'Tag Updated', `${target.user.tag}'s tag was set to "${newTag}".`, message.author, 0x9b59b6);
     return;
   }
 
@@ -997,7 +1023,7 @@ client.on('messageCreate', async (message) => {
     }
     const newRank = await demoteMember(message.guild, target);
     message.reply(newRank ? `${target} was demoted to **${newRank}**.` : `${target} could not be demoted.`);
-    if (newRank) getLogChannel(message.guild)?.send(`⬇️ ${target} was demoted to **${newRank}** by ${message.author}.`);
+    if (newRank) sendLog(message.guild, '⬇️', 'Moderator Demoted', `${target.user.tag} was demoted to **${newRank}**.`, message.author, 0xc0392b);
     return;
   }
 
@@ -1045,7 +1071,7 @@ client.on('messageCreate', async (message) => {
     saveData(data);
 
     message.reply(`🎉 You've been promoted to **${nextRank.name}**! Remaining credits: ${data.credits[userId]}.`);
-    getLogChannel(guild)?.send(`⬆️ ${message.author} was promoted to **${nextRank.name}**.`);
+    sendLog(guild, '⬆️', 'Moderator Promoted', `${message.author.tag} was promoted to **${nextRank.name}**.`, message.author, 0x2ecc71);
     return;
   }
 
@@ -1077,7 +1103,7 @@ client.on('messageCreate', async (message) => {
     updateTag(target.id);
     saveData(data);
     message.reply(`✅ ${target} has joined the moderator team as **${RANK_LADDER[0].name}**.`);
-    getLogChannel(message.guild)?.send(`🆕 ${target} was added to the mod team as ${RANK_LADDER[0].name} by ${message.author}.`);
+    sendLog(message.guild, '🆕', 'New Moderator Inducted', `${target.user.tag} joined the team as ${RANK_LADDER[0].name}.`, message.author, 0x3498db);
     return;
   }
 
@@ -1109,7 +1135,7 @@ client.on('messageCreate', async (message) => {
     updateTag(target.id);
     saveData(data);
     message.reply(`✅ ${target}'s rank was set to **${RANK_LADDER[rankIndex].name}**.`);
-    getLogChannel(guild)?.send(`🔧 ${message.author} set ${target}'s rank to **${RANK_LADDER[rankIndex].name}**.`);
+    sendLog(guild, '🔧', 'Rank Manually Set', `${target.user.tag}'s rank was set to **${RANK_LADDER[rankIndex].name}**.`, message.author, 0x9b59b6);
     return;
   }
 
@@ -1253,7 +1279,7 @@ client.on('messageCreate', async (message) => {
       message.reply(`Usage: \`${PREFIX}feedback <your message>\``);
       return;
     }
-    getLogChannel(message.guild)?.send(`📝 Feedback from ${message.author.tag}: ${text}`);
+    sendLog(message.guild, '📝', 'New Feedback', text, message.author, 0x9b59b6);
     message.reply('✅ Thanks — your feedback has been logged.');
     return;
   }
