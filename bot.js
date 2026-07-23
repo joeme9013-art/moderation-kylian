@@ -252,7 +252,7 @@ const RANK_REQUIREMENTS = {
   ban: 2, clearwarns: 2,
   unban: 5, addcredits: 5, removecredits: 5, demote: 5,
   embed: 3,
-  setrank: 7, rankmod: 7,
+  setrank: 7, rankmod: 5,
 };
 function hasRequiredRank(userId, command) {
   const required = RANK_REQUIREMENTS[command];
@@ -554,7 +554,7 @@ const COMMAND_INFO = {
   profile: { usage: '?profile [@user]', desc: 'View a moderator profile card.' },
   progress: { usage: '?progress [@user]', desc: 'View training question accuracy.' },
   purge: { usage: '?purge <1-100>', desc: 'Bulk delete recent messages. Moderator+.' },
-  rankmod: { usage: '?rankmod @user', desc: 'Induct a new member as Trial Moderator. Head Admin+.' },
+  rankmod: { usage: '?rankmod @user <rank name>', desc: 'Assign a moderator to any rank. Admin+; you can only assign ranks below your own.' },
   rankup: { usage: '?rankup', desc: 'Spend credits to promote yourself one rank.' },
   removecredits: { usage: '?removecredits @user <amount>', desc: 'Remove credits from a moderator. Admin+.' },
   richlist: { usage: '?richlist', desc: 'Top 10 credit holders.' },
@@ -1076,34 +1076,70 @@ client.on('messageCreate', async (message) => {
   }
 
   if (command === 'rankmod') {
-    // Induct a brand-new person onto the mod team at Trial Moderator
     const target = message.mentions.members.first();
-    if (!target) {
-      message.reply(`Usage: \`${PREFIX}rankmod @user\` — adds them to the team as Trial Moderator.`);
+    const requestedRankName = args.slice(1).join(' ').trim();
+    const requestedRankIndex = RANK_LADDER.findIndex(
+      (r) => r.name.toLowerCase() === requestedRankName.toLowerCase()
+    );
+
+    if (!target || requestedRankIndex === -1) {
+      const validNames = RANK_LADDER.map((r) => r.name).join(', ');
+      message.reply(
+        `Usage: \`${PREFIX}rankmod @user <rank name>\`\nValid ranks: ${validNames}`
+      );
       return;
     }
-    if (getRankIndex(target.id) >= 0) {
-      message.reply(`${target} is already on the moderator team.`);
+
+    const isServerAdmin = message.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    const callerRankIndex = getRankIndex(message.author.id);
+
+    // Moderators (below Admin, index 5) can never use this — RANK_REQUIREMENTS already
+    // blocks that for non-admins, but server Administrators bypass rank gates entirely,
+    // so double-check explicitly here too.
+    if (!isServerAdmin && callerRankIndex < RANK_REQUIREMENTS.rankmod) {
+      message.reply(`🚫 You need to be at least **${RANK_LADDER[RANK_REQUIREMENTS.rankmod].name}** to use \`${PREFIX}rankmod\`.`);
       return;
     }
-    const role = findRoleByName(message.guild, RANK_LADDER[0].name);
-    if (!role) {
-      message.reply(`Couldn't find the "${RANK_LADDER[0].name}" role — check it exists.`);
+
+    // Hierarchy check: you can only assign a rank strictly below your own.
+    // Server Administrators (via Discord permission, not this ladder) skip this restriction.
+    if (!isServerAdmin && requestedRankIndex >= callerRankIndex) {
+      message.reply(`🚫 You can only assign ranks below your own (**${RANK_LADDER[callerRankIndex].name}**). "${RANK_LADDER[requestedRankIndex].name}" is not lower than that.`);
       return;
     }
+
+    const guild = message.guild;
+    const oldIndex = getRankIndex(target.id);
+    const oldRole = oldIndex >= 0 ? findRoleByName(guild, RANK_LADDER[oldIndex].name) : null;
+    const newRole = findRoleByName(guild, RANK_LADDER[requestedRankIndex].name);
+
+    if (!newRole) {
+      message.reply(`Couldn't find a role named "${RANK_LADDER[requestedRankIndex].name}" in this server — check it exists and matches exactly.`);
+      return;
+    }
+    if (oldIndex === requestedRankIndex) {
+      message.reply(`${target} is already **${RANK_LADDER[requestedRankIndex].name}**.`);
+      return;
+    }
+
     try {
-      await target.roles.add(role);
+      if (oldRole) await target.roles.remove(oldRole).catch(() => {});
+      await target.roles.add(newRole);
     } catch {
-      message.reply('Failed to assign the role — check bot permissions and role position.');
+      message.reply('Failed to update roles — check bot permissions and role position (the bot\'s role must sit above the ranks it assigns).');
       return;
     }
-    data.ranks[target.id] = 0;
+
+    data.ranks[target.id] = requestedRankIndex;
     data.credits[target.id] = data.credits[target.id] || 0;
     markActive(target.id);
     updateTag(target.id);
     saveData(data);
-    message.reply(`✅ ${target} has joined the moderator team as **${RANK_LADDER[0].name}**.`);
-    sendLog(message.guild, '🆕', 'New Moderator Inducted', `${target.user.tag} joined the team as ${RANK_LADDER[0].name}.`, message.author, 0x3498db);
+
+    const verb = oldIndex === -1 ? 'joined the team as' : (requestedRankIndex > oldIndex ? 'was promoted to' : 'was moved to');
+    message.reply(`✅ ${target} ${verb} **${RANK_LADDER[requestedRankIndex].name}**.`);
+    sendLog(guild, '🆕', 'Rank Assigned',
+      `${target.user.tag} ${verb} **${RANK_LADDER[requestedRankIndex].name}**.`, message.author, 0x3498db);
     return;
   }
 
