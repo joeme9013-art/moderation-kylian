@@ -82,8 +82,22 @@ function sendLog(guild, emoji, title, description, actor, color) {
   getLogChannel(guild)?.send({ embeds: [buildLogEmbed(emoji, title, description, actor, color)] });
 }
 
+// ---------- Consistent branded reply embeds ----------
+const BRAND_FOOTER = 'EUP Somalia Moderation';
+function replyEmbed({ emoji = '✅', title, description, color = 0x5865f2, fields = [], thumbnail = null }) {
+  const embed = new EmbedBuilder()
+    .setTitle(`${emoji} ${title}`)
+    .setColor(color)
+    .setFooter({ text: BRAND_FOOTER })
+    .setTimestamp();
+  if (description) embed.setDescription(description);
+  if (fields.length) embed.addFields(fields);
+  if (thumbnail) embed.setThumbnail(thumbnail);
+  return { embeds: [embed] };
+}
+
 // ---------- Credit rewards ----------
-const CREDIT_REWARDS = { mute: 10, kick: 20, ban: 30, correctAnswer: 5 };
+const CREDIT_REWARDS = { mute: 5, kick: 10, ban: 15, correctAnswer: 3 };
 
 function addCredits(userId, amount) {
   let finalAmount = amount;
@@ -135,15 +149,15 @@ function colorForTag(tagText) {
 // ---------- Rank ladder ----------
 const RANK_LADDER = [
   { name: 'Trial Moderator', cost: 0 },
-  { name: 'Moderator', cost: 50 },
-  { name: 'Senior Moderator', cost: 150 },
-  { name: 'Head Moderator', cost: 300 },
-  { name: 'Trial Admin', cost: 500 },
-  { name: 'Admin', cost: 750 },
-  { name: 'Senior Admin', cost: 1050 },
-  { name: 'Head Admin', cost: 1400 },
-  { name: 'Assistant Server Manager', cost: 1700 },
-  { name: 'Server Manager', cost: 2000 },
+  { name: 'Moderator', cost: 40 },
+  { name: 'Senior Moderator', cost: 120 },
+  { name: 'Head Moderator', cost: 250 },
+  { name: 'Trial Admin', cost: 400 },
+  { name: 'Admin', cost: 600 },
+  { name: 'Senior Admin', cost: 800 },
+  { name: 'Head Admin', cost: 1000 },
+  { name: 'Assistant Server Manager', cost: 1300 },
+  { name: 'Server Manager', cost: 1600 },
 ];
 function getRankIndex(userId) {
   return data.ranks[userId] ?? -1;
@@ -246,7 +260,11 @@ async function applyWarn(interaction, type, target) {
   saveData(data);
 
   const label = type === 'warn' ? 'Warn' : type === 'minorwarn' ? 'Minor Warn' : 'Major Warn';
-  await interaction.reply(`${target} has been given a **${type}** — timed out for ${weeks} week(s).`);
+  await interaction.reply(replyEmbed({
+    emoji: '⚠️', title: `${label} Issued`,
+    description: `${target} has been timed out for **${weeks} week(s)**.`,
+    color: 0xe67e22, thumbnail: target.user.displayAvatarURL(),
+  }));
   sendLog(interaction.guild, '⚠️', `New ${label}`, `${target.user.tag} was warned — timed out for ${weeks} week(s).`, interaction.user, 0xe67e22);
 }
 
@@ -581,7 +599,11 @@ client.on('interactionCreate', async (interaction) => {
         const channel = interaction.options.getChannel('channel');
         data.config.logChannelId = channel.id;
         saveData(data);
-        await interaction.reply(`✅ Logging will now post in ${channel}.`);
+        await interaction.reply(replyEmbed({
+          emoji: '📋', title: 'Log Channel Set',
+          description: `All moderation logs will now post in ${channel}.`,
+          color: 0x2ecc71,
+        }));
         return;
       }
 
@@ -597,7 +619,11 @@ client.on('interactionCreate', async (interaction) => {
         }
         data.onBreak[interaction.user.id] = Date.now();
         saveData(data);
-        await interaction.reply('🌴 You are now on break — inactivity warnings are fully paused. Use `/unbreak` when you\'re back.');
+        await interaction.reply(replyEmbed({
+          emoji: '🌴', title: 'Break Started',
+          description: "Inactivity warnings are fully paused. Use `/unbreak` when you're back.",
+          color: 0x1abc9c,
+        }));
         sendLog(interaction.guild, '🌴', 'Break Started', `${interaction.user.tag} started a break.`, interaction.user, 0x1abc9c);
         return;
       }
@@ -609,7 +635,11 @@ client.on('interactionCreate', async (interaction) => {
         delete data.onBreak[interaction.user.id];
         markActive(interaction.user.id);
         saveData(data);
-        await interaction.reply('👋 Welcome back! Inactivity tracking has resumed.');
+        await interaction.reply(replyEmbed({
+          emoji: '👋', title: 'Welcome Back',
+          description: 'Inactivity tracking has resumed.',
+          color: 0x1abc9c,
+        }));
         sendLog(interaction.guild, '👋', 'Break Ended', `${interaction.user.tag} ended their break.`, interaction.user, 0x1abc9c);
         return;
       }
@@ -626,25 +656,34 @@ client.on('interactionCreate', async (interaction) => {
         data.lastClaim[interaction.user.id] = Date.now();
         addCredits(interaction.user.id, CLAIM_AMOUNT);
         saveData(data);
-        await interaction.reply(`💰 You claimed your daily **${CLAIM_AMOUNT} credits**! New balance: ${data.credits[interaction.user.id]}.`);
+        await interaction.reply(replyEmbed({
+          emoji: '💰', title: 'Daily Credits Claimed',
+          description: `You claimed **${CLAIM_AMOUNT} credits**!`,
+          fields: [{ name: 'New Balance', value: `${data.credits[interaction.user.id]}`, inline: true }],
+          color: 0xf1c40f,
+        }));
         return;
       }
       case 'balance': {
         const target = interaction.options.getMember('user') || interaction.member;
-        await interaction.reply(`💳 ${target.id === interaction.member.id ? 'Your' : `${target.user.tag}'s`} balance: **${data.credits[target.id] || 0} credits**.`);
+        await interaction.reply(replyEmbed({
+          emoji: '💳', title: `${target.id === interaction.member.id ? 'Your' : `${target.user.tag}'s`} Balance`,
+          description: `**${data.credits[target.id] || 0}** credits`,
+          color: 0xf1c40f, thumbnail: target.user.displayAvatarURL(),
+        }));
         return;
       }
       case 'richlist': {
         const sorted = Object.entries(data.credits).sort((a, b) => b[1] - a[1]).slice(0, 10);
         if (sorted.length === 0) {
-          await interaction.reply('No one has earned credits yet.');
+          await interaction.reply(replyEmbed({ emoji: '💰', title: 'Richlist', description: 'No one has earned credits yet.', color: 0xf1c40f }));
           return;
         }
         const lines = await Promise.all(sorted.map(async ([userId, amt], i) => {
           const member = await interaction.guild.members.fetch(userId).catch(() => null);
           return `**${i + 1}.** ${member ? member.user.tag : 'Unknown user'} — ${amt} credits`;
         }));
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('💰 Richlist').setDescription(lines.join('\n')).setColor(0xf1c40f)] });
+        await interaction.reply(replyEmbed({ emoji: '💰', title: 'Richlist', description: lines.join('\n'), color: 0xf1c40f }));
         return;
       }
       case 'addcredits':
@@ -653,7 +692,14 @@ client.on('interactionCreate', async (interaction) => {
         const amount = interaction.options.getInteger('amount');
         const delta = name === 'addcredits' ? amount : -amount;
         addCredits(target.id, delta);
-        await interaction.reply(`${name === 'addcredits' ? '➕' : '➖'} ${target.user.tag}'s credits ${name === 'addcredits' ? 'increased' : 'decreased'} by ${amount}. New total: ${data.credits[target.id] || 0}.`);
+        await interaction.reply(replyEmbed({
+          emoji: name === 'addcredits' ? '➕' : '➖',
+          title: name === 'addcredits' ? 'Credits Added' : 'Credits Removed',
+          description: `${target}'s credits ${name === 'addcredits' ? 'increased' : 'decreased'} by **${amount}**.`,
+          fields: [{ name: 'New Total', value: `${data.credits[target.id] || 0}`, inline: true }],
+          color: name === 'addcredits' ? 0x2ecc71 : 0xe74c3c,
+          thumbnail: target.user.displayAvatarURL(),
+        }));
         sendLog(interaction.guild, '💳', name === 'addcredits' ? 'Credits Added' : 'Credits Removed',
           `${amount} credits ${name === 'addcredits' ? 'added to' : 'removed from'} ${target.user.tag}. New total: ${data.credits[target.id] || 0}.`,
           interaction.user, name === 'addcredits' ? 0x2ecc71 : 0xe74c3c);
@@ -663,7 +709,7 @@ client.on('interactionCreate', async (interaction) => {
       // ---------- shop ----------
       case 'shop': {
         const lines = SHOP_ITEMS.map((item) => `**${item.id}** — ${item.name} (${item.cost} credits)\n   ${item.desc || `Sets your tag to "${item.tagText}"`}`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🛒 Moderator Perk Shop').setDescription(lines.join('\n\n') + '\n\nBuy with `/buy`').setColor(0x1abc9c)] });
+        await interaction.reply(replyEmbed({ emoji: '🛒', title: 'Moderator Perk Shop', description: lines.join('\n\n') + '\n\nBuy with `/buy`', color: 0x1abc9c }));
         return;
       }
       case 'buy': {
@@ -707,7 +753,9 @@ client.on('interactionCreate', async (interaction) => {
           resultMsg += ` Your profile card now uses this color.`;
         }
         saveData(data);
-        await interaction.reply(resultMsg);
+        await interaction.reply(replyEmbed({
+          emoji: '🛍️', title: 'Purchase Complete', description: resultMsg.replace('✅ ', ''), color: 0x2ecc71,
+        }));
         return;
       }
 
@@ -721,9 +769,15 @@ client.on('interactionCreate', async (interaction) => {
       case 'warnings': {
         const target = interaction.options.getMember('user') || interaction.member;
         const warns = data.warns[target.id] || [];
-        if (warns.length === 0) { await interaction.reply(`${target} has no warns on record.`); return; }
+        if (warns.length === 0) {
+          await interaction.reply(replyEmbed({ emoji: '📋', title: 'No Warns', description: `${target} has no warns on record.`, color: 0x2ecc71 }));
+          return;
+        }
         const lines = warns.map((w, i) => `**${i + 1}.** ${w.type} — issued <t:${Math.floor(w.at / 1000)}:R>`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${target.user.tag}'s Warnings`).setDescription(lines.join('\n')).setColor(0xe74c3c)] });
+        await interaction.reply(replyEmbed({
+          emoji: '⚠️', title: `${target.user.tag}'s Warnings`, description: lines.join('\n'),
+          color: 0xe74c3c, thumbnail: target.user.displayAvatarURL(),
+        }));
         return;
       }
       case 'clearwarns': {
@@ -731,7 +785,9 @@ client.on('interactionCreate', async (interaction) => {
         data.warns[target.id] = [];
         updateTag(target.id);
         saveData(data);
-        await interaction.reply(`✅ Cleared all warns for ${target}.`);
+        await interaction.reply(replyEmbed({
+          emoji: '🧹', title: 'Warns Cleared', description: `All warns cleared for ${target}.`, color: 0x2ecc71,
+        }));
         sendLog(interaction.guild, '🧹', 'Warns Cleared', `All warns cleared for ${target.user.tag}.`, interaction.user, 0x2ecc71);
         return;
       }
@@ -749,7 +805,12 @@ client.on('interactionCreate', async (interaction) => {
         }
         addCredits(interaction.user.id, CREDIT_REWARDS.mute);
         const label = durationArg && MUTE_DURATIONS[durationArg] ? durationArg : '10m (default)';
-        await interaction.reply(`${target.user.tag} was muted for **${label}**. You earned ${CREDIT_REWARDS.mute} credits.`);
+        await interaction.reply(replyEmbed({
+          emoji: '🔇', title: 'Member Muted',
+          description: `${target} was muted for **${label}**.`,
+          fields: [{ name: 'Credits Earned', value: `${CREDIT_REWARDS.mute}`, inline: true }],
+          color: 0xf39c12, thumbnail: target.user.displayAvatarURL(),
+        }));
         sendLog(interaction.guild, '🔇', 'Member Muted', `${target.user.tag} (${target.id}) was muted for ${label}.`, interaction.user, 0xf39c12);
         return;
       }
@@ -757,6 +818,7 @@ client.on('interactionCreate', async (interaction) => {
         const target = interaction.options.getMember('user');
         const targetTag = target.user.tag;
         const targetId = target.id;
+        const targetAvatar = target.user.displayAvatarURL();
         try {
           if (name === 'kick') await target.kick(`Kicked by ${interaction.user.tag}`);
           if (name === 'ban') await target.ban({ reason: `Banned by ${interaction.user.tag}` });
@@ -765,7 +827,12 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         addCredits(interaction.user.id, CREDIT_REWARDS[name]);
-        await interaction.reply(`${targetTag} was ${name}ed. You earned ${CREDIT_REWARDS[name]} credits.`);
+        await interaction.reply(replyEmbed({
+          emoji: name === 'kick' ? '👢' : '🔨', title: name === 'kick' ? 'Member Kicked' : 'Member Banned',
+          description: `**${targetTag}** was ${name}ed.`,
+          fields: [{ name: 'Credits Earned', value: `${CREDIT_REWARDS[name]}`, inline: true }],
+          color: name === 'kick' ? 0xe67e22 : 0xc0392b, thumbnail: targetAvatar,
+        }));
         sendLog(interaction.guild, name === 'kick' ? '👢' : '🔨', name === 'kick' ? 'Member Kicked' : 'Member Banned',
           `${targetTag} (${targetId}) was ${name}ed.`, interaction.user, name === 'kick' ? 0xe67e22 : 0xc0392b);
         return;
@@ -774,7 +841,9 @@ client.on('interactionCreate', async (interaction) => {
         const target = interaction.options.getMember('user');
         try {
           await target.timeout(null, `Unmuted by ${interaction.user.tag}`);
-          await interaction.reply(`${target} has been unmuted.`);
+          await interaction.reply(replyEmbed({
+            emoji: '🔊', title: 'Member Unmuted', description: `${target} has been unmuted.`, color: 0x2ecc71,
+          }));
         } catch {
           await interaction.reply({ content: 'Failed to unmute — check bot permissions.', ephemeral: true });
         }
@@ -784,7 +853,9 @@ client.on('interactionCreate', async (interaction) => {
         const userId = interaction.options.getString('userid').replace(/[<@!>]/g, '');
         try {
           await interaction.guild.members.unban(userId, `Unbanned by ${interaction.user.tag}`);
-          await interaction.reply(`✅ Unbanned user ID ${userId}.`);
+          await interaction.reply(replyEmbed({
+            emoji: '🔓', title: 'Member Unbanned', description: `User ID \`${userId}\` was unbanned.`, color: 0x2ecc71,
+          }));
           sendLog(interaction.guild, '🔓', 'Member Unbanned', `User ID ${userId} was unbanned.`, interaction.user, 0x2ecc71);
         } catch {
           await interaction.reply({ content: 'Failed to unban — check the ID and bot permissions.', ephemeral: true });
@@ -812,7 +883,9 @@ client.on('interactionCreate', async (interaction) => {
         const newTag = interaction.options.getString('text');
         data.tags[target.id] = { text: newTag, manual: true };
         saveData(data);
-        await interaction.reply(`Tag for ${target} set to **${newTag}**.`);
+        await interaction.reply(replyEmbed({
+          emoji: '🏷️', title: 'Tag Updated', description: `${target}'s tag set to **${newTag}**.`, color: 0x9b59b6,
+        }));
         sendLog(interaction.guild, '🏷️', 'Tag Updated', `${target.user.tag}'s tag was set to "${newTag}".`, interaction.user, 0x9b59b6);
         return;
       }
@@ -824,7 +897,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         data.pfps[interaction.user.id] = url;
         saveData(data);
-        await interaction.reply('✅ Your profile card image is set. Check it with `/profile`.');
+        await interaction.reply(replyEmbed({
+          emoji: '🖼️', title: 'Profile Image Set', description: 'Check it with `/profile`.', color: 0x2ecc71, thumbnail: url,
+        }));
         return;
       }
       case 'profile': {
@@ -858,14 +933,15 @@ client.on('interactionCreate', async (interaction) => {
         const target = interaction.options.getMember?.('user') || interaction.member;
         const stats = data.trainingStats[target.id] || { taken: 0, correct: 0 };
         const pct = stats.taken > 0 ? Math.round((stats.correct / stats.taken) * 100) : 0;
-        await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle(`${target.user.tag}'s Training Progress`)
-            .addFields(
-              { name: 'Questions Answered', value: `${stats.taken}`, inline: true },
-              { name: 'Correct', value: `${stats.correct}`, inline: true },
-              { name: 'Accuracy', value: `${pct}%`, inline: true },
-            ).setColor(0x9b59b6)],
-        });
+        await interaction.reply(replyEmbed({
+          emoji: '📊', title: `${target.user.tag}'s Training Progress`, color: 0x9b59b6,
+          thumbnail: target.user.displayAvatarURL(),
+          fields: [
+            { name: 'Questions Answered', value: `${stats.taken}`, inline: true },
+            { name: 'Correct', value: `${stats.correct}`, inline: true },
+            { name: 'Accuracy', value: `${pct}%`, inline: true },
+          ],
+        }));
         return;
       }
       case 'roster': {
@@ -898,13 +974,15 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         await pickModeratorOfTheDay(interaction.guild);
-        await interaction.reply('✅ Moderator of the Day has been announced.');
+        await interaction.reply(replyEmbed({ emoji: '🏆', title: 'Announced', description: 'Moderator of the Day has been announced.', color: 0xffd700 }));
         return;
       }
       case 'demote': {
         const target = interaction.options.getMember('user');
         const newRank = await demoteMember(interaction.guild, target);
-        await interaction.reply(newRank ? `${target} was demoted to **${newRank}**.` : `${target} could not be demoted.`);
+        await interaction.reply(newRank
+          ? replyEmbed({ emoji: '⬇️', title: 'Moderator Demoted', description: `${target} was demoted to **${newRank}**.`, color: 0xc0392b })
+          : replyEmbed({ emoji: '❌', title: 'Demotion Failed', description: `${target} could not be demoted.`, color: 0xe74c3c }));
         if (newRank) sendLog(interaction.guild, '⬇️', 'Moderator Demoted', `${target.user.tag} was demoted to **${newRank}**.`, interaction.user, 0xc0392b);
         return;
       }
@@ -932,7 +1010,11 @@ client.on('interactionCreate', async (interaction) => {
         data.ranks[userId] = nextIndex;
         updateTag(userId);
         saveData(data);
-        await interaction.reply(`🎉 You've been promoted to **${nextRank.name}**! Remaining credits: ${data.credits[userId]}.`);
+        await interaction.reply(replyEmbed({
+          emoji: '🎉', title: 'Promoted!', description: `You've been promoted to **${nextRank.name}**!`,
+          fields: [{ name: 'Remaining Credits', value: `${data.credits[userId]}`, inline: true }],
+          color: 0x2ecc71, thumbnail: interaction.user.displayAvatarURL(),
+        }));
         sendLog(guild, '⬆️', 'Moderator Promoted', `${interaction.user.tag} was promoted to **${nextRank.name}**.`, interaction.user, 0x2ecc71);
         return;
       }
@@ -991,7 +1073,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         saveData(data);
 
-        await interaction.reply(`**Rank update — ${requestedRankName}:**\n${results.join('\n')}`);
+        await interaction.reply(replyEmbed({
+          emoji: '🆕', title: `Rank Update — ${requestedRankName}`, description: results.join('\n'), color: 0x3498db,
+        }));
         sendLog(guild, '🆕', 'Rank(s) Assigned', `${requestedRankName} assigned:\n${results.join('\n')}`, interaction.user, 0x3498db);
         return;
       }
@@ -1015,7 +1099,9 @@ client.on('interactionCreate', async (interaction) => {
         markActive(target.id);
         updateTag(target.id);
         saveData(data);
-        await interaction.reply(`✅ ${target}'s rank was set to **${RANK_LADDER[rankIndex].name}**.`);
+        await interaction.reply(replyEmbed({
+          emoji: '🔧', title: 'Rank Set', description: `${target}'s rank set to **${RANK_LADDER[rankIndex].name}**.`, color: 0x9b59b6,
+        }));
         sendLog(guild, '🔧', 'Rank Manually Set', `${target.user.tag}'s rank was set to **${RANK_LADDER[rankIndex].name}**.`, interaction.user, 0x9b59b6);
         return;
       }
@@ -1029,7 +1115,11 @@ client.on('interactionCreate', async (interaction) => {
         activeSessions.add(interaction.user.id);
         let score = 0;
         const shuffledQuiz = shuffle(quiz);
-        await interaction.reply(`📘 Starting moderator rule training (${shuffledQuiz.length} questions, order randomized). 30 seconds per question.`);
+        await interaction.reply(replyEmbed({
+          emoji: '📘', title: 'Training Started',
+          description: `${shuffledQuiz.length} questions, order randomized. 30 seconds per question — answer in this channel.`,
+          color: 0x3498db,
+        }));
 
         for (const item of shuffledQuiz) {
           await interaction.channel.send(item.q);
@@ -1061,12 +1151,12 @@ client.on('interactionCreate', async (interaction) => {
       case 'trainingexamples': {
         const sample = quiz.slice(0, 3);
         const lines = sample.map((item, i) => `**${i + 1}.** ${item.q}\n   *Expected answer:* ${item.a}`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📖 Training Question Examples').setDescription(lines.join('\n\n')).setColor(0x3498db)] });
+        await interaction.reply(replyEmbed({ emoji: '📖', title: 'Training Question Examples', description: lines.join('\n\n'), color: 0x3498db }));
         return;
       }
       case 'trainingrules': {
         const lines = quiz.map((item) => `• ${item.rule}`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📜 Full Rule Book').setDescription(lines.join('\n')).setColor(0xe67e22)] });
+        await interaction.reply(replyEmbed({ emoji: '📜', title: 'Full Rule Book', description: lines.join('\n'), color: 0xe67e22 }));
         return;
       }
 
@@ -1075,54 +1165,70 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply('Pinging...');
         const sent = await interaction.fetchReply();
         const latency = sent.createdTimestamp - interaction.createdTimestamp;
-        await interaction.editReply(`🏓 Pong! Latency: ${latency}ms | API: ${Math.round(client.ws.ping)}ms`);
+        await interaction.editReply(replyEmbed({
+          emoji: '🏓', title: 'Pong!',
+          fields: [
+            { name: 'Latency', value: `${latency}ms`, inline: true },
+            { name: 'API', value: `${Math.round(client.ws.ping)}ms`, inline: true },
+          ],
+          color: 0x2ecc71,
+        }));
         return;
       }
       case 'uptime': {
         const upMs = Date.now() - START_TIME;
         const hours = Math.floor(upMs / 3600000);
         const mins = Math.floor((upMs % 3600000) / 60000);
-        await interaction.reply(`⏱️ Bot has been online for ${hours}h ${mins}m.`);
+        await interaction.reply(replyEmbed({
+          emoji: '⏱️', title: 'Bot Uptime', description: `Online for **${hours}h ${mins}m**.`, color: 0x5865f2,
+        }));
         return;
       }
       case 'serverinfo': {
         const guild = interaction.guild;
-        await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle(guild.name)
-            .addFields(
-              { name: 'Members', value: `${guild.memberCount}`, inline: true },
-              { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:D>`, inline: true },
-              { name: 'Roles', value: `${guild.roles.cache.size}`, inline: true },
-            ).setThumbnail(guild.iconURL()).setColor(0x5865f2)],
-        });
+        await interaction.reply(replyEmbed({
+          emoji: '🏰', title: guild.name, color: 0x5865f2, thumbnail: guild.iconURL(),
+          fields: [
+            { name: 'Members', value: `${guild.memberCount}`, inline: true },
+            { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:D>`, inline: true },
+            { name: 'Roles', value: `${guild.roles.cache.size}`, inline: true },
+          ],
+        }));
         return;
       }
       case 'userinfo': {
         const target = interaction.options.getMember('user') || interaction.member;
-        await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle(target.user.tag)
-            .addFields(
-              { name: 'Joined Server', value: `<t:${Math.floor(target.joinedTimestamp / 1000)}:D>`, inline: true },
-              { name: 'Account Created', value: `<t:${Math.floor(target.user.createdTimestamp / 1000)}:D>`, inline: true },
-              { name: 'Roles', value: `${target.roles.cache.size - 1}`, inline: true },
-            ).setThumbnail(target.user.displayAvatarURL()).setColor(0x5865f2)],
-        });
+        await interaction.reply(replyEmbed({
+          emoji: '👤', title: target.user.tag, color: 0x5865f2, thumbnail: target.user.displayAvatarURL(),
+          fields: [
+            { name: 'Joined Server', value: `<t:${Math.floor(target.joinedTimestamp / 1000)}:D>`, inline: true },
+            { name: 'Account Created', value: `<t:${Math.floor(target.user.createdTimestamp / 1000)}:D>`, inline: true },
+            { name: 'Roles', value: `${target.roles.cache.size - 1}`, inline: true },
+          ],
+        }));
         return;
       }
       case 'avatar': {
         const target = interaction.options.getMember('user') || interaction.member;
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${target.user.tag}'s Avatar`).setImage(target.user.displayAvatarURL({ size: 512 })).setColor(0x5865f2)] });
+        const embed = new EmbedBuilder()
+          .setTitle(`🖼️ ${target.user.tag}'s Avatar`)
+          .setImage(target.user.displayAvatarURL({ size: 512 }))
+          .setColor(0x5865f2)
+          .setFooter({ text: BRAND_FOOTER })
+          .setTimestamp();
+        await interaction.reply({ embeds: [embed] });
         return;
       }
       case 'embed': {
         const text = interaction.options.getString('text');
-        await interaction.reply({ embeds: [new EmbedBuilder().setDescription(text).setColor(0x5865f2)] });
+        const embed = new EmbedBuilder().setDescription(text).setColor(0x5865f2).setFooter({ text: BRAND_FOOTER }).setTimestamp();
+        await interaction.reply({ embeds: [embed] });
         return;
       }
       case 'feedback': {
         const text = interaction.options.getString('message');
         sendLog(interaction.guild, '📝', 'New Feedback', text, interaction.user, 0x9b59b6);
-        await interaction.reply({ content: '✅ Thanks — your feedback has been logged.', ephemeral: true });
+        await interaction.reply({ ...replyEmbed({ emoji: '📝', title: 'Feedback Logged', description: 'Thanks — your feedback has been logged.', color: 0x9b59b6 }), ephemeral: true });
         return;
       }
       default:
