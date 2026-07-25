@@ -214,6 +214,7 @@ const RANK_REQUIREMENTS = {
   kick: 1, majorwarn: 1, purge: 1,
   ban: 2, clearwarns: 2,
   unban: 5, addcredits: 5, removecredits: 5, demote: 5, rankmod: 5,
+  addchatmessage: 5, chatnow: 5,
   embed: 3,
   setrank: 7,
 };
@@ -430,6 +431,44 @@ function scheduleNextAutoTraining(guild) {
   }, gap);
 }
 
+// ---------- Ambient chatter ----------
+// The bot posts a casual message on its own, at a random interval, in a
+// designated channel — picked from a pool you control (defaults below,
+// plus anything added with /addchatmessage). This is curated, not
+// AI-generated free text, so nothing off-brand or unpredictable gets posted.
+const DEFAULT_CHATTER_MESSAGES = [
+  "Just doing a lap around the server 👀 everything looking good!",
+  "Reminder: `/claim` your daily credits if you haven't yet 💰",
+  "Shoutout to the mod team for keeping things running smoothly 🙌",
+  "If you're new to the team, don't forget to check `/trainingrules`.",
+  "Feeling quiet in here today — how's everyone doing?",
+  "PSA: `/break` exists if you need to step away without losing progress.",
+  "Keeping an eye on things as always. Ping me if you need anything!",
+];
+const CHATTER_MIN_GAP_MS = 3 * 60 * 60 * 1000;   // at least 3 hours between messages
+const CHATTER_MAX_GAP_MS = 10 * 60 * 60 * 1000;  // at most 10 hours between messages
+
+function getChatterPool() {
+  const custom = data.config.chatterMessages || [];
+  return [...DEFAULT_CHATTER_MESSAGES, ...custom];
+}
+async function sendChatterMessage(guild) {
+  const channelId = data.config.chatterChannelId;
+  if (!channelId) return; // not configured yet — skip silently
+  const channel = guild.channels.cache.get(channelId);
+  if (!channel) return;
+  const pool = getChatterPool();
+  const msg = pool[Math.floor(Math.random() * pool.length)];
+  channel.send(msg).catch(() => {});
+}
+function scheduleNextChatter(guild) {
+  const gap = CHATTER_MIN_GAP_MS + Math.random() * (CHATTER_MAX_GAP_MS - CHATTER_MIN_GAP_MS);
+  setTimeout(async () => {
+    await sendChatterMessage(guild);
+    scheduleNextChatter(guild);
+  }, gap);
+}
+
 // ============================================================
 // SLASH COMMAND DEFINITIONS
 // ============================================================
@@ -527,6 +566,11 @@ const slashCommands = [
   // MISC / ADMIN
   new SlashCommandBuilder().setName('setup').setDescription('Set the logging channel. Admin only.')
     .addChannelOption((o) => o.setName('channel').setDescription('Channel for logs').setRequired(true)),
+  new SlashCommandBuilder().setName('setchatchannel').setDescription('Set where the bot posts casual ambient messages. Admin only.')
+    .addChannelOption((o) => o.setName('channel').setDescription('Channel for ambient chatter').setRequired(true)),
+  new SlashCommandBuilder().setName('addchatmessage').setDescription('Add a message to the bot\'s ambient chatter pool. Admin+.')
+    .addStringOption((o) => o.setName('text').setDescription('The message to add').setRequired(true)),
+  new SlashCommandBuilder().setName('chatnow').setDescription('Manually trigger an ambient chatter message right now. Admin+.'),
   new SlashCommandBuilder().setName('break').setDescription('Pause inactivity tracking while you\'re away.'),
   new SlashCommandBuilder().setName('unbreak').setDescription('End your break and resume inactivity tracking.'),
   new SlashCommandBuilder().setName('modoftheday').setDescription('Manually trigger Moderator of the Day. Admin only.'),
@@ -551,6 +595,7 @@ client.once('ready', async () => {
     setInterval(() => checkInactivity(guild), CHECK_INTERVAL_MS);
     setInterval(() => pickModeratorOfTheDay(guild), CHECK_INTERVAL_MS);
     scheduleNextAutoTraining(guild);
+    scheduleNextChatter(guild);
   }
 });
 
@@ -578,6 +623,7 @@ client.on('interactionCreate', async (interaction) => {
           MODERATION: ['warn', 'minorwarn', 'majorwarn', 'warnings', 'clearwarns', 'kick', 'ban', 'unban', 'mute', 'unmute', 'purge'],
           EXTRAS: ['ping', 'uptime', 'serverinfo', 'userinfo', 'avatar', 'embed', 'feedback'],
           TRAINING: ['training', 'trainingexamples', 'trainingrules'],
+          ADMIN: ['setup', 'setchatchannel', 'addchatmessage', 'chatnow', 'break', 'unbreak', 'modoftheday'],
         };
         let out = '```\n';
         for (const [cat, cmds] of Object.entries(categories)) {
@@ -604,6 +650,49 @@ client.on('interactionCreate', async (interaction) => {
           description: `All moderation logs will now post in ${channel}.`,
           color: 0x2ecc71,
         }));
+        return;
+      }
+
+      // ---------- ambient chatter ----------
+      case 'setchatchannel': {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+          await interaction.reply({ content: 'Only server admins can set this.', ephemeral: true });
+          return;
+        }
+        const channel = interaction.options.getChannel('channel');
+        data.config.chatterChannelId = channel.id;
+        saveData(data);
+        await interaction.reply(replyEmbed({
+          emoji: '💬', title: 'Chatter Channel Set',
+          description: `The bot will post casual messages in ${channel} every few hours at random.`,
+          color: 0x2ecc71,
+        }));
+        return;
+      }
+      case 'addchatmessage': {
+        const text = interaction.options.getString('text').trim();
+        if (!text) {
+          await interaction.reply({ content: 'Message text can\'t be empty.', ephemeral: true });
+          return;
+        }
+        data.config.chatterMessages = data.config.chatterMessages || [];
+        data.config.chatterMessages.push(text);
+        saveData(data);
+        await interaction.reply(replyEmbed({
+          emoji: '💬', title: 'Chatter Message Added',
+          description: `Added to the pool: "${text}"`,
+          fields: [{ name: 'Pool Size', value: `${getChatterPool().length}`, inline: true }],
+          color: 0x2ecc71,
+        }));
+        return;
+      }
+      case 'chatnow': {
+        if (!data.config.chatterChannelId) {
+          await interaction.reply({ content: 'No chatter channel set yet — use `/setchatchannel` first.', ephemeral: true });
+          return;
+        }
+        await sendChatterMessage(interaction.guild);
+        await interaction.reply({ content: '✅ Sent.', ephemeral: true });
         return;
       }
 
