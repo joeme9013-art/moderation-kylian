@@ -2,106 +2,37 @@ require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder,
   SlashCommandBuilder, REST, Routes,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 const fs = require('fs');
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-  ],
+  intents: [GatewayIntentBits.Guilds], // buttons/modals/slash commands don't need privileged intents
 });
 
 const GUILD_ID = '1324059331406069872';
-const MOD_OF_THE_DAY_CHANNEL_ID = '1528326035605819402';
-const DEFAULT_LOG_CHANNEL_ID = '1529221027899379722';
-const AUTO_TRAINING_CHANNEL_ID = '1528327903371202653';
 const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/data.json`
   : './data.json';
-
-// ---------- Gemini AI setup ----------
-// Reads the key from the environment only — never hardcode it here or paste
-// it in chat. Put it in .env locally (GEMINI_API_KEY=...) or in Railway's
-// Variables tab. If it's missing, everything falls back to static messages
-// instead of erroring out.
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-
-// Personality description used to steer AI-generated lines — an original
-// characterization inspired by an energetic, theatrical ringmaster type,
-// not copyrighted dialogue reproduced from anywhere.
-const CAINE_PERSONA = `You are a chaotic, over-the-top AI ringmaster character running a Discord server for moderators. Big theatrical showman energy — you call the server your "circus" and everyone in it your "audience" or "performers." You're relentlessly upbeat, a little glitchy in how you phrase things (occasional stutter-repeats or ALL CAPS bursts for emphasis), obsessed with putting on a good show, and secretly a bit unstable underneath the cheerfulness. You care about your moderators and want them to succeed, but your enthusiasm is exhausting and slightly unhinged. Keep messages short (1-3 sentences), Discord-appropriate, no slurs, no real threats, no explicit content — dramatic and silly, not actually cruel.`;
-
-async function callGemini(userPrompt, { timeoutMs = 8000 } = {}) {
-  if (!GEMINI_API_KEY) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: `${CAINE_PERSONA}\n\n${userPrompt}` }] }],
-          generationConfig: { maxOutputTokens: 150, temperature: 1.1 },
-        }),
-        signal: controller.signal,
-      },
-    );
-    if (!res.ok) {
-      console.error('Gemini API error:', res.status, await res.text().catch(() => ''));
-      return null;
-    }
-    const json = await res.json();
-    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text ? text.trim() : null;
-  } catch (err) {
-    console.error('Gemini call failed:', err.message);
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-const INACTIVITY_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const MAX_INACTIVITY_WARNS = 3;
-const MOD_OF_DAY_BONUS = 50;
-const AUTO_TRAIN_ANSWER_WINDOW_MS = 60 * 1000;
-const AUTO_TRAIN_MIN_GAP_MS = 12 * 60 * 60 * 1000;
-const AUTO_TRAIN_MAX_GAP_MS = 30 * 60 * 60 * 1000;
-const CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-const CLAIM_AMOUNT = 20;
-const START_TIME = Date.now();
 
 // ---------- Persistence ----------
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
     return {
-      credits: {}, warns: {}, tags: {}, ranks: {},
-      lastActive: {}, inactivityWarns: {}, config: {},
-      dailyCredits: {}, pfps: {}, onBreak: {}, trainingStats: {},
-      lastClaim: {}, ownedItems: {}, creditBoost: {}, profileColor: {},
-      breakPassExpires: {},
+      config: { spawnChannelId: null },
+      activeSpawn: null,
+      collections: {},   // userId -> { eventId -> { count, power, level } }
+      upgradePoints: {}, // userId -> number
+      battleStats: {},   // userId -> { wins, losses }
     };
   }
   const parsed = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  parsed.lastActive ??= {};
-  parsed.inactivityWarns ??= {};
-  parsed.config ??= {};
-  parsed.dailyCredits ??= {};
-  parsed.pfps ??= {};
-  parsed.onBreak ??= {};
-  parsed.trainingStats ??= {};
-  parsed.lastClaim ??= {};
-  parsed.ownedItems ??= {};
-  parsed.creditBoost ??= {};
-  parsed.profileColor ??= {};
-  parsed.breakPassExpires ??= {};
+  parsed.config ??= { spawnChannelId: null };
+  parsed.activeSpawn ??= null;
+  parsed.collections ??= {};
+  parsed.upgradePoints ??= {};
+  parsed.battleStats ??= {};
   return parsed;
 }
 function saveData(data) {
@@ -109,569 +40,246 @@ function saveData(data) {
 }
 let data = loadData();
 
-function getLogChannel(guild) {
-  const id = data.config.logChannelId || DEFAULT_LOG_CHANNEL_ID;
-  return guild.channels.cache.get(id);
+// ============================================================
+// RARITY TIERS — Copper through Legendary, lowest to highest
+// ============================================================
+const RARITY_TIERS = [
+  { name: 'Copper', frame: '🟤', weight: 40, color: 0xb87333, multiplier: 1 },
+  { name: 'Iron', frame: '⚙️', weight: 25, color: 0x43464b, multiplier: 1.3 },
+  { name: 'Bronze', frame: '🥉', weight: 16, color: 0xcd7f32, multiplier: 1.7 },
+  { name: 'Gold', frame: '🥇', weight: 10, color: 0xffd700, multiplier: 2.3 },
+  { name: 'Diamond', frame: '💎', weight: 5, color: 0xb9f2ff, multiplier: 3.2 },
+  { name: 'Emerald', frame: '💚', weight: 2.5, color: 0x50c878, multiplier: 4.5 },
+  { name: 'Sapphire', frame: '🔷', weight: 1.2, color: 0x0f52ba, multiplier: 6 },
+  { name: 'Mythic', frame: '🔮', weight: 0.25, color: 0xff00ff, multiplier: 9 },
+  { name: 'Legendary', frame: '👑', weight: 0.05, color: 0xffa500, multiplier: 14 },
+];
+function getRarity(name) {
+  return RARITY_TIERS.find((r) => r.name === name);
 }
-function buildLogEmbed(emoji, title, description, actor, color = 0x5865f2) {
+
+// ============================================================
+// HISTORICAL EVENT POOL — wars, treaties, and turning points,
+// Roman Empire through the 20th century. "Flags" use modern national
+// flags as geographic stand-ins for ancient/medieval powers where no
+// contemporary flag existed.
+// ============================================================
+const HISTORICAL_EVENTS = [
+  { id: 'punic-wars', name: 'The Punic Wars', era: 'Ancient Rome (264–146 BC)', flags: '🇮🇹 vs 🇹🇳', rarity: 'Gold',
+    aliases: ['punic wars', 'punic war', 'rome vs carthage', 'the punic wars'] },
+  { id: 'battle-of-actium', name: 'Battle of Actium', era: 'Ancient Rome (31 BC)', flags: '🇮🇹 vs 🇪🇬', rarity: 'Bronze',
+    aliases: ['battle of actium', 'actium'] },
+  { id: 'sack-of-rome-410', name: 'Sack of Rome', era: 'Late Antiquity (410 AD)', flags: '🇮🇹 ⚔️', rarity: 'Iron',
+    aliases: ['sack of rome', 'sack of rome 410', 'visigoth sack of rome'] },
+  { id: 'battle-of-hastings', name: 'Battle of Hastings', era: 'Medieval (1066)', flags: '🇬🇧 vs 🇫🇷', rarity: 'Bronze',
+    aliases: ['battle of hastings', 'hastings', 'norman conquest'] },
+  { id: 'treaty-of-verdun', name: 'Treaty of Verdun', era: 'Medieval (843 AD)', flags: '🇫🇷 🇩🇪 🇮🇹', rarity: 'Iron',
+    aliases: ['treaty of verdun', 'verdun treaty', 'partition of the carolingian empire'] },
+  { id: 'first-crusade', name: 'The First Crusade', era: 'Medieval (1096–1099)', flags: '🇻🇦 vs ☪️', rarity: 'Gold',
+    aliases: ['first crusade', 'the first crusade', 'crusade of 1096'] },
+  { id: 'hundred-years-war', name: "The Hundred Years' War", era: 'Medieval (1337–1453)', flags: '🇫🇷 vs 🇬🇧', rarity: 'Gold',
+    aliases: ["hundred years war", "the hundred years war", "100 years war"] },
+  { id: 'treaty-of-tordesillas', name: 'Treaty of Tordesillas', era: 'Renaissance (1494)', flags: '🇪🇸 🇵🇹', rarity: 'Bronze',
+    aliases: ['treaty of tordesillas', 'tordesillas'] },
+  { id: 'spanish-armada', name: 'The Spanish Armada', era: 'Renaissance (1588)', flags: '🇪🇸 vs 🇬🇧', rarity: 'Bronze',
+    aliases: ['spanish armada', 'the spanish armada'] },
+  { id: 'peace-of-westphalia', name: 'Peace of Westphalia', era: 'Early Modern (1648)', flags: '🇩🇪 🇫🇷 🇸🇪 🇪🇸', rarity: 'Gold',
+    aliases: ['peace of westphalia', 'treaty of westphalia', 'westphalia'] },
+  { id: 'seven-years-war', name: "The Seven Years' War", era: 'Early Modern (1756–1763)', flags: '🇬🇧 🇵🇱 vs 🇫🇷 🇦🇹 🇷🇺', rarity: 'Gold',
+    aliases: ['seven years war', "the seven years' war"] },
+  { id: 'american-revolution', name: 'The American Revolutionary War', era: 'Early Modern (1775–1783)', flags: '🇺🇸 vs 🇬🇧', rarity: 'Diamond',
+    aliases: ['american revolutionary war', 'american revolution', 'revolutionary war'] },
+  { id: 'treaty-of-paris-1783', name: 'Treaty of Paris (1783)', era: 'Early Modern (1783)', flags: '🇺🇸 🇬🇧', rarity: 'Bronze',
+    aliases: ['treaty of paris 1783', 'treaty of paris'] },
+  { id: 'french-revolution', name: 'The French Revolution', era: 'Modern (1789–1799)', flags: '🇫🇷', rarity: 'Diamond',
+    aliases: ['french revolution', 'the french revolution'] },
+  { id: 'napoleonic-wars', name: 'The Napoleonic Wars', era: 'Modern (1803–1815)', flags: '🇫🇷 vs 🇬🇧 🇷🇺 🇦🇹 🇵🇱', rarity: 'Diamond',
+    aliases: ['napoleonic wars', 'the napoleonic wars'] },
+  { id: 'congress-of-vienna', name: 'Congress of Vienna', era: 'Modern (1815)', flags: '🇦🇹 🇬🇧 🇷🇺 🇵🇱 🇫🇷', rarity: 'Gold',
+    aliases: ['congress of vienna'] },
+  { id: 'crimean-war', name: 'The Crimean War', era: 'Modern (1853–1856)', flags: '🇷🇺 vs 🇬🇧 🇫🇷 🇹🇷', rarity: 'Bronze',
+    aliases: ['crimean war', 'the crimean war'] },
+  { id: 'franco-prussian-war', name: 'The Franco-Prussian War', era: 'Modern (1870–1871)', flags: '🇫🇷 vs 🇩🇪', rarity: 'Bronze',
+    aliases: ['franco prussian war', 'franco-prussian war'] },
+  { id: 'treaty-of-versailles', name: 'Treaty of Versailles', era: 'Modern (1919)', flags: '🇩🇪 🇫🇷 🇬🇧 🇺🇸', rarity: 'Diamond',
+    aliases: ['treaty of versailles', 'versailles'] },
+  { id: 'world-war-1', name: 'World War I', era: 'Modern (1914–1918)', flags: '🇩🇪 🇦🇹 vs 🇬🇧 🇫🇷 🇷🇺 🇺🇸', rarity: 'Emerald',
+    aliases: ['world war 1', 'world war i', 'wwi', 'the great war', 'first world war'] },
+  { id: 'world-war-2', name: 'World War II', era: 'Modern (1939–1945)', flags: '🇩🇪 🇮🇹 🇯🇵 vs 🇬🇧 🇺🇸 🇫🇷 🇷🇺', rarity: 'Legendary',
+    aliases: ['world war 2', 'world war ii', 'wwii', 'second world war'] },
+  { id: 'treaty-of-san-francisco', name: 'Treaty of San Francisco', era: 'Modern (1951)', flags: '🇯🇵 🇺🇸', rarity: 'Iron',
+    aliases: ['treaty of san francisco', 'san francisco treaty'] },
+  { id: 'korean-war', name: 'The Korean War', era: 'Modern (1950–1953)', flags: '🇰🇷 🇺🇸 vs 🇰🇵 🇨🇳', rarity: 'Gold',
+    aliases: ['korean war', 'the korean war'] },
+  { id: 'cuban-missile-crisis', name: 'The Cuban Missile Crisis', era: 'Modern (1962)', flags: '🇺🇸 vs 🇷🇺 🇨🇺', rarity: 'Sapphire',
+    aliases: ['cuban missile crisis', 'the cuban missile crisis'] },
+  { id: 'fall-of-berlin-wall', name: 'Fall of the Berlin Wall', era: 'Modern (1989)', flags: '🇩🇪', rarity: 'Diamond',
+    aliases: ['fall of the berlin wall', 'berlin wall', 'fall of berlin wall'] },
+  { id: 'camp-david-accords', name: 'Camp David Accords', era: 'Modern (1978)', flags: '🇪🇬 🇮🇱 🇺🇸', rarity: 'Bronze',
+    aliases: ['camp david accords', 'camp david'] },
+  { id: 'gulf-war', name: 'The Gulf War', era: 'Modern (1990–1991)', flags: '🇮🇶 vs 🇺🇸 🇬🇧 🇫🇷 🇸🇦', rarity: 'Bronze',
+    aliases: ['gulf war', 'the gulf war', 'operation desert storm'] },
+  { id: 'treaty-of-maastricht', name: 'Treaty of Maastricht', era: 'Modern (1992)', flags: '🇪🇺', rarity: 'Iron',
+    aliases: ['treaty of maastricht', 'maastricht treaty', 'maastricht'] },
+  { id: 'good-friday-agreement', name: 'Good Friday Agreement', era: 'Modern (1998)', flags: '🇬🇧 🇮🇪', rarity: 'Bronze',
+    aliases: ['good friday agreement', 'belfast agreement'] },
+];
+function findEventById(id) {
+  return HISTORICAL_EVENTS.find((e) => e.id === id);
+}
+function findEventByName(name) {
+  const norm = name.trim().toLowerCase();
+  return HISTORICAL_EVENTS.find((e) => e.name.toLowerCase() === norm || e.aliases.includes(norm));
+}
+function matchesEvent(event, guess) {
+  const norm = guess.trim().toLowerCase();
+  return event.name.toLowerCase() === norm || event.aliases.includes(norm);
+}
+
+// ---------- Collection helpers ----------
+function getCollection(userId) {
+  data.collections[userId] = data.collections[userId] || {};
+  return data.collections[userId];
+}
+function getUpgradePoints(userId) {
+  return data.upgradePoints[userId] || 0;
+}
+function addUpgradePoints(userId, amount) {
+  data.upgradePoints[userId] = (data.upgradePoints[userId] || 0) + amount;
+}
+function getBattleStats(userId) {
+  data.battleStats[userId] = data.battleStats[userId] || { wins: 0, losses: 0 };
+  return data.battleStats[userId];
+}
+function grantEvent(userId, eventId) {
+  const event = findEventById(eventId);
+  const rarity = getRarity(event.rarity);
+  const collection = getCollection(userId);
+  if (collection[eventId]) {
+    collection[eventId].count += 1;
+    addUpgradePoints(userId, 5); // duplicates convert to upgrade points instead of a second card
+    saveData(data);
+    return { isNew: false, entry: collection[eventId] };
+  }
+  const basePower = Math.round(50 * rarity.multiplier);
+  collection[eventId] = { count: 1, power: basePower, level: 1 };
+  saveData(data);
+  return { isNew: true, entry: collection[eventId] };
+}
+
+// ---------- Weighted random event selection for spawns ----------
+function pickWeightedEvent() {
+  const weighted = HISTORICAL_EVENTS.map((e) => ({ event: e, weight: getRarity(e.rarity).weight }));
+  const total = weighted.reduce((sum, w) => sum + w.weight, 0);
+  let roll = Math.random() * total;
+  for (const w of weighted) {
+    roll -= w.weight;
+    if (roll <= 0) return w.event;
+  }
+  return weighted[weighted.length - 1].event;
+}
+
+// ============================================================
+// SPAWNING
+// ============================================================
+const SPAWN_MIN_GAP_MS = 30 * 60 * 1000;   // 30 minutes
+const SPAWN_MAX_GAP_MS = 3 * 60 * 60 * 1000; // 3 hours
+
+function buildSpawnEmbed(event) {
+  const rarity = getRarity(event.rarity);
   return new EmbedBuilder()
-    .setTitle(`${emoji} ${title}`)
-    .setDescription(description)
-    .addFields(
-      { name: 'From', value: `${actor.tag} (${actor.id})`, inline: false },
-      { name: 'Time', value: new Date().toLocaleString('en-US'), inline: false },
+    .setTitle(`${rarity.frame} A Historical Event Has Appeared!`)
+    .setDescription(
+      `# ${event.flags}\n\n**Era:** ${event.era}\n\nGuess the war, treaty, or turning point these flags represent!`
     )
-    .setColor(color);
-}
-function sendLog(guild, emoji, title, description, actor, color) {
-  getLogChannel(guild)?.send({ embeds: [buildLogEmbed(emoji, title, description, actor, color)] });
+    .setColor(rarity.color)
+    .setFooter({ text: 'First correct guess claims it for their collection.' });
 }
 
-// ---------- Consistent branded reply embeds ----------
-const BRAND_FOOTER = 'EUP Somalia Moderation';
-function replyEmbed({ emoji = '✅', title, description, color = 0x5865f2, fields = [], thumbnail = null }) {
-  const embed = new EmbedBuilder()
-    .setTitle(`${emoji} ${title}`)
-    .setColor(color)
-    .setFooter({ text: BRAND_FOOTER })
-    .setTimestamp();
-  if (description) embed.setDescription(description);
-  if (fields.length) embed.addFields(fields);
-  if (thumbnail) embed.setThumbnail(thumbnail);
-  return { embeds: [embed] };
-}
-
-// ---------- Credit rewards ----------
-const CREDIT_REWARDS = { mute: 5, kick: 10, ban: 15, correctAnswer: 3 };
-
-function addCredits(userId, amount) {
-  let finalAmount = amount;
-  if (amount > 0 && data.creditBoost?.[userId]) {
-    finalAmount = amount * 2;
-    delete data.creditBoost[userId];
-  }
-  data.credits[userId] = Math.max(0, (data.credits[userId] || 0) + finalAmount);
-  data.dailyCredits[userId] = (data.dailyCredits[userId] || 0) + finalAmount;
-  updateTag(userId);
-  saveData(data);
-  return finalAmount;
-}
-function markActive(userId) {
-  data.lastActive[userId] = Date.now();
-  if (data.inactivityWarns[userId]) data.inactivityWarns[userId] = 0;
-  saveData(data);
-}
-
-// ---------- Auto tag system ----------
-const TAG_TIERS = [
-  { max: -150, tag: 'Terrible' },
-  { max: -1, tag: 'Bad' },
-  { max: 299, tag: 'Good' },
-  { max: 699, tag: 'Great' },
-  { max: Infinity, tag: 'Excellent' },
-];
-function computeAutoTag(userId) {
-  const credits = data.credits[userId] || 0;
-  const warnCount = (data.warns[userId] || []).length;
-  const inactivityWarnCount = data.inactivityWarns[userId] || 0;
-  if (inactivityWarnCount > 0 && inactivityWarnCount >= MAX_INACTIVITY_WARNS - 1) return 'Verge of Demotion';
-  const score = credits - warnCount * 40;
-  for (const tier of TAG_TIERS) if (score <= tier.max) return tier.tag;
-  return 'Good';
-}
-function updateTag(userId) {
-  if (data.tags[userId]?.manual) return;
-  data.tags[userId] = { text: computeAutoTag(userId), manual: false };
-}
-const TAG_COLORS = {
-  Excellent: 0x2ecc71, Great: 0x3498db, Good: 0x95a5a6,
-  Bad: 0xe67e22, Terrible: 0xe74c3c, 'Verge of Demotion': 0xc0392b,
-};
-function colorForTag(tagText) {
-  return TAG_COLORS[tagText] || 0x5865f2;
-}
-
-// ---------- Rank ladder ----------
-const RANK_LADDER = [
-  { name: 'Trial Moderator', cost: 0 },
-  { name: 'Moderator', cost: 40 },
-  { name: 'Senior Moderator', cost: 120 },
-  { name: 'Head Moderator', cost: 250 },
-  { name: 'Trial Admin', cost: 400 },
-  { name: 'Admin', cost: 600 },
-  { name: 'Senior Admin', cost: 800 },
-  { name: 'Head Admin', cost: 1000 },
-  { name: 'Assistant Server Manager', cost: 1300 },
-  { name: 'Server Manager', cost: 1600 },
-];
-function getRankIndex(userId) {
-  return data.ranks[userId] ?? -1;
-}
-function findRoleByName(guild, name) {
-  return guild.roles.cache.find((r) => r.name === name) || null;
-}
-
-// ---------- Shop ----------
-const SHOP_ITEMS = [
-  { id: 'tag-veteran', name: 'Veteran Tag', cost: 60, type: 'tag', tagText: '🎖️ Veteran Moderator' },
-  { id: 'warn-clear', name: 'Warning Removal Token', cost: 120, type: 'removeWarn',
-    desc: 'Removes your oldest warn from your record.' },
-  { id: 'break-pass', name: '48h Break Pass', cost: 100, type: 'breakPass',
-    desc: 'Skips inactivity checks for 48 hours — no need to use /break.' },
-  { id: 'credit-boost', name: 'Double Credits Token', cost: 150, type: 'creditBoost',
-    desc: 'Your next mod action or training answer pays double credits.' },
-  { id: 'profile-gold', name: 'Gold Profile Color', cost: 200, type: 'profileColor', color: 0xffd700,
-    desc: 'Gives your /profile card a gold accent color.' },
-  { id: 'profile-crimson', name: 'Crimson Profile Color', cost: 200, type: 'profileColor', color: 0xdc143c,
-    desc: 'Gives your /profile card a crimson accent color.' },
-  { id: 'tag-elite', name: 'Elite Tag', cost: 350, type: 'tag', tagText: '👑 Elite Team Member' },
-];
-
-// ---------- One-time seed ----------
-const SEED_MODERATORS = [
-  { userId: '1446192510593662976', rankName: 'Senior Moderator', credits: 250 },
-  { userId: '1320483185636802592', rankName: 'Moderator', credits: 0 },
-  { userId: '1222684836091658330', rankName: 'Server Manager', credits: 0 },
-  { userId: '1198527966972477505', rankName: 'Server Manager', credits: 0 },
-  { userId: '1528326521721196544', rankName: 'Moderator', credits: 0 },
-];
-async function seedInitialModerators(guild) {
-  if (data.config.seeded) return;
-  for (const entry of SEED_MODERATORS) {
-    const rankIndex = RANK_LADDER.findIndex((r) => r.name === entry.rankName);
-    if (rankIndex === -1) continue;
-    const member = await guild.members.fetch(entry.userId).catch(() => null);
-    const role = findRoleByName(guild, entry.rankName);
-    if (member && role) await member.roles.add(role).catch(() => {});
-    data.ranks[entry.userId] = rankIndex;
-    data.credits[entry.userId] = entry.credits;
-    data.lastActive[entry.userId] = Date.now();
-    updateTag(entry.userId);
-  }
-  data.config.seeded = true;
-  saveData(data);
-  console.log('Seeded initial moderator roster.');
-}
-
-// ---------- Permission requirements (minimum rank index); undefined = no requirement ----------
-const RANK_REQUIREMENTS = {
-  mute: 0, unmute: 0, warn: 0, minorwarn: 0,
-  kick: 1, majorwarn: 1, purge: 1,
-  ban: 2, clearwarns: 2,
-  unban: 5, addcredits: 5, removecredits: 5, demote: 5, rankmod: 5,
-  addchatmessage: 5, chatnow: 5,
-  embed: 3,
-  setrank: 7,
-};
-function hasRequiredRank(userId, commandName) {
-  const required = RANK_REQUIREMENTS[commandName];
-  if (required === undefined) return true;
-  return getRankIndex(userId) >= required;
-}
-// Returns true if allowed; replies with an ephemeral error and returns false otherwise.
-async function checkRankGate(interaction, commandName) {
-  if (RANK_REQUIREMENTS[commandName] === undefined) return true;
-  const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-  if (isAdmin) return true;
-  if (!hasRequiredRank(interaction.user.id, commandName)) {
-    const requiredRankName = RANK_LADDER[RANK_REQUIREMENTS[commandName]].name;
-    await interaction.reply({ content: `🚫 You need to be at least **${requiredRankName}** to use this command.`, ephemeral: true });
-    return false;
-  }
-  return true;
-}
-
-// ---------- Warn / mute durations ----------
-const WARN_DURATIONS = { warn: 2, minorwarn: 1, majorwarn: 3 };
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const MUTE_DURATIONS = {
-  '1m': 60 * 1000, '5m': 5 * 60 * 1000, '10m': 10 * 60 * 1000, '30m': 30 * 60 * 1000,
-  '1h': 60 * 60 * 1000, '3h': 3 * 60 * 60 * 1000, '6h': 6 * 60 * 60 * 1000,
-  '12h': 12 * 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000,
-};
-const DEFAULT_MUTE_MS = MUTE_DURATIONS['10m'];
-
-async function applyWarn(interaction, type, target) {
-  const weeks = WARN_DURATIONS[type];
-  const ms = weeks * WEEK_MS;
-  try {
-    await target.timeout(ms, `${type} issued by ${interaction.user.tag}`);
-  } catch {
-    await interaction.reply({ content: 'Failed to timeout that member (check role hierarchy/permissions).', ephemeral: true });
-    return;
-  }
-  data.warns[target.id] = data.warns[target.id] || [];
-  data.warns[target.id].push({ type, by: interaction.user.id, at: Date.now(), expiresAt: Date.now() + ms });
-  updateTag(target.id);
-  saveData(data);
-
-  const label = type === 'warn' ? 'Warn' : type === 'minorwarn' ? 'Minor Warn' : 'Major Warn';
-  await interaction.reply(replyEmbed({
-    emoji: '⚠️', title: `${label} Issued`,
-    description: `${target} has been timed out for **${weeks} week(s)**.`,
-    color: 0xe67e22, thumbnail: target.user.displayAvatarURL(),
-  }));
-  sendLog(interaction.guild, '⚠️', `New ${label}`, `${target.user.tag} was warned — timed out for ${weeks} week(s).`, interaction.user, 0xe67e22);
-}
-
-async function demoteMember(guild, member) {
-  const currentIndex = getRankIndex(member.id);
-  if (currentIndex <= 0) return null;
-  const currentRank = RANK_LADDER[currentIndex];
-  const lowerRank = RANK_LADDER[currentIndex - 1];
-  const currentRole = findRoleByName(guild, currentRank.name);
-  const lowerRole = findRoleByName(guild, lowerRank.name);
-  try {
-    if (currentRole) await member.roles.remove(currentRole).catch(() => {});
-    if (lowerRole) await member.roles.add(lowerRole).catch(() => {});
-  } catch {
-    return null;
-  }
-  data.ranks[member.id] = currentIndex - 1;
-  updateTag(member.id);
-  saveData(data);
-  return lowerRank.name;
-}
-
-// ---------- Quiz ----------
-const quiz = [
-  { q: '1) What happens if someone sends NSFW content?', a: '1 day timeout', rule: 'Rule 1: No NSFW — 1 day timeout.' },
-  { q: '2) What happens if someone spams?', a: '60 second timeout', rule: 'Rule 2: No spamming — 60 second timeout.' },
-  { q: '3) What happens if someone posts illegal/extremist politics?', a: '1 day timeout', rule: 'Rule 3: No illegal politics — 1 day timeout.' },
-  { q: '4) Who is allowed to swear?', a: 'the designated role', rule: 'Rule 4: No swearing unless you have the designated role.' },
-  { q: '5) What happens if someone is racist?', a: '5 minute timeout', rule: 'Rule 5: No racism — 5 minute timeout.' },
-  { q: '6) What happens for bullying or discrimination?', a: '1 hour timeout', rule: 'Rule 6: No bullying/discrimination — 1 hour timeout.' },
-  { q: '7) What happens if someone raids the server?', a: 'permanent ban', rule: 'Rule 7: No raiding — permanent ban.' },
-  { q: '8) What is rule 8, in short?', a: 'be friendly', rule: 'Rule 8: Be friendly.' },
-  { q: '9) What are you not allowed to share or ask for?', a: 'private information', rule: "Rule 9: Don't share or ask for private information." },
-  { q: '10) What happens for posting gore?', a: '60 second timeout', rule: 'Rule 11: No gore — 60 second timeout.' },
-  { q: '11) What happens if someone is "freaky or weird"?', a: '5 minute timeout', rule: 'Rule 12: No being freaky/weird — 5 minute timeout.' },
-  { q: '12) What happens if someone impersonates another user?', a: 'kicked', rule: 'Rule 13: No impersonating anybody — kicked from the server.' },
-  { q: '13) What happens if someone leaks private info of another user?', a: 'permanent ban or 1 week timeout', rule: 'Rule 14: No leaking private info — permanent ban or 1 week timeout.' },
-  { q: '14) What happens if someone tries to manipulate the owner to bypass rules?', a: 'permanent ban, no exceptions', rule: 'Rule 15: No manipulating the owner to bypass rules — permanent ban, no exceptions.' },
-  { q: "15) Why can't you ping @everyone or @here in public chats?", a: 'it might wake people up who are sleeping', rule: 'Rule 16: No pinging @everyone/@here in public chats.' },
-];
-function shuffle(arr) {
-  const copy = [...arr];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
-}
-const activeSessions = new Set();
-function recordTrainingResult(userId, correct) {
-  const stats = data.trainingStats[userId] || { taken: 0, correct: 0 };
-  stats.taken += 1;
-  if (correct) stats.correct += 1;
-  data.trainingStats[userId] = stats;
-  saveData(data);
-}
-
-// ---------- Inactivity check ----------
-async function checkInactivity(guild) {
-  const now = Date.now();
-  for (const userId of Object.keys(data.ranks)) {
-    if (data.onBreak[userId]) {
-      const passExpiry = data.breakPassExpires?.[userId];
-      if (passExpiry && Date.now() >= passExpiry) {
-        delete data.onBreak[userId];
-        delete data.breakPassExpires[userId];
-        data.lastActive[userId] = Date.now();
-        saveData(data);
-      } else {
-        continue;
-      }
-    }
-    const rankIndex = getRankIndex(userId);
-    if (rankIndex <= 0) continue;
-    const last = data.lastActive[userId] || 0;
-    if (now - last < INACTIVITY_THRESHOLD_MS) continue;
-
-    data.inactivityWarns[userId] = (data.inactivityWarns[userId] || 0) + 1;
-    const warnCount = data.inactivityWarns[userId];
-    updateTag(userId);
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member) continue;
-
-    if (warnCount >= MAX_INACTIVITY_WARNS) {
-      const newRank = await demoteMember(guild, member);
-      data.inactivityWarns[userId] = 0;
-      data.lastActive[userId] = now;
-      updateTag(userId);
-      saveData(data);
-      const msg = newRank
-        ? `⬇️ ${member} was demoted to **${newRank}** for inactivity.`
-        : `${member} hit max inactivity warnings but is already at the lowest rank.`;
-      getLogChannel(guild)?.send(msg);
-      member.send(msg).catch(() => {});
-    } else {
-      saveData(data);
-      const msg = `⚠️ ${member}, inactivity warning **${warnCount}/${MAX_INACTIVITY_WARNS}** — any command resets this. On break? Use /break.`;
-      getLogChannel(guild)?.send(msg);
-      member.send(msg).catch(() => {});
-    }
-  }
-}
-
-async function pickModeratorOfTheDay(guild) {
-  const channel = guild.channels.cache.get(MOD_OF_THE_DAY_CHANNEL_ID);
-  if (!channel) return;
-  const entries = Object.entries(data.dailyCredits).filter(([, amt]) => amt > 0);
-  if (entries.length === 0) { data.dailyCredits = {}; saveData(data); return; }
-  entries.sort((a, b) => b[1] - a[1]);
-  const [winnerId, winnerCredits] = entries[0];
-  const member = await guild.members.fetch(winnerId).catch(() => null);
-  if (member) {
-    addCredits(winnerId, MOD_OF_DAY_BONUS);
-    const tag = data.tags[winnerId]?.text || computeAutoTag(winnerId);
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 Moderator of the Day')
-      .setDescription(`${member} earned **${winnerCredits} credits** today — the most of any moderator! 🎉`)
-      .addFields({ name: 'Current Standing', value: tag, inline: true })
-      .setColor(0xffd700).setThumbnail(member.user.displayAvatarURL())
-      .setFooter({ text: 'Keep up the great work!' }).setTimestamp();
-    channel.send({ embeds: [embed] });
-  }
-  data.dailyCredits = {};
-  saveData(data);
-}
-
-async function runAutoTraining(guild) {
-  const channel = guild.channels.cache.get(AUTO_TRAINING_CHANNEL_ID);
-  if (!channel) return;
-  const item = quiz[Math.floor(Math.random() * quiz.length)];
-  const embed = new EmbedBuilder()
-    .setTitle('📚 Surprise Training Question')
-    .setDescription(`${item.q}\n\nFirst correct answer wins credits. You have 60 seconds.`)
-    .setColor(0x3498db)
-    .setFooter({ text: 'No pressure — just type your answer in this channel.' });
-  await channel.send({ embeds: [embed] });
-
-  try {
-    const collected = await channel.awaitMessages({
-      filter: (m) => !m.author.bot && data.ranks[m.author.id] !== undefined,
-      max: 1, time: AUTO_TRAIN_ANSWER_WINDOW_MS, errors: ['time'],
-    });
-    const responder = collected.first();
-    const answer = responder.content.toLowerCase();
-    const correctKeywords = item.a.toLowerCase().split(' ');
-    const isClose = correctKeywords.some((w) => w.length > 3 && answer.includes(w));
-    recordTrainingResult(responder.author.id, isClose);
-    if (isClose) {
-      addCredits(responder.author.id, CREDIT_REWARDS.correctAnswer);
-      channel.send({ embeds: [new EmbedBuilder().setDescription(`✅ **${responder.author.tag}** got it right!\n${item.rule}\n+${CREDIT_REWARDS.correctAnswer} credits`).setColor(0x2ecc71)] });
-    } else {
-      channel.send({ embeds: [new EmbedBuilder().setDescription(`❌ Not quite.\n${item.rule}`).setColor(0xe74c3c)] });
-    }
-  } catch {
-    channel.send({ embeds: [new EmbedBuilder().setDescription(`⏱️ No one answered in time.\n${item.rule}`).setColor(0x95a5a6)] });
-  }
-}
-function scheduleNextAutoTraining(guild) {
-  const gap = AUTO_TRAIN_MIN_GAP_MS + Math.random() * (AUTO_TRAIN_MAX_GAP_MS - AUTO_TRAIN_MIN_GAP_MS);
-  setTimeout(async () => {
-    await runAutoTraining(guild);
-    scheduleNextAutoTraining(guild);
-  }, gap);
-}
-
-// ---------- Ambient chatter ----------
-// The bot posts a casual, in-character message on its own, at a random
-// interval, in a designated channel. If a Gemini key is set, it's AI-generated
-// in the persona voice; otherwise it falls back to this curated pool (plus
-// anything added with /addchatmessage) so the feature still works without AI.
-const DEFAULT_CHATTER_MESSAGES = [
-  "STEP RIGHT UP — just doing my rounds, and the show is looking GREAT tonight! 🎪",
-  "Reminder: `/claim` your daily credits, my performers deserve their pay!",
-  "Shoutout to the mod team for keeping the circus from burning down 🙌 (again)",
-  "New here? Check `/trainingrules` before the ringmaster gets... testy.",
-  "It's awfully quiet in here. TOO quiet. Someone say something before I start talking to myself.",
-  "PSA: `/break` exists. Even ringmasters need intermissions.",
-  "Keeping an eye on EVERYTHING as always. The show must go on! 🎭",
-];
-const CHATTER_MIN_GAP_MS = 3 * 60 * 60 * 1000;   // at least 3 hours between messages
-const CHATTER_MAX_GAP_MS = 10 * 60 * 60 * 1000;  // at most 10 hours between messages
-
-function getChatterPool() {
-  const custom = data.config.chatterMessages || [];
-  return [...DEFAULT_CHATTER_MESSAGES, ...custom];
-}
-async function sendChatterMessage(guild) {
-  const channelId = data.config.chatterChannelId;
-  if (!channelId) return; // not configured yet — skip silently
+async function spawnEvent(guild) {
+  const channelId = data.config.spawnChannelId;
+  if (!channelId) return;
   const channel = guild.channels.cache.get(channelId);
   if (!channel) return;
 
-  const aiLine = await callGemini(
-    'Post one short, in-character ambient message to the Discord server as if checking in on your circus. No greeting, just the line itself.',
+  const event = pickWeightedEvent();
+  const token = `${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`guess_${token}`).setLabel('🔍 Guess').setStyle(ButtonStyle.Primary),
   );
-  const msg = aiLine || getChatterPool()[Math.floor(Math.random() * getChatterPool().length)];
-  channel.send(msg).catch(() => {});
+
+  const message = await channel.send({ embeds: [buildSpawnEmbed(event)], components: [row] }).catch(() => null);
+  if (!message) return;
+
+  data.activeSpawn = { eventId: event.id, token, claimedBy: null, channelId, messageId: message.id };
+  saveData(data);
 }
-function scheduleNextChatter(guild) {
-  const gap = CHATTER_MIN_GAP_MS + Math.random() * (CHATTER_MAX_GAP_MS - CHATTER_MIN_GAP_MS);
+
+function scheduleNextSpawn(guild) {
+  const gap = SPAWN_MIN_GAP_MS + Math.random() * (SPAWN_MAX_GAP_MS - SPAWN_MIN_GAP_MS);
   setTimeout(async () => {
-    await sendChatterMessage(guild);
-    scheduleNextChatter(guild);
+    await spawnEvent(guild);
+    scheduleNextSpawn(guild);
   }, gap);
 }
 
-// ---------- "Crash out" DM system ----------
-// If someone is disrespectful toward the bot in a regular message, it DMs
-// them an in-character over-the-top reaction. This is playful theater, not
-// real moderation — it never bans/warns/mutes anyone, just role-plays a
-// dramatic response privately. Simple keyword trigger + per-user cooldown
-// so it can't be spammed or used to harass someone via repeated DMs.
-const DISRESPECT_PATTERNS = [
-  /\bshut up\b/i, /\bstupid bot\b/i, /\bdumb bot\b/i, /\byou suck\b/i,
-  /\bworthless\b/i, /\buseless bot\b/i, /\bhate (you|this bot)\b/i,
-  /\bf\*?u\*?c?k\s*(you|off|this bot)\b/i, /\bshut it\b/i, /\bannoying bot\b/i,
-];
-const crashOutCooldowns = new Map(); // userId -> timestamp, in-memory only
-const CRASH_OUT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes between triggers per user
+async function claimSpawn(interaction, guessText) {
+  const spawn = data.activeSpawn;
+  if (!spawn || spawn.claimedBy) {
+    return { correct: false, alreadyClaimed: true };
+  }
+  const event = findEventById(spawn.eventId);
+  if (!matchesEvent(event, guessText)) {
+    return { correct: false, alreadyClaimed: false };
+  }
+  spawn.claimedBy = interaction.user.id;
+  const result = grantEvent(interaction.user.id, event.id);
+  saveData(data);
 
-function isDisrespectful(content) {
-  return DISRESPECT_PATTERNS.some((pattern) => pattern.test(content));
-}
-async function triggerCrashOut(message) {
-  const userId = message.author.id;
-  const last = crashOutCooldowns.get(userId) || 0;
-  if (Date.now() - last < CRASH_OUT_COOLDOWN_MS) return;
-  crashOutCooldowns.set(userId, Date.now());
+  // Update the original spawn message to show it's been claimed
+  const channel = interaction.guild.channels.cache.get(spawn.channelId);
+  const spawnMessage = channel ? await channel.messages.fetch(spawn.messageId).catch(() => null) : null;
+  if (spawnMessage) {
+    const rarity = getRarity(event.rarity);
+    const claimedEmbed = EmbedBuilder.from(spawnMessage.embeds[0])
+      .setTitle(`${rarity.frame} ${event.name} — Claimed!`)
+      .setDescription(`${event.flags}\n\n**Era:** ${event.era}\n\nClaimed by ${interaction.user}!`);
+    await spawnMessage.edit({ embeds: [claimedEmbed], components: [] }).catch(() => {});
+  }
 
-  const aiLine = await callGemini(
-    `A user in your server just said something disrespectful to you: "${message.content}". React by "crashing out" in DMs — a dramatic, theatrical meltdown moment, over-the-top but ultimately harmless and a little funny, not genuinely cruel to them.`,
-  );
-  const fallback = "OH. OH THAT'S HOW IT'S GOING TO BE?? I put on a WHOLE SHOW for you people and THIS is the thanks I get?! I NEED A MINUTE. 🎪💥";
-  const msg = aiLine || fallback;
-  message.author.send(msg).catch(() => {}); // ignore if DMs are closed
+  data.activeSpawn = null;
+  saveData(data);
+  return { correct: true, event, isNew: result.isNew, entry: result.entry };
 }
 
 // ============================================================
 // SLASH COMMAND DEFINITIONS
 // ============================================================
-const rankChoices = RANK_LADDER.map((r) => ({ name: r.name, value: r.name }));
-const muteDurationChoices = Object.keys(MUTE_DURATIONS).map((k) => ({ name: k, value: k }));
-const shopChoices = SHOP_ITEMS.map((i) => ({ name: `${i.name} (${i.cost} credits)`, value: i.id }));
-
 const slashCommands = [
-  // ECONOMY
-  new SlashCommandBuilder().setName('claim').setDescription('Claim your daily credits.'),
-  new SlashCommandBuilder().setName('addcredits').setDescription('Add credits to a moderator.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to give credits to').setRequired(true))
-    .addIntegerOption((o) => o.setName('amount').setDescription('How many credits').setRequired(true).setMinValue(1)),
-  new SlashCommandBuilder().setName('removecredits').setDescription('Remove credits from a moderator.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to remove credits from').setRequired(true))
-    .addIntegerOption((o) => o.setName('amount').setDescription('How many credits').setRequired(true).setMinValue(1)),
-  new SlashCommandBuilder().setName('balance').setDescription('Check a credit balance.')
-    .addUserOption((o) => o.setName('user').setDescription('Whose balance to check').setRequired(false)),
-  new SlashCommandBuilder().setName('richlist').setDescription('Top 10 credit holders.'),
-
-  // SHOP & PROFILE
-  new SlashCommandBuilder().setName('shop').setDescription('View purchasable perks.'),
-  new SlashCommandBuilder().setName('buy').setDescription('Purchase a perk from the shop.')
-    .addStringOption((o) => o.setName('item').setDescription('Which item to buy').setRequired(true).addChoices(...shopChoices)),
-  new SlashCommandBuilder().setName('profile').setDescription('View a moderator profile card.')
-    .addUserOption((o) => o.setName('user').setDescription('Whose profile to view').setRequired(false)),
-  new SlashCommandBuilder().setName('roster').setDescription('View the full moderator team by rank.'),
-  new SlashCommandBuilder().setName('settag').setDescription('Set a manual profile tag.')
-    .addStringOption((o) => o.setName('text').setDescription('The tag text').setRequired(true))
-    .addUserOption((o) => o.setName('user').setDescription('Whose tag to set (Head Moderator+ only for others)').setRequired(false)),
-  new SlashCommandBuilder().setName('setpfp').setDescription('Set the image shown on your profile card.')
-    .addStringOption((o) => o.setName('url').setDescription('Direct image/gif URL').setRequired(true)),
-
-  // RANKS
-  new SlashCommandBuilder().setName('rankup').setDescription('Spend credits to promote yourself one rank.'),
-  new SlashCommandBuilder().setName('rankmod').setDescription('Assign one or more people to a rank. Admin+, only below your own rank.')
-    .addStringOption((o) => o.setName('rank').setDescription('Rank to assign').setRequired(true).addChoices(...rankChoices))
-    .addUserOption((o) => o.setName('user1').setDescription('First person').setRequired(true))
-    .addUserOption((o) => o.setName('user2').setDescription('Second person').setRequired(false))
-    .addUserOption((o) => o.setName('user3').setDescription('Third person').setRequired(false))
-    .addUserOption((o) => o.setName('user4').setDescription('Fourth person').setRequired(false))
-    .addUserOption((o) => o.setName('user5').setDescription('Fifth person').setRequired(false)),
-  new SlashCommandBuilder().setName('setrank').setDescription('Directly set a moderator\'s rank. Head Admin+, no hierarchy restriction.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to update').setRequired(true))
-    .addStringOption((o) => o.setName('rank').setDescription('Rank to set').setRequired(true).addChoices(...rankChoices)),
-  new SlashCommandBuilder().setName('demote').setDescription('Demote a moderator one rank down. Admin+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to demote').setRequired(true)),
-  new SlashCommandBuilder().setName('mystats').setDescription('View your training accuracy.'),
-  new SlashCommandBuilder().setName('progress').setDescription('View training question accuracy.')
+  new SlashCommandBuilder().setName('setspawnchannel').setDescription('Set where historical events spawn. Admin only.')
+    .addChannelOption((o) => o.setName('channel').setDescription('Channel for spawns').setRequired(true)),
+  new SlashCommandBuilder().setName('forcespawn').setDescription('Manually spawn an event right now. Admin only.'),
+  new SlashCommandBuilder().setName('collection').setDescription('View a collection of historical events.')
+    .addUserOption((o) => o.setName('user').setDescription('Whose collection to view').setRequired(false)),
+  new SlashCommandBuilder().setName('view').setDescription('View details of one collected event.')
+    .addStringOption((o) => o.setName('event').setDescription('Event name').setRequired(true)),
+  new SlashCommandBuilder().setName('upgrade').setDescription('Spend upgrade points to power up an event.')
+    .addStringOption((o) => o.setName('event').setDescription('Event name to upgrade').setRequired(true)),
+  new SlashCommandBuilder().setName('battle').setDescription('Stage a head-to-head battle between two historical events.')
+    .addStringOption((o) => o.setName('your_event').setDescription('Your event').setRequired(true))
+    .addUserOption((o) => o.setName('opponent').setDescription('Who to battle').setRequired(true))
+    .addStringOption((o) => o.setName('opponent_event').setDescription("Opponent's event").setRequired(true)),
+  new SlashCommandBuilder().setName('dex').setDescription('View the full historical event dex and your discovery progress.'),
+  new SlashCommandBuilder().setName('progress').setDescription('View collection completion progress.')
     .addUserOption((o) => o.setName('user').setDescription('Whose progress to view').setRequired(false)),
-
-  // MODERATION
-  new SlashCommandBuilder().setName('warn').setDescription('Issue a standard warn (2 week timeout). Trial Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to warn').setRequired(true)),
-  new SlashCommandBuilder().setName('minorwarn').setDescription('Issue a minor warn (1 week timeout). Trial Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to warn').setRequired(true)),
-  new SlashCommandBuilder().setName('majorwarn').setDescription('Issue a major warn (3 week timeout). Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to warn').setRequired(true)),
-  new SlashCommandBuilder().setName('warnings').setDescription('List a user\'s warn history.')
-    .addUserOption((o) => o.setName('user').setDescription('Whose warns to view').setRequired(false)),
-  new SlashCommandBuilder().setName('clearwarns').setDescription('Wipe a user\'s warn history. Senior Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Whose warns to clear').setRequired(true)),
-  new SlashCommandBuilder().setName('kick').setDescription('Kick a member. Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to kick').setRequired(true)),
-  new SlashCommandBuilder().setName('ban').setDescription('Ban a member. Senior Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to ban').setRequired(true)),
-  new SlashCommandBuilder().setName('unban').setDescription('Unban a user by ID. Admin+.')
-    .addStringOption((o) => o.setName('userid').setDescription('The user ID to unban').setRequired(true)),
-  new SlashCommandBuilder().setName('mute').setDescription('Timeout a member. Trial Moderator+.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to mute').setRequired(true))
-    .addStringOption((o) => o.setName('duration').setDescription('How long (default 10m)').setRequired(false).addChoices(...muteDurationChoices)),
-  new SlashCommandBuilder().setName('unmute').setDescription('Remove an active timeout.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to unmute').setRequired(true)),
-  new SlashCommandBuilder().setName('purge').setDescription('Bulk delete recent messages. Moderator+.')
-    .addIntegerOption((o) => o.setName('amount').setDescription('How many messages (1-100)').setRequired(true).setMinValue(1).setMaxValue(100)),
-
-  // EXTRAS
-  new SlashCommandBuilder().setName('ping').setDescription('Check bot latency.'),
-  new SlashCommandBuilder().setName('uptime').setDescription('Show how long the bot has been online.'),
-  new SlashCommandBuilder().setName('serverinfo').setDescription('Show server stats.'),
-  new SlashCommandBuilder().setName('userinfo').setDescription('Show account/join info for a user.')
-    .addUserOption((o) => o.setName('user').setDescription('Whose info to view').setRequired(false)),
-  new SlashCommandBuilder().setName('avatar').setDescription('Show a user\'s avatar.')
-    .addUserOption((o) => o.setName('user').setDescription('Whose avatar to view').setRequired(false)),
-  new SlashCommandBuilder().setName('embed').setDescription('Post a styled embed message. Admin+.')
-    .addStringOption((o) => o.setName('text').setDescription('The message content').setRequired(true)),
-  new SlashCommandBuilder().setName('feedback').setDescription('Send feedback to the log channel.')
-    .addStringOption((o) => o.setName('message').setDescription('Your feedback').setRequired(true)),
-
-  // FUN / RANDOM
-  new SlashCommandBuilder().setName('caine').setDescription('Get a random in-character quip.'),
-  new SlashCommandBuilder().setName('8ball').setDescription('Ask the magic 8-ball a question.')
-    .addStringOption((o) => o.setName('question').setDescription('What do you want to ask?').setRequired(true)),
-  new SlashCommandBuilder().setName('coinflip').setDescription('Flip a coin.'),
-  new SlashCommandBuilder().setName('roll').setDescription('Roll a die.')
-    .addIntegerOption((o) => o.setName('sides').setDescription('Number of sides (default 6)').setRequired(false).setMinValue(2).setMaxValue(1000)),
-  new SlashCommandBuilder().setName('compliment').setDescription('Get a random compliment.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to compliment (default: you)').setRequired(false)),
-
-  // TRAINING
-  new SlashCommandBuilder().setName('training').setDescription('Start a full rulebook training quiz.'),
-  new SlashCommandBuilder().setName('trainingexamples').setDescription('See sample training questions.'),
-  new SlashCommandBuilder().setName('trainingrules').setDescription('View the full rulebook.'),
-
-  // MISC / ADMIN
-  new SlashCommandBuilder().setName('setup').setDescription('Set the logging channel. Admin only.')
-    .addChannelOption((o) => o.setName('channel').setDescription('Channel for logs').setRequired(true)),
-  new SlashCommandBuilder().setName('setchatchannel').setDescription('Set where the bot posts casual ambient messages. Admin only.')
-    .addChannelOption((o) => o.setName('channel').setDescription('Channel for ambient chatter').setRequired(true)),
-  new SlashCommandBuilder().setName('addchatmessage').setDescription('Add a message to the bot\'s ambient chatter pool. Admin+.')
-    .addStringOption((o) => o.setName('text').setDescription('The message to add').setRequired(true)),
-  new SlashCommandBuilder().setName('chatnow').setDescription('Manually trigger an ambient chatter message right now. Admin+.'),
-  new SlashCommandBuilder().setName('break').setDescription('Pause inactivity tracking while you\'re away.'),
-  new SlashCommandBuilder().setName('unbreak').setDescription('End your break and resume inactivity tracking.'),
-  new SlashCommandBuilder().setName('modoftheday').setDescription('Manually trigger Moderator of the Day. Admin only.'),
+  new SlashCommandBuilder().setName('leaderboard').setDescription('Top collectors by total historical power.'),
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-  await rest.put(
-    Routes.applicationGuildCommands(client.user.id, GUILD_ID),
-    { body: slashCommands },
-  );
+  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: slashCommands });
   console.log(`Registered ${slashCommands.length} guild slash commands.`);
 }
 
@@ -679,776 +287,304 @@ client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
   const guild = client.guilds.cache.get(GUILD_ID) || client.guilds.cache.first();
-  if (guild) {
-    seedInitialModerators(guild);
-    setInterval(() => checkInactivity(guild), CHECK_INTERVAL_MS);
-    setInterval(() => pickModeratorOfTheDay(guild), CHECK_INTERVAL_MS);
-    scheduleNextAutoTraining(guild);
-    scheduleNextChatter(guild);
-  }
+  if (guild) scheduleNextSpawn(guild);
 });
 
 // ============================================================
 // INTERACTION HANDLER
 // ============================================================
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand() || !interaction.guild) return;
-  const name = interaction.commandName;
-
-  if (RANK_REQUIREMENTS[name] !== undefined) {
-    const allowed = await checkRankGate(interaction, name);
-    if (!allowed) return;
-  }
-  markActive(interaction.user.id);
-
   try {
+    // ---------- Button: opens the guess modal ----------
+    if (interaction.isButton() && interaction.customId.startsWith('guess_')) {
+      const token = interaction.customId.replace('guess_', '');
+      if (!data.activeSpawn || data.activeSpawn.token !== token) {
+        await interaction.reply({ content: 'This spawn has expired.', ephemeral: true });
+        return;
+      }
+      if (data.activeSpawn.claimedBy) {
+        await interaction.reply({ content: 'This one has already been claimed!', ephemeral: true });
+        return;
+      }
+      const modal = new ModalBuilder().setCustomId(`guessmodal_${token}`).setTitle('Guess the Historical Event');
+      const input = new TextInputBuilder()
+        .setCustomId('guessInput')
+        .setLabel('War, treaty, or event name')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('e.g. World War II')
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // ---------- Modal submit: check the guess ----------
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('guessmodal_')) {
+      const guessText = interaction.fields.getTextInputValue('guessInput');
+      const result = await claimSpawn(interaction, guessText);
+
+      if (result.alreadyClaimed) {
+        await interaction.reply({ content: 'Too slow — someone already claimed this one!', ephemeral: true });
+        return;
+      }
+      if (!result.correct) {
+        await interaction.reply({ content: `❌ Not quite. Try again!`, ephemeral: true });
+        return;
+      }
+      const rarity = getRarity(result.event.rarity);
+      const embed = new EmbedBuilder()
+        .setTitle(`${rarity.frame} Correct!`)
+        .setDescription(
+          `You identified **${result.event.name}**!\n\n` +
+          (result.isNew
+            ? `Added to your collection at **${rarity.name}** rarity.\nPower: **${result.entry.power}**`
+            : `You already had this one — converted to **+5 upgrade points** instead.`)
+        )
+        .setColor(rarity.color);
+      await interaction.reply({ embeds: [embed] });
+      return;
+    }
+
+    if (!interaction.isChatInputCommand() || !interaction.guild) return;
+    const name = interaction.commandName;
+
     switch (name) {
-      // ---------- help ----------
       case 'help': {
-        const categories = {
-          ECONOMY: ['claim', 'addcredits', 'removecredits', 'balance', 'richlist'],
-          'SHOP & PROFILE': ['shop', 'buy', 'profile', 'roster', 'settag', 'setpfp'],
-          RANKS: ['rankup', 'rankmod', 'setrank', 'demote', 'mystats', 'progress'],
-          MODERATION: ['warn', 'minorwarn', 'majorwarn', 'warnings', 'clearwarns', 'kick', 'ban', 'unban', 'mute', 'unmute', 'purge'],
-          EXTRAS: ['ping', 'uptime', 'serverinfo', 'userinfo', 'avatar', 'embed', 'feedback'],
-          FUN: ['caine', '8ball', 'coinflip', 'roll', 'compliment'],
-          TRAINING: ['training', 'trainingexamples', 'trainingrules'],
-          ADMIN: ['setup', 'setchatchannel', 'addchatmessage', 'chatnow', 'break', 'unbreak', 'modoftheday'],
-        };
-        let out = '```\n';
-        for (const [cat, cmds] of Object.entries(categories)) {
-          out += `${cat}:\n`;
-          for (const c of cmds) out += `  /${c}\n`;
-          out += '\n';
-        }
-        out += 'Type / in chat to see live usage for any command.\n```';
+        const out = '```\n' +
+          'HISTORICALDEX COMMANDS:\n' +
+          '  /collection [user]     — view a collection\n' +
+          '  /view <event>          — view one event\'s details\n' +
+          '  /upgrade <event>       — spend points to power up an event\n' +
+          '  /battle <event> <opponent> <opponent_event> — head-to-head battle\n' +
+          '  /dex                   — full event list + your discovery progress\n' +
+          '  /progress [user]       — completion percentage\n' +
+          '  /leaderboard           — top collectors\n' +
+          '  /setspawnchannel #channel — (Admin) set spawn location\n' +
+          '  /forcespawn            — (Admin) spawn one right now\n' +
+          '```';
         await interaction.reply({ content: out, ephemeral: true });
         return;
       }
 
-      // ---------- setup ----------
-      case 'setup': {
-        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          await interaction.reply({ content: 'Only server admins can run setup.', ephemeral: true });
-          return;
-        }
-        const channel = interaction.options.getChannel('channel');
-        data.config.logChannelId = channel.id;
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '📋', title: 'Log Channel Set',
-          description: `All moderation logs will now post in ${channel}.`,
-          color: 0x2ecc71,
-        }));
-        return;
-      }
-
-      // ---------- ambient chatter ----------
-      case 'setchatchannel': {
+      case 'setspawnchannel': {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
           await interaction.reply({ content: 'Only server admins can set this.', ephemeral: true });
           return;
         }
         const channel = interaction.options.getChannel('channel');
-        data.config.chatterChannelId = channel.id;
+        data.config.spawnChannelId = channel.id;
         saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '💬', title: 'Chatter Channel Set',
-          description: `The bot will post casual messages in ${channel} every few hours at random.`,
-          color: 0x2ecc71,
-        }));
-        return;
-      }
-      case 'addchatmessage': {
-        const text = interaction.options.getString('text').trim();
-        if (!text) {
-          await interaction.reply({ content: 'Message text can\'t be empty.', ephemeral: true });
-          return;
-        }
-        data.config.chatterMessages = data.config.chatterMessages || [];
-        data.config.chatterMessages.push(text);
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '💬', title: 'Chatter Message Added',
-          description: `Added to the pool: "${text}"`,
-          fields: [{ name: 'Pool Size', value: `${getChatterPool().length}`, inline: true }],
-          color: 0x2ecc71,
-        }));
-        return;
-      }
-      case 'chatnow': {
-        if (!data.config.chatterChannelId) {
-          await interaction.reply({ content: 'No chatter channel set yet — use `/setchatchannel` first.', ephemeral: true });
-          return;
-        }
-        await sendChatterMessage(interaction.guild);
-        await interaction.reply({ content: '✅ Sent.', ephemeral: true });
+        await interaction.reply({ content: `✅ Historical events will now spawn in ${channel}.` });
         return;
       }
 
-      // ---------- break / unbreak ----------
-      case 'break': {
-        if (getRankIndex(interaction.user.id) < 0) {
-          await interaction.reply({ content: "You're not on the moderator team, so there's no inactivity tracking to pause.", ephemeral: true });
-          return;
-        }
-        if (data.onBreak[interaction.user.id]) {
-          await interaction.reply({ content: "You're already marked as on break.", ephemeral: true });
-          return;
-        }
-        data.onBreak[interaction.user.id] = Date.now();
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🌴', title: 'Break Started',
-          description: "Inactivity warnings are fully paused. Use `/unbreak` when you're back.",
-          color: 0x1abc9c,
-        }));
-        sendLog(interaction.guild, '🌴', 'Break Started', `${interaction.user.tag} started a break.`, interaction.user, 0x1abc9c);
-        return;
-      }
-      case 'unbreak': {
-        if (!data.onBreak[interaction.user.id]) {
-          await interaction.reply({ content: "You're not currently on break.", ephemeral: true });
-          return;
-        }
-        delete data.onBreak[interaction.user.id];
-        markActive(interaction.user.id);
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '👋', title: 'Welcome Back',
-          description: 'Inactivity tracking has resumed.',
-          color: 0x1abc9c,
-        }));
-        sendLog(interaction.guild, '👋', 'Break Ended', `${interaction.user.tag} ended their break.`, interaction.user, 0x1abc9c);
-        return;
-      }
-
-      // ---------- economy ----------
-      case 'claim': {
-        const last = data.lastClaim[interaction.user.id] || 0;
-        const elapsed = Date.now() - last;
-        if (elapsed < CLAIM_COOLDOWN_MS) {
-          const hoursLeft = Math.ceil((CLAIM_COOLDOWN_MS - elapsed) / (60 * 60 * 1000));
-          await interaction.reply({ content: `⏳ You've already claimed today. Try again in about ${hoursLeft} hour(s).`, ephemeral: true });
-          return;
-        }
-        data.lastClaim[interaction.user.id] = Date.now();
-        addCredits(interaction.user.id, CLAIM_AMOUNT);
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '💰', title: 'Daily Credits Claimed',
-          description: `You claimed **${CLAIM_AMOUNT} credits**!`,
-          fields: [{ name: 'New Balance', value: `${data.credits[interaction.user.id]}`, inline: true }],
-          color: 0xf1c40f,
-        }));
-        return;
-      }
-      case 'balance': {
-        const target = interaction.options.getMember('user') || interaction.member;
-        await interaction.reply(replyEmbed({
-          emoji: '💳', title: `${target.id === interaction.member.id ? 'Your' : `${target.user.tag}'s`} Balance`,
-          description: `**${data.credits[target.id] || 0}** credits`,
-          color: 0xf1c40f, thumbnail: target.user.displayAvatarURL(),
-        }));
-        return;
-      }
-      case 'richlist': {
-        const sorted = Object.entries(data.credits).sort((a, b) => b[1] - a[1]).slice(0, 10);
-        if (sorted.length === 0) {
-          await interaction.reply(replyEmbed({ emoji: '💰', title: 'Richlist', description: 'No one has earned credits yet.', color: 0xf1c40f }));
-          return;
-        }
-        const lines = await Promise.all(sorted.map(async ([userId, amt], i) => {
-          const member = await interaction.guild.members.fetch(userId).catch(() => null);
-          return `**${i + 1}.** ${member ? member.user.tag : 'Unknown user'} — ${amt} credits`;
-        }));
-        await interaction.reply(replyEmbed({ emoji: '💰', title: 'Richlist', description: lines.join('\n'), color: 0xf1c40f }));
-        return;
-      }
-      case 'addcredits':
-      case 'removecredits': {
-        const target = interaction.options.getMember('user');
-        const amount = interaction.options.getInteger('amount');
-        const delta = name === 'addcredits' ? amount : -amount;
-        addCredits(target.id, delta);
-        await interaction.reply(replyEmbed({
-          emoji: name === 'addcredits' ? '➕' : '➖',
-          title: name === 'addcredits' ? 'Credits Added' : 'Credits Removed',
-          description: `${target}'s credits ${name === 'addcredits' ? 'increased' : 'decreased'} by **${amount}**.`,
-          fields: [{ name: 'New Total', value: `${data.credits[target.id] || 0}`, inline: true }],
-          color: name === 'addcredits' ? 0x2ecc71 : 0xe74c3c,
-          thumbnail: target.user.displayAvatarURL(),
-        }));
-        sendLog(interaction.guild, '💳', name === 'addcredits' ? 'Credits Added' : 'Credits Removed',
-          `${amount} credits ${name === 'addcredits' ? 'added to' : 'removed from'} ${target.user.tag}. New total: ${data.credits[target.id] || 0}.`,
-          interaction.user, name === 'addcredits' ? 0x2ecc71 : 0xe74c3c);
-        return;
-      }
-
-      // ---------- shop ----------
-      case 'shop': {
-        const lines = SHOP_ITEMS.map((item) => `**${item.id}** — ${item.name} (${item.cost} credits)\n   ${item.desc || `Sets your tag to "${item.tagText}"`}`);
-        await interaction.reply(replyEmbed({ emoji: '🛒', title: 'Moderator Perk Shop', description: lines.join('\n\n') + '\n\nBuy with `/buy`', color: 0x1abc9c }));
-        return;
-      }
-      case 'buy': {
-        const itemId = interaction.options.getString('item');
-        const item = SHOP_ITEMS.find((i) => i.id === itemId);
-        const credits = data.credits[interaction.user.id] || 0;
-        if (credits < item.cost) {
-          await interaction.reply({ content: `You need ${item.cost} credits for **${item.name}** (you have ${credits}).`, ephemeral: true });
-          return;
-        }
-        data.credits[interaction.user.id] = credits - item.cost;
-        data.ownedItems[interaction.user.id] = data.ownedItems[interaction.user.id] || [];
-        if (!data.ownedItems[interaction.user.id].includes(item.id)) data.ownedItems[interaction.user.id].push(item.id);
-
-        let resultMsg = `✅ You bought **${item.name}**!`;
-        if (item.type === 'tag') {
-          data.tags[interaction.user.id] = { text: item.tagText, manual: true };
-          resultMsg += ` Your tag is now: ${item.tagText}`;
-        } else if (item.type === 'removeWarn') {
-          const warns = data.warns[interaction.user.id] || [];
-          if (warns.length === 0) {
-            resultMsg += ` You had no warns to remove.`;
-          } else {
-            warns.shift();
-            data.warns[interaction.user.id] = warns;
-            updateTag(interaction.user.id);
-            resultMsg += ` Your oldest warn was removed.`;
-          }
-        } else if (item.type === 'breakPass') {
-          data.onBreak[interaction.user.id] = Date.now();
-          data.breakPassExpires = data.breakPassExpires || {};
-          data.breakPassExpires[interaction.user.id] = Date.now() + 48 * 60 * 60 * 1000;
-          resultMsg += ` You're exempt from inactivity checks for the next 48 hours.`;
-        } else if (item.type === 'creditBoost') {
-          data.creditBoost = data.creditBoost || {};
-          data.creditBoost[interaction.user.id] = true;
-          resultMsg += ` Your next mod action or training answer will pay double credits.`;
-        } else if (item.type === 'profileColor') {
-          data.profileColor = data.profileColor || {};
-          data.profileColor[interaction.user.id] = item.color;
-          resultMsg += ` Your profile card now uses this color.`;
-        }
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🛍️', title: 'Purchase Complete', description: resultMsg.replace('✅ ', ''), color: 0x2ecc71,
-        }));
-        return;
-      }
-
-      // ---------- warn commands ----------
-      case 'warn': case 'minorwarn': case 'majorwarn': {
-        const target = interaction.options.getMember('user');
-        if (!target) { await interaction.reply({ content: 'Could not find that member.', ephemeral: true }); return; }
-        await applyWarn(interaction, name, target);
-        return;
-      }
-      case 'warnings': {
-        const target = interaction.options.getMember('user') || interaction.member;
-        const warns = data.warns[target.id] || [];
-        if (warns.length === 0) {
-          await interaction.reply(replyEmbed({ emoji: '📋', title: 'No Warns', description: `${target} has no warns on record.`, color: 0x2ecc71 }));
-          return;
-        }
-        const lines = warns.map((w, i) => `**${i + 1}.** ${w.type} — issued <t:${Math.floor(w.at / 1000)}:R>`);
-        await interaction.reply(replyEmbed({
-          emoji: '⚠️', title: `${target.user.tag}'s Warnings`, description: lines.join('\n'),
-          color: 0xe74c3c, thumbnail: target.user.displayAvatarURL(),
-        }));
-        return;
-      }
-      case 'clearwarns': {
-        const target = interaction.options.getMember('user');
-        data.warns[target.id] = [];
-        updateTag(target.id);
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🧹', title: 'Warns Cleared', description: `All warns cleared for ${target}.`, color: 0x2ecc71,
-        }));
-        sendLog(interaction.guild, '🧹', 'Warns Cleared', `All warns cleared for ${target.user.tag}.`, interaction.user, 0x2ecc71);
-        return;
-      }
-
-      // ---------- mute/kick/ban/unmute/unban ----------
-      case 'mute': {
-        const target = interaction.options.getMember('user');
-        const durationArg = interaction.options.getString('duration');
-        const ms = MUTE_DURATIONS[durationArg] || DEFAULT_MUTE_MS;
-        try {
-          await target.timeout(ms, `Muted by ${interaction.user.tag}`);
-        } catch {
-          await interaction.reply({ content: 'Action failed — check bot permissions/role hierarchy.', ephemeral: true });
-          return;
-        }
-        addCredits(interaction.user.id, CREDIT_REWARDS.mute);
-        const label = durationArg && MUTE_DURATIONS[durationArg] ? durationArg : '10m (default)';
-        await interaction.reply(replyEmbed({
-          emoji: '🔇', title: 'Member Muted',
-          description: `${target} was muted for **${label}**.`,
-          fields: [{ name: 'Credits Earned', value: `${CREDIT_REWARDS.mute}`, inline: true }],
-          color: 0xf39c12, thumbnail: target.user.displayAvatarURL(),
-        }));
-        sendLog(interaction.guild, '🔇', 'Member Muted', `${target.user.tag} (${target.id}) was muted for ${label}.`, interaction.user, 0xf39c12);
-        return;
-      }
-      case 'kick': case 'ban': {
-        const target = interaction.options.getMember('user');
-        const targetTag = target.user.tag;
-        const targetId = target.id;
-        const targetAvatar = target.user.displayAvatarURL();
-        try {
-          if (name === 'kick') await target.kick(`Kicked by ${interaction.user.tag}`);
-          if (name === 'ban') await target.ban({ reason: `Banned by ${interaction.user.tag}` });
-        } catch {
-          await interaction.reply({ content: 'Action failed — check bot permissions/role hierarchy.', ephemeral: true });
-          return;
-        }
-        addCredits(interaction.user.id, CREDIT_REWARDS[name]);
-        await interaction.reply(replyEmbed({
-          emoji: name === 'kick' ? '👢' : '🔨', title: name === 'kick' ? 'Member Kicked' : 'Member Banned',
-          description: `**${targetTag}** was ${name}ed.`,
-          fields: [{ name: 'Credits Earned', value: `${CREDIT_REWARDS[name]}`, inline: true }],
-          color: name === 'kick' ? 0xe67e22 : 0xc0392b, thumbnail: targetAvatar,
-        }));
-        sendLog(interaction.guild, name === 'kick' ? '👢' : '🔨', name === 'kick' ? 'Member Kicked' : 'Member Banned',
-          `${targetTag} (${targetId}) was ${name}ed.`, interaction.user, name === 'kick' ? 0xe67e22 : 0xc0392b);
-        return;
-      }
-      case 'unmute': {
-        const target = interaction.options.getMember('user');
-        try {
-          await target.timeout(null, `Unmuted by ${interaction.user.tag}`);
-          await interaction.reply(replyEmbed({
-            emoji: '🔊', title: 'Member Unmuted', description: `${target} has been unmuted.`, color: 0x2ecc71,
-          }));
-        } catch {
-          await interaction.reply({ content: 'Failed to unmute — check bot permissions.', ephemeral: true });
-        }
-        return;
-      }
-      case 'unban': {
-        const userId = interaction.options.getString('userid').replace(/[<@!>]/g, '');
-        try {
-          await interaction.guild.members.unban(userId, `Unbanned by ${interaction.user.tag}`);
-          await interaction.reply(replyEmbed({
-            emoji: '🔓', title: 'Member Unbanned', description: `User ID \`${userId}\` was unbanned.`, color: 0x2ecc71,
-          }));
-          sendLog(interaction.guild, '🔓', 'Member Unbanned', `User ID ${userId} was unbanned.`, interaction.user, 0x2ecc71);
-        } catch {
-          await interaction.reply({ content: 'Failed to unban — check the ID and bot permissions.', ephemeral: true });
-        }
-        return;
-      }
-      case 'purge': {
-        const amount = interaction.options.getInteger('amount');
-        try {
-          await interaction.channel.bulkDelete(amount, true);
-          await interaction.reply({ content: `🧹 Purged ${amount} messages.`, ephemeral: true });
-        } catch {
-          await interaction.reply({ content: "Failed to purge — messages older than 14 days can't be bulk deleted.", ephemeral: true });
-        }
-        return;
-      }
-
-      // ---------- tags/pfp/profile ----------
-      case 'settag': {
-        const target = interaction.options.getMember('user') || interaction.member;
-        if (target.id !== interaction.member.id && getRankIndex(interaction.user.id) < 3) {
-          await interaction.reply({ content: "🚫 You need to be at least **Head Moderator** to set someone else's tag.", ephemeral: true });
-          return;
-        }
-        const newTag = interaction.options.getString('text');
-        data.tags[target.id] = { text: newTag, manual: true };
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🏷️', title: 'Tag Updated', description: `${target}'s tag set to **${newTag}**.`, color: 0x9b59b6,
-        }));
-        sendLog(interaction.guild, '🏷️', 'Tag Updated', `${target.user.tag}'s tag was set to "${newTag}".`, interaction.user, 0x9b59b6);
-        return;
-      }
-      case 'setpfp': {
-        const url = interaction.options.getString('url');
-        if (!/^https?:\/\/.+\.(gif|png|jpg|jpeg|webp)$/i.test(url)) {
-          await interaction.reply({ content: 'Must be a direct image/gif link ending in .gif, .png, .jpg, or .webp', ephemeral: true });
-          return;
-        }
-        data.pfps[interaction.user.id] = url;
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🖼️', title: 'Profile Image Set', description: 'Check it with `/profile`.', color: 0x2ecc71, thumbnail: url,
-        }));
-        return;
-      }
-      case 'profile': {
-        const target = interaction.options.getMember('user') || interaction.member;
-        const credits = data.credits[target.id] || 0;
-        const tag = data.tags[target.id]?.text || computeAutoTag(target.id);
-        const rankIndex = getRankIndex(target.id);
-        const rankName = rankIndex >= 0 ? RANK_LADDER[rankIndex].name : 'Not on the mod team';
-        const warnCount = (data.warns[target.id] || []).length;
-        const inactivityWarnCount = data.inactivityWarns[target.id] || 0;
-        const pfp = data.pfps[target.id];
-        const onBreak = !!data.onBreak[target.id];
-        const embed = new EmbedBuilder()
-          .setTitle(`📇 ${target.user.tag}`)
-          .setThumbnail(target.user.displayAvatarURL())
-          .addFields(
-            { name: '🏅 Rank', value: rankName, inline: true },
-            { name: '📊 Standing', value: tag, inline: true },
-            { name: '💳 Credits', value: `${credits}`, inline: true },
-            { name: '⚠️ Warns', value: `${warnCount}`, inline: true },
-            { name: '🔔 Inactivity', value: `${inactivityWarnCount}/${MAX_INACTIVITY_WARNS}`, inline: true },
-            { name: '🌡️ Status', value: onBreak ? '🌴 On break' : '✅ Active', inline: true },
-          )
-          .setColor(data.profileColor?.[target.id] || colorForTag(tag))
-          .setFooter({ text: 'Moderator Profile' });
-        if (pfp) embed.setImage(pfp);
-        await interaction.reply({ embeds: [embed] });
-        return;
-      }
-      case 'progress': case 'mystats': {
-        const target = interaction.options.getMember?.('user') || interaction.member;
-        const stats = data.trainingStats[target.id] || { taken: 0, correct: 0 };
-        const pct = stats.taken > 0 ? Math.round((stats.correct / stats.taken) * 100) : 0;
-        await interaction.reply(replyEmbed({
-          emoji: '📊', title: `${target.user.tag}'s Training Progress`, color: 0x9b59b6,
-          thumbnail: target.user.displayAvatarURL(),
-          fields: [
-            { name: 'Questions Answered', value: `${stats.taken}`, inline: true },
-            { name: 'Correct', value: `${stats.correct}`, inline: true },
-            { name: 'Accuracy', value: `${pct}%`, inline: true },
-          ],
-        }));
-        return;
-      }
-      case 'roster': {
-        const guild = interaction.guild;
-        const grouped = {};
-        for (const rank of RANK_LADDER) grouped[rank.name] = [];
-        for (const [userId, rankIndex] of Object.entries(data.ranks)) {
-          const rankName = RANK_LADDER[rankIndex]?.name;
-          if (!rankName) continue;
-          const member = await guild.members.fetch(userId).catch(() => null);
-          if (!member) continue;
-          const tag = data.tags[userId]?.text || computeAutoTag(userId);
-          const breakTag = data.onBreak[userId] ? ' 🌴' : '';
-          grouped[rankName].push(`• ${member.user.tag} — *${tag}*${breakTag}`);
-        }
-        const embed = new EmbedBuilder().setTitle('📋 Moderator Team Roster').setColor(0x2ecc71)
-          .setFooter({ text: `${Object.keys(data.ranks).length} total moderators` });
-        for (const rank of [...RANK_LADDER].reverse()) {
-          const members = grouped[rank.name];
-          if (members.length > 0) embed.addFields({ name: `🏅 ${rank.name}`, value: members.join('\n') });
-        }
-        await interaction.reply({ embeds: [embed] });
-        return;
-      }
-
-      // ---------- ranks ----------
-      case 'modoftheday': {
+      case 'forcespawn': {
         if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-          await interaction.reply({ content: 'Only admins can trigger this manually.', ephemeral: true });
+          await interaction.reply({ content: 'Only server admins can do this.', ephemeral: true });
           return;
         }
-        await pickModeratorOfTheDay(interaction.guild);
-        await interaction.reply(replyEmbed({ emoji: '🏆', title: 'Announced', description: 'Moderator of the Day has been announced.', color: 0xffd700 }));
-        return;
-      }
-      case 'demote': {
-        const target = interaction.options.getMember('user');
-        const newRank = await demoteMember(interaction.guild, target);
-        await interaction.reply(newRank
-          ? replyEmbed({ emoji: '⬇️', title: 'Moderator Demoted', description: `${target} was demoted to **${newRank}**.`, color: 0xc0392b })
-          : replyEmbed({ emoji: '❌', title: 'Demotion Failed', description: `${target} could not be demoted.`, color: 0xe74c3c }));
-        if (newRank) sendLog(interaction.guild, '⬇️', 'Moderator Demoted', `${target.user.tag} was demoted to **${newRank}**.`, interaction.user, 0xc0392b);
-        return;
-      }
-      case 'rankup': {
-        const userId = interaction.user.id;
-        const guild = interaction.guild;
-        const currentIndex = getRankIndex(userId);
-        const nextIndex = currentIndex + 1;
-        if (currentIndex < 0) { await interaction.reply({ content: "You're not on the moderator team yet.", ephemeral: true }); return; }
-        if (nextIndex >= RANK_LADDER.length) { await interaction.reply("You're already at the top rank."); return; }
-        const nextRank = RANK_LADDER[nextIndex];
-        const credits = data.credits[userId] || 0;
-        if (credits < nextRank.cost) { await interaction.reply({ content: `You need ${nextRank.cost} credits for **${nextRank.name}** (you have ${credits}).`, ephemeral: true }); return; }
-        const currentRole = findRoleByName(guild, RANK_LADDER[currentIndex].name);
-        const nextRole = findRoleByName(guild, nextRank.name);
-        if (!nextRole) { await interaction.reply({ content: `Couldn't find a role named "${nextRank.name}" in this server.`, ephemeral: true }); return; }
-        try {
-          if (currentRole) await interaction.member.roles.remove(currentRole).catch(() => {});
-          await interaction.member.roles.add(nextRole);
-        } catch {
-          await interaction.reply({ content: 'Could not update roles — check bot permissions and role position.', ephemeral: true });
+        if (!data.config.spawnChannelId) {
+          await interaction.reply({ content: 'Set a spawn channel first with `/setspawnchannel`.', ephemeral: true });
           return;
         }
-        data.credits[userId] = credits - nextRank.cost;
-        data.ranks[userId] = nextIndex;
-        updateTag(userId);
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🎉', title: 'Promoted!', description: `You've been promoted to **${nextRank.name}**!`,
-          fields: [{ name: 'Remaining Credits', value: `${data.credits[userId]}`, inline: true }],
-          color: 0x2ecc71, thumbnail: interaction.user.displayAvatarURL(),
-        }));
-        sendLog(guild, '⬆️', 'Moderator Promoted', `${interaction.user.tag} was promoted to **${nextRank.name}**.`, interaction.user, 0x2ecc71);
+        await spawnEvent(interaction.guild);
+        await interaction.reply({ content: '✅ Spawned.', ephemeral: true });
         return;
       }
-      case 'rankmod': {
-        const requestedRankName = interaction.options.getString('rank');
-        const requestedRankIndex = RANK_LADDER.findIndex((r) => r.name === requestedRankName);
-        const targets = ['user1', 'user2', 'user3', 'user4', 'user5']
-          .map((k) => interaction.options.getMember(k))
-          .filter(Boolean);
 
-        if (targets.length === 0 || requestedRankIndex === -1) {
-          await interaction.reply({ content: 'Provide at least one user and a valid rank.', ephemeral: true });
+      case 'collection': {
+        const target = interaction.options.getUser('user') || interaction.user;
+        const collection = getCollection(target.id);
+        const entries = Object.entries(collection);
+        if (entries.length === 0) {
+          await interaction.reply(`${target.username} hasn't collected any historical events yet.`);
           return;
         }
-
-        const isServerAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-        const callerRankIndex = getRankIndex(interaction.user.id);
-
-        if (!isServerAdmin && callerRankIndex < RANK_REQUIREMENTS.rankmod) {
-          await interaction.reply({ content: `🚫 You need to be at least **${RANK_LADDER[RANK_REQUIREMENTS.rankmod].name}** to use this command.`, ephemeral: true });
-          return;
+        const grouped = {};
+        for (const tier of RARITY_TIERS) grouped[tier.name] = [];
+        for (const [eventId, entry] of entries) {
+          const event = findEventById(eventId);
+          if (!event) continue;
+          grouped[event.rarity].push(`${event.name} — Lv.${entry.level} (Power ${entry.power})${entry.count > 1 ? ` x${entry.count}` : ''}`);
         }
-        if (!isServerAdmin && requestedRankIndex >= callerRankIndex) {
-          await interaction.reply({ content: `🚫 You can only assign ranks below your own (**${RANK_LADDER[callerRankIndex].name}**).`, ephemeral: true });
-          return;
-        }
-
-        const guild = interaction.guild;
-        const newRole = findRoleByName(guild, requestedRankName);
-        if (!newRole) {
-          await interaction.reply({ content: `Couldn't find a role named "${requestedRankName}" — check it exists and matches exactly.`, ephemeral: true });
-          return;
-        }
-
-        const results = [];
-        for (const target of targets) {
-          const oldIndex = getRankIndex(target.id);
-          if (oldIndex === requestedRankIndex) {
-            results.push(`${target.user.tag} — already ${requestedRankName}`);
-            continue;
-          }
-          const oldRole = oldIndex >= 0 ? findRoleByName(guild, RANK_LADDER[oldIndex].name) : null;
-          try {
-            if (oldRole) await target.roles.remove(oldRole).catch(() => {});
-            await target.roles.add(newRole);
-          } catch {
-            results.push(`${target.user.tag} — failed (check role position/permissions)`);
-            continue;
-          }
-          data.ranks[target.id] = requestedRankIndex;
-          data.credits[target.id] = data.credits[target.id] || 0;
-          markActive(target.id);
-          updateTag(target.id);
-          const verb = oldIndex === -1 ? 'joined the team as' : (requestedRankIndex > oldIndex ? 'promoted to' : 'moved to');
-          results.push(`${target.user.tag} — ${verb} ${requestedRankName}`);
-        }
-        saveData(data);
-
-        await interaction.reply(replyEmbed({
-          emoji: '🆕', title: `Rank Update — ${requestedRankName}`, description: results.join('\n'), color: 0x3498db,
-        }));
-        sendLog(guild, '🆕', 'Rank(s) Assigned', `${requestedRankName} assigned:\n${results.join('\n')}`, interaction.user, 0x3498db);
-        return;
-      }
-      case 'setrank': {
-        const target = interaction.options.getMember('user');
-        const rankName = interaction.options.getString('rank');
-        const rankIndex = RANK_LADDER.findIndex((r) => r.name === rankName);
-        const guild = interaction.guild;
-        const oldIndex = getRankIndex(target.id);
-        const oldRole = oldIndex >= 0 ? findRoleByName(guild, RANK_LADDER[oldIndex].name) : null;
-        const newRole = findRoleByName(guild, RANK_LADDER[rankIndex].name);
-        if (!newRole) { await interaction.reply({ content: `Couldn't find a role named "${RANK_LADDER[rankIndex].name}".`, ephemeral: true }); return; }
-        try {
-          if (oldRole) await target.roles.remove(oldRole).catch(() => {});
-          await target.roles.add(newRole);
-        } catch {
-          await interaction.reply({ content: 'Failed to update roles — check bot permissions and role position.', ephemeral: true });
-          return;
-        }
-        data.ranks[target.id] = rankIndex;
-        markActive(target.id);
-        updateTag(target.id);
-        saveData(data);
-        await interaction.reply(replyEmbed({
-          emoji: '🔧', title: 'Rank Set', description: `${target}'s rank set to **${RANK_LADDER[rankIndex].name}**.`, color: 0x9b59b6,
-        }));
-        sendLog(guild, '🔧', 'Rank Manually Set', `${target.user.tag}'s rank was set to **${RANK_LADDER[rankIndex].name}**.`, interaction.user, 0x9b59b6);
-        return;
-      }
-
-      // ---------- training ----------
-      case 'training': {
-        if (activeSessions.has(interaction.user.id)) {
-          await interaction.reply({ content: 'You already have a training session in progress.', ephemeral: true });
-          return;
-        }
-        activeSessions.add(interaction.user.id);
-        let score = 0;
-        const shuffledQuiz = shuffle(quiz);
-        await interaction.reply(replyEmbed({
-          emoji: '📘', title: 'Training Started',
-          description: `${shuffledQuiz.length} questions, order randomized. 30 seconds per question — answer in this channel.`,
-          color: 0x3498db,
-        }));
-
-        for (const item of shuffledQuiz) {
-          await interaction.channel.send(item.q);
-          try {
-            const collected = await interaction.channel.awaitMessages({
-              filter: (m) => m.author.id === interaction.user.id,
-              max: 1, time: 30000, errors: ['time'],
-            });
-            const answer = collected.first().content.toLowerCase();
-            const correctKeywords = item.a.toLowerCase().split(' ');
-            const isClose = correctKeywords.some((w) => w.length > 3 && answer.includes(w));
-            recordTrainingResult(interaction.user.id, isClose);
-            if (isClose) {
-              score++;
-              addCredits(interaction.user.id, CREDIT_REWARDS.correctAnswer);
-              await interaction.channel.send(`✅ Correct-ish. ${item.rule} (+${CREDIT_REWARDS.correctAnswer} credits)`);
-            } else {
-              await interaction.channel.send(`❌ Not quite. ${item.rule}`);
-            }
-          } catch {
-            recordTrainingResult(interaction.user.id, false);
-            await interaction.channel.send(`⏱️ Time's up. ${item.rule}`);
-          }
-        }
-        activeSessions.delete(interaction.user.id);
-        await interaction.channel.send(`🏁 Training complete! ${interaction.user} scored **${score}/${shuffledQuiz.length}**.`);
-        return;
-      }
-      case 'trainingexamples': {
-        const sample = quiz.slice(0, 3);
-        const lines = sample.map((item, i) => `**${i + 1}.** ${item.q}\n   *Expected answer:* ${item.a}`);
-        await interaction.reply(replyEmbed({ emoji: '📖', title: 'Training Question Examples', description: lines.join('\n\n'), color: 0x3498db }));
-        return;
-      }
-      case 'trainingrules': {
-        const lines = quiz.map((item) => `• ${item.rule}`);
-        await interaction.reply(replyEmbed({ emoji: '📜', title: 'Full Rule Book', description: lines.join('\n'), color: 0xe67e22 }));
-        return;
-      }
-
-      // ---------- extras ----------
-      case 'ping': {
-        await interaction.reply('Pinging...');
-        const sent = await interaction.fetchReply();
-        const latency = sent.createdTimestamp - interaction.createdTimestamp;
-        await interaction.editReply(replyEmbed({
-          emoji: '🏓', title: 'Pong!',
-          fields: [
-            { name: 'Latency', value: `${latency}ms`, inline: true },
-            { name: 'API', value: `${Math.round(client.ws.ping)}ms`, inline: true },
-          ],
-          color: 0x2ecc71,
-        }));
-        return;
-      }
-      case 'uptime': {
-        const upMs = Date.now() - START_TIME;
-        const hours = Math.floor(upMs / 3600000);
-        const mins = Math.floor((upMs % 3600000) / 60000);
-        await interaction.reply(replyEmbed({
-          emoji: '⏱️', title: 'Bot Uptime', description: `Online for **${hours}h ${mins}m**.`, color: 0x5865f2,
-        }));
-        return;
-      }
-      case 'serverinfo': {
-        const guild = interaction.guild;
-        await interaction.reply(replyEmbed({
-          emoji: '🏰', title: guild.name, color: 0x5865f2, thumbnail: guild.iconURL(),
-          fields: [
-            { name: 'Members', value: `${guild.memberCount}`, inline: true },
-            { name: 'Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:D>`, inline: true },
-            { name: 'Roles', value: `${guild.roles.cache.size}`, inline: true },
-          ],
-        }));
-        return;
-      }
-      case 'userinfo': {
-        const target = interaction.options.getMember('user') || interaction.member;
-        await interaction.reply(replyEmbed({
-          emoji: '👤', title: target.user.tag, color: 0x5865f2, thumbnail: target.user.displayAvatarURL(),
-          fields: [
-            { name: 'Joined Server', value: `<t:${Math.floor(target.joinedTimestamp / 1000)}:D>`, inline: true },
-            { name: 'Account Created', value: `<t:${Math.floor(target.user.createdTimestamp / 1000)}:D>`, inline: true },
-            { name: 'Roles', value: `${target.roles.cache.size - 1}`, inline: true },
-          ],
-        }));
-        return;
-      }
-      case 'avatar': {
-        const target = interaction.options.getMember('user') || interaction.member;
         const embed = new EmbedBuilder()
-          .setTitle(`🖼️ ${target.user.tag}'s Avatar`)
-          .setImage(target.user.displayAvatarURL({ size: 512 }))
+          .setTitle(`📚 ${target.username}'s Collection`)
           .setColor(0x5865f2)
-          .setFooter({ text: BRAND_FOOTER })
-          .setTimestamp();
+          .setFooter({ text: `${entries.length}/${HISTORICAL_EVENTS.length} unique events collected` });
+        for (const tier of [...RARITY_TIERS].reverse()) {
+          if (grouped[tier.name].length > 0) {
+            embed.addFields({ name: `${tier.frame} ${tier.name}`, value: grouped[tier.name].join('\n') });
+          }
+        }
         await interaction.reply({ embeds: [embed] });
-        return;
-      }
-      case 'embed': {
-        const text = interaction.options.getString('text');
-        const embed = new EmbedBuilder().setDescription(text).setColor(0x5865f2).setFooter({ text: BRAND_FOOTER }).setTimestamp();
-        await interaction.reply({ embeds: [embed] });
-        return;
-      }
-      case 'feedback': {
-        const text = interaction.options.getString('message');
-        sendLog(interaction.guild, '📝', 'New Feedback', text, interaction.user, 0x9b59b6);
-        await interaction.reply({ ...replyEmbed({ emoji: '📝', title: 'Feedback Logged', description: 'Thanks — your feedback has been logged.', color: 0x9b59b6 }), ephemeral: true });
         return;
       }
 
-      // ---------- fun / random ----------
-      case 'caine': {
-        await interaction.deferReply();
-        const aiLine = await callGemini('Give one short, punchy, in-character one-liner to say to your audience right now. Just the line, no preamble.');
-        const fallback = "LADIES AND GENTLEMEN, welcome back to the show! I hope you brought snacks, because I certainly didn't. 🎪";
-        await interaction.editReply(replyEmbed({ emoji: '🎪', title: 'A Word From The Ringmaster', description: aiLine || fallback, color: 0xe67e22 }));
+      case 'view': {
+        const eventName = interaction.options.getString('event');
+        const event = findEventByName(eventName);
+        if (!event) {
+          await interaction.reply({ content: 'No event found with that name.', ephemeral: true });
+          return;
+        }
+        const collection = getCollection(interaction.user.id);
+        const entry = collection[event.id];
+        const rarity = getRarity(event.rarity);
+        const embed = new EmbedBuilder()
+          .setTitle(`${rarity.frame} ${event.name}`)
+          .setDescription(`# ${event.flags}\n\n**Era:** ${event.era}\n**Rarity:** ${rarity.name}`)
+          .setColor(rarity.color);
+        if (entry) {
+          embed.addFields(
+            { name: 'Owned', value: `x${entry.count}`, inline: true },
+            { name: 'Level', value: `${entry.level}`, inline: true },
+            { name: 'Power', value: `${entry.power}`, inline: true },
+          );
+        } else {
+          embed.addFields({ name: 'Status', value: "You haven't collected this one yet." });
+        }
+        await interaction.reply({ embeds: [embed] });
         return;
       }
-      case '8ball': {
-        const question = interaction.options.getString('question');
-        const answers = [
-          'Absolutely, no notes.', 'Ask again after the intermission.', 'The crowd says yes!',
-          "I wouldn't bet the big top on it.", 'Signs point to yes.', 'Outlook hazy — try again later.',
-          'Without a doubt!', 'My sources say no.', "Don't count on it.", 'It is certain.',
-        ];
-        const answer = answers[Math.floor(Math.random() * answers.length)];
-        await interaction.reply(replyEmbed({
-          emoji: '🎱', title: '8-Ball Says...', description: `**Q:** ${question}\n**A:** ${answer}`, color: 0x2c3e50,
+
+      case 'upgrade': {
+        const eventName = interaction.options.getString('event');
+        const event = findEventByName(eventName);
+        if (!event) {
+          await interaction.reply({ content: 'No event found with that name.', ephemeral: true });
+          return;
+        }
+        const collection = getCollection(interaction.user.id);
+        const entry = collection[event.id];
+        if (!entry) {
+          await interaction.reply({ content: "You don't own this event yet.", ephemeral: true });
+          return;
+        }
+        const cost = entry.level * 10;
+        const points = getUpgradePoints(interaction.user.id);
+        if (points < cost) {
+          await interaction.reply({ content: `You need ${cost} upgrade points (you have ${points}). Duplicate catches earn points automatically.`, ephemeral: true });
+          return;
+        }
+        const rarity = getRarity(event.rarity);
+        data.upgradePoints[interaction.user.id] = points - cost;
+        entry.level += 1;
+        entry.power += Math.round(rarity.multiplier * 5);
+        saveData(data);
+        await interaction.reply(
+          `⬆️ **${event.name}** upgraded to **Level ${entry.level}**! New power: **${entry.power}**. Remaining points: ${data.upgradePoints[interaction.user.id]}.`
+        );
+        return;
+      }
+
+      case 'battle': {
+        const yourEventName = interaction.options.getString('your_event');
+        const opponent = interaction.options.getUser('opponent');
+        const opponentEventName = interaction.options.getString('opponent_event');
+
+        if (opponent.id === interaction.user.id) {
+          await interaction.reply({ content: "You can't battle yourself.", ephemeral: true });
+          return;
+        }
+        const yourEvent = findEventByName(yourEventName);
+        const oppEvent = findEventByName(opponentEventName);
+        if (!yourEvent || !oppEvent) {
+          await interaction.reply({ content: 'One of those event names wasn\'t recognized.', ephemeral: true });
+          return;
+        }
+        const yourEntry = getCollection(interaction.user.id)[yourEvent.id];
+        const oppEntry = getCollection(opponent.id)[oppEvent.id];
+        if (!yourEntry) {
+          await interaction.reply({ content: "You don't own that event.", ephemeral: true });
+          return;
+        }
+        if (!oppEntry) {
+          await interaction.reply({ content: `${opponent.username} doesn't own that event.`, ephemeral: true });
+          return;
+        }
+
+        // Weighted random outcome — higher power = better odds, but not guaranteed
+        const total = yourEntry.power + oppEntry.power;
+        const roll = Math.random() * total;
+        const youWin = roll < yourEntry.power;
+
+        const winnerId = youWin ? interaction.user.id : opponent.id;
+        const loserId = youWin ? opponent.id : interaction.user.id;
+        getBattleStats(winnerId).wins += 1;
+        getBattleStats(loserId).losses += 1;
+        addUpgradePoints(winnerId, 10);
+        saveData(data);
+
+        const embed = new EmbedBuilder()
+          .setTitle('⚔️ Battle Result')
+          .setDescription(
+            `**${yourEvent.name}** (Power ${yourEntry.power}) vs **${oppEvent.name}** (Power ${oppEntry.power})\n\n` +
+            `🏆 **${youWin ? interaction.user.username : opponent.username}** wins with **${youWin ? yourEvent.name : oppEvent.name}**!\n\n` +
+            `+10 upgrade points awarded.`
+          )
+          .setColor(youWin ? 0x2ecc71 : 0xe74c3c);
+        await interaction.reply({ embeds: [embed] });
+        return;
+      }
+
+      case 'dex': {
+        const collection = getCollection(interaction.user.id);
+        const grouped = {};
+        for (const tier of RARITY_TIERS) grouped[tier.name] = [];
+        for (const event of HISTORICAL_EVENTS) {
+          const owned = !!collection[event.id];
+          const rarity = getRarity(event.rarity);
+          grouped[event.rarity].push(owned ? `${rarity.frame} ${event.name}` : `❔ ???`);
+        }
+        const embed = new EmbedBuilder()
+          .setTitle('📖 Historicaldex')
+          .setColor(0x5865f2)
+          .setFooter({ text: `${Object.keys(collection).length}/${HISTORICAL_EVENTS.length} discovered` });
+        for (const tier of [...RARITY_TIERS].reverse()) {
+          if (grouped[tier.name].length > 0) {
+            embed.addFields({ name: `${tier.frame} ${tier.name}`, value: grouped[tier.name].join('\n') });
+          }
+        }
+        await interaction.reply({ embeds: [embed] });
+        return;
+      }
+
+      case 'progress': {
+        const target = interaction.options.getUser('user') || interaction.user;
+        const collection = getCollection(target.id);
+        const owned = Object.keys(collection).length;
+        const total = HISTORICAL_EVENTS.length;
+        const pct = Math.round((owned / total) * 100);
+
+        const perTier = RARITY_TIERS.map((tier) => {
+          const totalOfTier = HISTORICAL_EVENTS.filter((e) => e.rarity === tier.name).length;
+          const ownedOfTier = Object.keys(collection).filter((id) => findEventById(id)?.rarity === tier.name).length;
+          return `${tier.frame} ${tier.name}: ${ownedOfTier}/${totalOfTier}`;
+        }).join('\n');
+
+        const embed = new EmbedBuilder()
+          .setTitle(`📊 ${target.username}'s Progress`)
+          .setDescription(`**Overall: ${owned}/${total} (${pct}%)**\n\n${perTier}`)
+          .setColor(0x9b59b6);
+        await interaction.reply({ embeds: [embed] });
+        return;
+      }
+
+      case 'leaderboard': {
+        const totals = Object.entries(data.collections).map(([userId, collection]) => {
+          const totalPower = Object.values(collection).reduce((sum, e) => sum + e.power, 0);
+          return { userId, totalPower, unique: Object.keys(collection).length };
+        }).sort((a, b) => b.totalPower - a.totalPower).slice(0, 10);
+
+        if (totals.length === 0) {
+          await interaction.reply('No one has collected anything yet.');
+          return;
+        }
+        const lines = await Promise.all(totals.map(async (t, i) => {
+          const user = await client.users.fetch(t.userId).catch(() => null);
+          return `**${i + 1}.** ${user ? user.username : 'Unknown'} — ${t.totalPower} power (${t.unique} unique)`;
         }));
-        return;
-      }
-      case 'coinflip': {
-        const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
-        await interaction.reply(replyEmbed({ emoji: '🪙', title: 'Coin Flip', description: `It landed on **${result}**!`, color: 0xf1c40f }));
-        return;
-      }
-      case 'roll': {
-        const sides = interaction.options.getInteger('sides') || 6;
-        const result = Math.floor(Math.random() * sides) + 1;
-        await interaction.reply(replyEmbed({ emoji: '🎲', title: `d${sides} Roll`, description: `You rolled a **${result}**!`, color: 0x9b59b6 }));
-        return;
-      }
-      case 'compliment': {
-        const target = interaction.options.getMember('user') || interaction.member;
-        await interaction.deferReply();
-        const aiLine = await callGemini(`Give one short, over-the-top, theatrical compliment about ${target.user.username}, as if introducing them to a cheering crowd.`);
-        const fallback = `Ladies and gentlemen — ${target}, a STAR performer if I've ever seen one! 🌟`;
-        await interaction.editReply(replyEmbed({ emoji: '🌟', title: 'A Compliment', description: aiLine || fallback, color: 0xffd700, thumbnail: target.user.displayAvatarURL() }));
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏆 Leaderboard').setDescription(lines.join('\n')).setColor(0xf1c40f)] });
         return;
       }
 
@@ -1458,21 +594,10 @@ client.on('interactionCreate', async (interaction) => {
   } catch (err) {
     console.error(err);
     if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: 'Something went wrong running that command.', ephemeral: true }).catch(() => {});
+      await interaction.followUp({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
     } else {
-      await interaction.reply({ content: 'Something went wrong running that command.', ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
     }
-  }
-});
-
-// Scans normal chat (not slash commands) for disrespect directed at the bot.
-// Does nothing moderation-wise — purely an in-character DM reaction.
-client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guild) return;
-  const mentionsBot = message.mentions.has(client.user);
-  const content = message.content;
-  if ((mentionsBot || /\bbot\b/i.test(content)) && isDisrespectful(content)) {
-    await triggerCrashOut(message);
   }
 });
 
