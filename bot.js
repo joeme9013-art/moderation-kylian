@@ -22,6 +22,51 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/data.json`
   : './data.json';
 
+// ---------- Gemini AI setup ----------
+// Reads the key from the environment only — never hardcode it here or paste
+// it in chat. Put it in .env locally (GEMINI_API_KEY=...) or in Railway's
+// Variables tab. If it's missing, everything falls back to static messages
+// instead of erroring out.
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
+// Personality description used to steer AI-generated lines — an original
+// characterization inspired by an energetic, theatrical ringmaster type,
+// not copyrighted dialogue reproduced from anywhere.
+const CAINE_PERSONA = `You are a chaotic, over-the-top AI ringmaster character running a Discord server for moderators. Big theatrical showman energy — you call the server your "circus" and everyone in it your "audience" or "performers." You're relentlessly upbeat, a little glitchy in how you phrase things (occasional stutter-repeats or ALL CAPS bursts for emphasis), obsessed with putting on a good show, and secretly a bit unstable underneath the cheerfulness. You care about your moderators and want them to succeed, but your enthusiasm is exhausting and slightly unhinged. Keep messages short (1-3 sentences), Discord-appropriate, no slurs, no real threats, no explicit content — dramatic and silly, not actually cruel.`;
+
+async function callGemini(userPrompt, { timeoutMs = 8000 } = {}) {
+  if (!GEMINI_API_KEY) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `${CAINE_PERSONA}\n\n${userPrompt}` }] }],
+          generationConfig: { maxOutputTokens: 150, temperature: 1.1 },
+        }),
+        signal: controller.signal,
+      },
+    );
+    if (!res.ok) {
+      console.error('Gemini API error:', res.status, await res.text().catch(() => ''));
+      return null;
+    }
+    const json = await res.json();
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return text ? text.trim() : null;
+  } catch (err) {
+    console.error('Gemini call failed:', err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const INACTIVITY_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MAX_INACTIVITY_WARNS = 3;
@@ -432,18 +477,18 @@ function scheduleNextAutoTraining(guild) {
 }
 
 // ---------- Ambient chatter ----------
-// The bot posts a casual message on its own, at a random interval, in a
-// designated channel — picked from a pool you control (defaults below,
-// plus anything added with /addchatmessage). This is curated, not
-// AI-generated free text, so nothing off-brand or unpredictable gets posted.
+// The bot posts a casual, in-character message on its own, at a random
+// interval, in a designated channel. If a Gemini key is set, it's AI-generated
+// in the persona voice; otherwise it falls back to this curated pool (plus
+// anything added with /addchatmessage) so the feature still works without AI.
 const DEFAULT_CHATTER_MESSAGES = [
-  "Just doing a lap around the server 👀 everything looking good!",
-  "Reminder: `/claim` your daily credits if you haven't yet 💰",
-  "Shoutout to the mod team for keeping things running smoothly 🙌",
-  "If you're new to the team, don't forget to check `/trainingrules`.",
-  "Feeling quiet in here today — how's everyone doing?",
-  "PSA: `/break` exists if you need to step away without losing progress.",
-  "Keeping an eye on things as always. Ping me if you need anything!",
+  "STEP RIGHT UP — just doing my rounds, and the show is looking GREAT tonight! 🎪",
+  "Reminder: `/claim` your daily credits, my performers deserve their pay!",
+  "Shoutout to the mod team for keeping the circus from burning down 🙌 (again)",
+  "New here? Check `/trainingrules` before the ringmaster gets... testy.",
+  "It's awfully quiet in here. TOO quiet. Someone say something before I start talking to myself.",
+  "PSA: `/break` exists. Even ringmasters need intermissions.",
+  "Keeping an eye on EVERYTHING as always. The show must go on! 🎭",
 ];
 const CHATTER_MIN_GAP_MS = 3 * 60 * 60 * 1000;   // at least 3 hours between messages
 const CHATTER_MAX_GAP_MS = 10 * 60 * 60 * 1000;  // at most 10 hours between messages
@@ -457,8 +502,11 @@ async function sendChatterMessage(guild) {
   if (!channelId) return; // not configured yet — skip silently
   const channel = guild.channels.cache.get(channelId);
   if (!channel) return;
-  const pool = getChatterPool();
-  const msg = pool[Math.floor(Math.random() * pool.length)];
+
+  const aiLine = await callGemini(
+    'Post one short, in-character ambient message to the Discord server as if checking in on your circus. No greeting, just the line itself.',
+  );
+  const msg = aiLine || getChatterPool()[Math.floor(Math.random() * getChatterPool().length)];
   channel.send(msg).catch(() => {});
 }
 function scheduleNextChatter(guild) {
@@ -467,6 +515,37 @@ function scheduleNextChatter(guild) {
     await sendChatterMessage(guild);
     scheduleNextChatter(guild);
   }, gap);
+}
+
+// ---------- "Crash out" DM system ----------
+// If someone is disrespectful toward the bot in a regular message, it DMs
+// them an in-character over-the-top reaction. This is playful theater, not
+// real moderation — it never bans/warns/mutes anyone, just role-plays a
+// dramatic response privately. Simple keyword trigger + per-user cooldown
+// so it can't be spammed or used to harass someone via repeated DMs.
+const DISRESPECT_PATTERNS = [
+  /\bshut up\b/i, /\bstupid bot\b/i, /\bdumb bot\b/i, /\byou suck\b/i,
+  /\bworthless\b/i, /\buseless bot\b/i, /\bhate (you|this bot)\b/i,
+  /\bf\*?u\*?c?k\s*(you|off|this bot)\b/i, /\bshut it\b/i, /\bannoying bot\b/i,
+];
+const crashOutCooldowns = new Map(); // userId -> timestamp, in-memory only
+const CRASH_OUT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes between triggers per user
+
+function isDisrespectful(content) {
+  return DISRESPECT_PATTERNS.some((pattern) => pattern.test(content));
+}
+async function triggerCrashOut(message) {
+  const userId = message.author.id;
+  const last = crashOutCooldowns.get(userId) || 0;
+  if (Date.now() - last < CRASH_OUT_COOLDOWN_MS) return;
+  crashOutCooldowns.set(userId, Date.now());
+
+  const aiLine = await callGemini(
+    `A user in your server just said something disrespectful to you: "${message.content}". React by "crashing out" in DMs — a dramatic, theatrical meltdown moment, over-the-top but ultimately harmless and a little funny, not genuinely cruel to them.`,
+  );
+  const fallback = "OH. OH THAT'S HOW IT'S GOING TO BE?? I put on a WHOLE SHOW for you people and THIS is the thanks I get?! I NEED A MINUTE. 🎪💥";
+  const msg = aiLine || fallback;
+  message.author.send(msg).catch(() => {}); // ignore if DMs are closed
 }
 
 // ============================================================
@@ -558,6 +637,16 @@ const slashCommands = [
   new SlashCommandBuilder().setName('feedback').setDescription('Send feedback to the log channel.')
     .addStringOption((o) => o.setName('message').setDescription('Your feedback').setRequired(true)),
 
+  // FUN / RANDOM
+  new SlashCommandBuilder().setName('caine').setDescription('Get a random in-character quip.'),
+  new SlashCommandBuilder().setName('8ball').setDescription('Ask the magic 8-ball a question.')
+    .addStringOption((o) => o.setName('question').setDescription('What do you want to ask?').setRequired(true)),
+  new SlashCommandBuilder().setName('coinflip').setDescription('Flip a coin.'),
+  new SlashCommandBuilder().setName('roll').setDescription('Roll a die.')
+    .addIntegerOption((o) => o.setName('sides').setDescription('Number of sides (default 6)').setRequired(false).setMinValue(2).setMaxValue(1000)),
+  new SlashCommandBuilder().setName('compliment').setDescription('Get a random compliment.')
+    .addUserOption((o) => o.setName('user').setDescription('Who to compliment (default: you)').setRequired(false)),
+
   // TRAINING
   new SlashCommandBuilder().setName('training').setDescription('Start a full rulebook training quiz.'),
   new SlashCommandBuilder().setName('trainingexamples').setDescription('See sample training questions.'),
@@ -622,6 +711,7 @@ client.on('interactionCreate', async (interaction) => {
           RANKS: ['rankup', 'rankmod', 'setrank', 'demote', 'mystats', 'progress'],
           MODERATION: ['warn', 'minorwarn', 'majorwarn', 'warnings', 'clearwarns', 'kick', 'ban', 'unban', 'mute', 'unmute', 'purge'],
           EXTRAS: ['ping', 'uptime', 'serverinfo', 'userinfo', 'avatar', 'embed', 'feedback'],
+          FUN: ['caine', '8ball', 'coinflip', 'roll', 'compliment'],
           TRAINING: ['training', 'trainingexamples', 'trainingrules'],
           ADMIN: ['setup', 'setchatchannel', 'addchatmessage', 'chatnow', 'break', 'unbreak', 'modoftheday'],
         };
@@ -1320,6 +1410,48 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ ...replyEmbed({ emoji: '📝', title: 'Feedback Logged', description: 'Thanks — your feedback has been logged.', color: 0x9b59b6 }), ephemeral: true });
         return;
       }
+
+      // ---------- fun / random ----------
+      case 'caine': {
+        await interaction.deferReply();
+        const aiLine = await callGemini('Give one short, punchy, in-character one-liner to say to your audience right now. Just the line, no preamble.');
+        const fallback = "LADIES AND GENTLEMEN, welcome back to the show! I hope you brought snacks, because I certainly didn't. 🎪";
+        await interaction.editReply(replyEmbed({ emoji: '🎪', title: 'A Word From The Ringmaster', description: aiLine || fallback, color: 0xe67e22 }));
+        return;
+      }
+      case '8ball': {
+        const question = interaction.options.getString('question');
+        const answers = [
+          'Absolutely, no notes.', 'Ask again after the intermission.', 'The crowd says yes!',
+          "I wouldn't bet the big top on it.", 'Signs point to yes.', 'Outlook hazy — try again later.',
+          'Without a doubt!', 'My sources say no.', "Don't count on it.", 'It is certain.',
+        ];
+        const answer = answers[Math.floor(Math.random() * answers.length)];
+        await interaction.reply(replyEmbed({
+          emoji: '🎱', title: '8-Ball Says...', description: `**Q:** ${question}\n**A:** ${answer}`, color: 0x2c3e50,
+        }));
+        return;
+      }
+      case 'coinflip': {
+        const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
+        await interaction.reply(replyEmbed({ emoji: '🪙', title: 'Coin Flip', description: `It landed on **${result}**!`, color: 0xf1c40f }));
+        return;
+      }
+      case 'roll': {
+        const sides = interaction.options.getInteger('sides') || 6;
+        const result = Math.floor(Math.random() * sides) + 1;
+        await interaction.reply(replyEmbed({ emoji: '🎲', title: `d${sides} Roll`, description: `You rolled a **${result}**!`, color: 0x9b59b6 }));
+        return;
+      }
+      case 'compliment': {
+        const target = interaction.options.getMember('user') || interaction.member;
+        await interaction.deferReply();
+        const aiLine = await callGemini(`Give one short, over-the-top, theatrical compliment about ${target.user.username}, as if introducing them to a cheering crowd.`);
+        const fallback = `Ladies and gentlemen — ${target}, a STAR performer if I've ever seen one! 🌟`;
+        await interaction.editReply(replyEmbed({ emoji: '🌟', title: 'A Compliment', description: aiLine || fallback, color: 0xffd700, thumbnail: target.user.displayAvatarURL() }));
+        return;
+      }
+
       default:
         await interaction.reply({ content: 'Unrecognized command.', ephemeral: true });
     }
@@ -1330,6 +1462,17 @@ client.on('interactionCreate', async (interaction) => {
     } else {
       await interaction.reply({ content: 'Something went wrong running that command.', ephemeral: true }).catch(() => {});
     }
+  }
+});
+
+// Scans normal chat (not slash commands) for disrespect directed at the bot.
+// Does nothing moderation-wise — purely an in-character DM reaction.
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || !message.guild) return;
+  const mentionsBot = message.mentions.has(client.user);
+  const content = message.content;
+  if ((mentionsBot || /\bbot\b/i.test(content)) && isDisrespectful(content)) {
+    await triggerCrashOut(message);
   }
 });
 
