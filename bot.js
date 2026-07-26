@@ -81,38 +81,33 @@ function rarityIndex(name) {
 }
 
 // ============================================================
-// REAL FLAG IMAGES — Wikimedia Commons, direct-linked via Special:FilePath.
-// Ancient/medieval powers use the closest verifiable historical or
-// geographic-proxy flag; the Roman Empire uses its actual vexilloid.
+// REAL FLAG IMAGES — raster PNGs (Discord embeds do not render SVG,
+// which is why nothing showed before). flagcdn.com is a public,
+// hotlink-friendly flag CDN using ISO country codes. The Roman Empire
+// has no ISO code, so it uses its real vexilloid via Wikimedia's
+// SVG-to-PNG thumbnail conversion (the ?width= param forces a raster
+// render instead of serving the raw, unrenderable SVG).
 // ============================================================
-function flagUrl(filename) {
-  return `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(filename)}`;
+function cdnFlag(code) {
+  return `https://flagcdn.com/w320/${code}.png`;
+}
+function wikiRaster(filename, width = 400) {
+  return `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(filename)}?width=${width}`;
 }
 const FLAGS = {
-  rome: flagUrl('Vexilloid of the Roman Empire.svg'),
-  carthage: flagUrl('Flag of Tunisia.svg'),
-  egypt_ancient: flagUrl('Flag of Egypt.svg'),
-  uk: flagUrl('Flag of the United Kingdom.svg'),
-  france: flagUrl('Flag of France.svg'),
-  spain: flagUrl('Flag of Spain.svg'),
-  portugal: flagUrl('Flag of Portugal.svg'),
-  germany: flagUrl('Flag of Germany.svg'),
-  russia: flagUrl('Flag of Russia.svg'),
-  austria: flagUrl('Flag of Austria.svg'),
-  us: flagUrl('Flag of the United States.svg'),
-  italy: flagUrl('Flag of Italy.svg'),
-  japan: flagUrl('Flag of Japan.svg'),
-  southkorea: flagUrl('Flag of South Korea.svg'),
-  turkey: flagUrl('Flag of Turkey.svg'),
-  vatican: flagUrl('Flag of the Vatican City.svg'),
-  sweden: flagUrl('Flag of Sweden.svg'),
-  poland: flagUrl('Flag of Poland.svg'),
-  ireland: flagUrl('Flag of Ireland.svg'),
-  eu: flagUrl('Flag of Europe.svg'),
-  cuba: flagUrl('Flag of Cuba.svg'),
-  israel: flagUrl('Flag of Israel.svg'),
-  iraq: flagUrl('Flag of Iraq.svg'),
-  saudi: flagUrl('Flag of Saudi Arabia.svg'),
+  rome: wikiRaster('Vexilloid of the Roman Empire.svg'),
+  carthage: cdnFlag('tn'),
+  egypt_ancient: cdnFlag('eg'),
+  uk: cdnFlag('gb'),
+  france: cdnFlag('fr'),
+  spain: cdnFlag('es'),
+  germany: cdnFlag('de'),
+  russia: cdnFlag('ru'),
+  us: cdnFlag('us'),
+  southkorea: cdnFlag('kr'),
+  turkey: cdnFlag('tr'),
+  vatican: cdnFlag('va'),
+  iraq: cdnFlag('iq'),
 };
 
 // ============================================================
@@ -127,56 +122,30 @@ const HISTORICAL_EVENTS = [
     aliases: ['sack of rome', 'sack of rome 410', 'visigoth sack of rome'] },
   { id: 'battle-of-hastings', name: 'Battle of Hastings', era: 'Medieval (1066)', rarity: 'Bronze', flagA: 'uk', flagB: 'france',
     aliases: ['battle of hastings', 'hastings', 'norman conquest'] },
-  { id: 'treaty-of-verdun', name: 'Treaty of Verdun', era: 'Medieval (843 AD)', rarity: 'Iron', flagA: 'france', flagB: 'germany',
-    aliases: ['treaty of verdun', 'verdun treaty', 'partition of the carolingian empire'] },
   { id: 'first-crusade', name: 'The First Crusade', era: 'Medieval (1096–1099)', rarity: 'Gold', flagA: 'vatican', flagB: null,
     aliases: ['first crusade', 'the first crusade', 'crusade of 1096'] },
   { id: 'hundred-years-war', name: "The Hundred Years' War", era: 'Medieval (1337–1453)', rarity: 'Gold', flagA: 'france', flagB: 'uk',
     aliases: ["hundred years war", "the hundred years war", "100 years war"] },
-  { id: 'treaty-of-tordesillas', name: 'Treaty of Tordesillas', era: 'Renaissance (1494)', rarity: 'Bronze', flagA: 'spain', flagB: 'portugal',
-    aliases: ['treaty of tordesillas', 'tordesillas'] },
   { id: 'spanish-armada', name: 'The Spanish Armada', era: 'Renaissance (1588)', rarity: 'Bronze', flagA: 'spain', flagB: 'uk',
     aliases: ['spanish armada', 'the spanish armada'] },
-  { id: 'peace-of-westphalia', name: 'Peace of Westphalia', era: 'Early Modern (1648)', rarity: 'Gold', flagA: 'germany', flagB: 'sweden',
-    aliases: ['peace of westphalia', 'treaty of westphalia', 'westphalia'] },
   { id: 'seven-years-war', name: "The Seven Years' War", era: 'Early Modern (1756–1763)', rarity: 'Gold', flagA: 'uk', flagB: 'france',
     aliases: ['seven years war', "the seven years' war"] },
   { id: 'american-revolution', name: 'The American Revolutionary War', era: 'Early Modern (1775–1783)', rarity: 'Diamond', flagA: 'us', flagB: 'uk',
     aliases: ['american revolutionary war', 'american revolution', 'revolutionary war'] },
-  { id: 'treaty-of-paris-1783', name: 'Treaty of Paris (1783)', era: 'Early Modern (1783)', rarity: 'Bronze', flagA: 'us', flagB: 'uk',
-    aliases: ['treaty of paris 1783', 'treaty of paris'] },
-  { id: 'french-revolution', name: 'The French Revolution', era: 'Modern (1789–1799)', rarity: 'Diamond', flagA: 'france', flagB: null,
-    aliases: ['french revolution', 'the french revolution'] },
   { id: 'napoleonic-wars', name: 'The Napoleonic Wars', era: 'Modern (1803–1815)', rarity: 'Diamond', flagA: 'france', flagB: 'uk',
     aliases: ['napoleonic wars', 'the napoleonic wars'] },
-  { id: 'congress-of-vienna', name: 'Congress of Vienna', era: 'Modern (1815)', rarity: 'Gold', flagA: 'austria', flagB: 'uk',
-    aliases: ['congress of vienna'] },
   { id: 'crimean-war', name: 'The Crimean War', era: 'Modern (1853–1856)', rarity: 'Bronze', flagA: 'russia', flagB: 'turkey',
     aliases: ['crimean war', 'the crimean war'] },
   { id: 'franco-prussian-war', name: 'The Franco-Prussian War', era: 'Modern (1870–1871)', rarity: 'Bronze', flagA: 'france', flagB: 'germany',
     aliases: ['franco prussian war', 'franco-prussian war'] },
-  { id: 'treaty-of-versailles', name: 'Treaty of Versailles', era: 'Modern (1919)', rarity: 'Diamond', flagA: 'germany', flagB: 'france',
-    aliases: ['treaty of versailles', 'versailles'] },
   { id: 'world-war-1', name: 'World War I', era: 'Modern (1914–1918)', rarity: 'Emerald', flagA: 'germany', flagB: 'uk',
     aliases: ['world war 1', 'world war i', 'wwi', 'the great war', 'first world war'] },
   { id: 'world-war-2', name: 'World War II', era: 'Modern (1939–1945)', rarity: 'Legendary', flagA: 'germany', flagB: 'us',
     aliases: ['world war 2', 'world war ii', 'wwii', 'second world war'] },
-  { id: 'treaty-of-san-francisco', name: 'Treaty of San Francisco', era: 'Modern (1951)', rarity: 'Iron', flagA: 'japan', flagB: 'us',
-    aliases: ['treaty of san francisco', 'san francisco treaty'] },
   { id: 'korean-war', name: 'The Korean War', era: 'Modern (1950–1953)', rarity: 'Gold', flagA: 'southkorea', flagB: 'us',
     aliases: ['korean war', 'the korean war'] },
-  { id: 'cuban-missile-crisis', name: 'The Cuban Missile Crisis', era: 'Modern (1962)', rarity: 'Sapphire', flagA: 'us', flagB: 'cuba',
-    aliases: ['cuban missile crisis', 'the cuban missile crisis'] },
-  { id: 'fall-of-berlin-wall', name: 'Fall of the Berlin Wall', era: 'Modern (1989)', rarity: 'Diamond', flagA: 'germany', flagB: null,
-    aliases: ['fall of the berlin wall', 'berlin wall', 'fall of berlin wall'] },
-  { id: 'camp-david-accords', name: 'Camp David Accords', era: 'Modern (1978)', rarity: 'Bronze', flagA: 'egypt_ancient', flagB: 'israel',
-    aliases: ['camp david accords', 'camp david'] },
   { id: 'gulf-war', name: 'The Gulf War', era: 'Modern (1990–1991)', rarity: 'Bronze', flagA: 'iraq', flagB: 'us',
     aliases: ['gulf war', 'the gulf war', 'operation desert storm'] },
-  { id: 'treaty-of-maastricht', name: 'Treaty of Maastricht', era: 'Modern (1992)', rarity: 'Iron', flagA: 'eu', flagB: null,
-    aliases: ['treaty of maastricht', 'maastricht treaty', 'maastricht'] },
-  { id: 'good-friday-agreement', name: 'Good Friday Agreement', era: 'Modern (1998)', rarity: 'Bronze', flagA: 'uk', flagB: 'ireland',
-    aliases: ['good friday agreement', 'belfast agreement'] },
 ];
 function allEvents() {
   return [...HISTORICAL_EVENTS, ...Object.values(data.customEvents)];
@@ -286,7 +255,7 @@ function buildSpawnEmbed(event) {
   const flagB = event.flagB ? FLAGS[event.flagB] : null;
   const embed = new EmbedBuilder()
     .setTitle('A wild historyball appeared!')
-    .setDescription(`**Era:** ${event.era}\n\nGuess the war, treaty, or turning point behind these flags!`)
+    .setDescription(`**Era:** ${event.era}\n\nGuess the war behind these flags!`)
     .setColor(0x2c3e50)
     .setFooter({ text: 'First correct guess claims it for their collection.' });
   if (flagA) embed.setImage(flagA);
