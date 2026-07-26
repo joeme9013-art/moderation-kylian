@@ -20,8 +20,8 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
     return {
-      config: { spawnChannelId: null, forceNextRareSpawn: false, spawnBoostUntil: null, specialBoostUntil: null },
-      activeSpawn: null,
+      config: { spawnChannelId: null, forceNextRareSpawn: false, spawnBoostUntil: null, specialBoostUntil: null, disabled: false },
+      activeSpawns: {}, // token -> { eventId, claimedBy, channelId, messageId }
       collections: {},     // userId -> { eventId -> { count, level, var1, var2, power } }
       bux: {},              // userId -> number (currency, replaces old upgrade points)
       battleStats: {},
@@ -40,7 +40,8 @@ function loadData() {
   parsed.config.forceNextRareSpawn ??= false;
   parsed.config.spawnBoostUntil ??= null;
   parsed.config.specialBoostUntil ??= null;
-  parsed.activeSpawn ??= null;
+  parsed.config.disabled ??= false;
+  parsed.activeSpawns ??= {};
   parsed.collections ??= {};
   parsed.bux ??= {};
   parsed.battleStats ??= {};
@@ -243,7 +244,7 @@ function grantEvent(userId, eventId) {
     saveData(data);
     return { isNew: false, entry: collection[eventId], rarity, var1, var2 };
   }
-  const entry = { count: 1, level: 1, var1, var2, power: 0 };
+  const entry = { count: 1, level: 1, var1, var2, power: 0, caughtAt: Date.now() };
   recomputePower(entry, rarity);
   collection[eventId] = entry;
   saveData(data);
@@ -293,37 +294,38 @@ function buildSpawnEmbed(event) {
   return embed;
 }
 
-async function spawnEvent(guild) {
-  const channelId = data.config.spawnChannelId;
-  if (!channelId) return;
+async function spawnEvent(guild, forcedEvent = null, overrideChannelId = null) {
+  const channelId = overrideChannelId || data.config.spawnChannelId;
+  if (!channelId) return null;
   const channel = guild.channels.cache.get(channelId);
-  if (!channel) return;
+  if (!channel) return null;
 
-  const event = pickWeightedEvent();
-  const token = `${Date.now()}${Math.floor(Math.random() * 10000)}`;
+  const event = forcedEvent || pickWeightedEvent();
+  const token = `${Date.now()}${Math.floor(Math.random() * 100000)}`;
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`guess_${token}`).setLabel('Catch me').setStyle(ButtonStyle.Primary),
   );
 
   const message = await channel.send({ embeds: [buildSpawnEmbed(event)], components: [row] }).catch(() => null);
-  if (!message) return;
+  if (!message) return null;
 
-  data.activeSpawn = { eventId: event.id, token, claimedBy: null, channelId, messageId: message.id };
+  data.activeSpawns[token] = { eventId: event.id, claimedBy: null, channelId, messageId: message.id };
   saveData(data);
+  return token;
 }
 
 function scheduleNextSpawn(guild) {
   const boostActive = data.config.spawnBoostUntil && Date.now() < data.config.spawnBoostUntil;
   const gap = boostActive ? SPAWN_INTERVAL_MS / 2 : SPAWN_INTERVAL_MS;
   setTimeout(async () => {
-    await spawnEvent(guild);
+    if (!(data.config.disabled)) await spawnEvent(guild);
     scheduleNextSpawn(guild);
   }, gap);
 }
 
-async function claimSpawn(interaction, guessText) {
-  const spawn = data.activeSpawn;
+async function claimSpawn(interaction, token, guessText) {
+  const spawn = data.activeSpawns[token];
   if (!spawn || spawn.claimedBy) return { correct: false, alreadyClaimed: true };
   const event = findEventById(spawn.eventId);
   if (!matchesEvent(event, guessText)) return { correct: false, alreadyClaimed: false };
@@ -341,7 +343,7 @@ async function claimSpawn(interaction, guessText) {
     await spawnMessage.edit({ embeds: [claimedEmbed], components: [] }).catch(() => {});
   }
 
-  data.activeSpawn = null;
+  delete data.activeSpawns[token];
   saveData(data);
   return { correct: true, event, ...result };
 }
@@ -383,8 +385,19 @@ const slashCommands = [
       .addUserOption((o) => o.setName('user').setDescription('Whose collection').setRequired(false)))
     .addSubcommand((s) => s.setName('completion').setDescription('View completion percentage.')
       .addUserOption((o) => o.setName('user').setDescription('Whose progress').setRequired(false)))
-    .addSubcommand((s) => s.setName('list').setDescription('Compact flat list of owned events.')
-      .addUserOption((o) => o.setName('user').setDescription('Whose list').setRequired(false)))
+    .addSubcommand((s) => s.setName('list').setDescription('List owned events with sort/filter options.')
+      .addUserOption((o) => o.setName('user').setDescription('Whose list').setRequired(false))
+      .addStringOption((o) => o.setName('sort').setDescription('How to sort').setRequired(false)
+        .addChoices(
+          { name: 'alphabetic', value: 'alphabetic' },
+          { name: 'catch_date', value: 'catch_date' },
+          { name: 'rarity', value: 'rarity' },
+          { name: 'power', value: 'power' },
+        ))
+      .addBooleanOption((o) => o.setName('reverse').setDescription('Reverse the sort order').setRequired(false))
+      .addStringOption((o) => o.setName('filter').setDescription('Only show events whose name contains this text').setRequired(false))
+      .addStringOption((o) => o.setName('rarity').setDescription('Only show this rarity tier').setRequired(false).addChoices(...rarityChoices))
+      .addBooleanOption((o) => o.setName('group').setDescription('Group results by rarity tier').setRequired(false)))
     .addSubcommand((s) => s.setName('compare').setDescription('Compare two of your events.')
       .addStringOption((o) => o.setName('event_a').setDescription('First event').setRequired(true))
       .addStringOption((o) => o.setName('event_b').setDescription('Second event').setRequired(true)))
@@ -414,7 +427,10 @@ const slashCommands = [
   new SlashCommandBuilder().setName('historyadmin').setDescription('Admin tools. Admin only.')
     .addSubcommand((s) => s.setName('setspawnchannel').setDescription('Set where events spawn.')
       .addChannelOption((o) => o.setName('channel').setDescription('Spawn channel').setRequired(true)))
-    .addSubcommand((s) => s.setName('forcespawn').setDescription('Spawn one right now.'))
+    .addSubcommand((s) => s.setName('forcespawn').setDescription('Spawn one random event right now.'))
+    .addSubcommand((s) => s.setName('spawn').setDescription('Spawn a specific event (searchable) — up to 50 at once.')
+      .addStringOption((o) => o.setName('event').setDescription('Search by name — leave blank for random').setRequired(false).setAutocomplete(true))
+      .addIntegerOption((o) => o.setName('count').setDescription('How many to spawn (1-50, default 1)').setRequired(false).setMinValue(1).setMaxValue(50)))
     .addSubcommand((s) => s.setName('createevent').setDescription('Create a custom rare special event.')
       .addStringOption((o) => o.setName('name').setDescription('Event name').setRequired(true))
       .addStringOption((o) => o.setName('era').setDescription('Era / date description').setRequired(true))
@@ -424,9 +440,12 @@ const slashCommands = [
       .addStringOption((o) => o.setName('flag_b').setDescription('Second flag key').setRequired(false)))
     .addSubcommand((s) => s.setName('listevents').setDescription('List all custom special events.'))
     .addSubcommand((s) => s.setName('runevent').setDescription('Force-spawn a specific stored custom event now.')
-      .addStringOption((o) => o.setName('name').setDescription('Custom event name').setRequired(true)))
+      .addStringOption((o) => o.setName('name').setDescription('Custom event name').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('deleteevent').setDescription('Delete a custom event permanently.')
-      .addStringOption((o) => o.setName('name').setDescription('Custom event name').setRequired(true))),
+      .addStringOption((o) => o.setName('name').setDescription('Custom event name').setRequired(true).setAutocomplete(true)))
+    .addSubcommand((s) => s.setName('status').setDescription('Check server configuration status.'))
+    .addSubcommand((s) => s.setName('disable').setDescription('Enable or disable automatic spawning.')
+      .addBooleanOption((o) => o.setName('disabled').setDescription('True to disable spawning').setRequired(true))),
 ].map((c) => c.toJSON());
 
 async function registerCommands() {
@@ -462,14 +481,41 @@ const BOOST_DURATION_MS = 2 * 60 * 60 * 1000;
 // ============================================================
 client.on('interactionCreate', async (interaction) => {
   try {
+    // ---------- Autocomplete ----------
+    if (interaction.isAutocomplete()) {
+      if (interaction.commandName !== 'historyadmin') return;
+      const focused = interaction.options.getFocused(true);
+      const query = focused.value.toLowerCase();
+
+      if (focused.name === 'event') {
+        const matches = allEvents()
+          .filter((e) => e.name.toLowerCase().includes(query))
+          .slice(0, 25)
+          .map((e) => ({ name: `${e.name} (${e.rarity})`, value: e.id }));
+        await interaction.respond(matches);
+        return;
+      }
+      if (focused.name === 'name') {
+        const matches = Object.values(data.customEvents)
+          .filter((e) => e.name.toLowerCase().includes(query))
+          .slice(0, 25)
+          .map((e) => ({ name: `${e.name} (${e.rarity})`, value: e.name }));
+        await interaction.respond(matches);
+        return;
+      }
+      await interaction.respond([]);
+      return;
+    }
+
     // ---------- Button: opens the guess modal ----------
     if (interaction.isButton() && interaction.customId.startsWith('guess_')) {
       const token = interaction.customId.replace('guess_', '');
-      if (!data.activeSpawn || data.activeSpawn.token !== token) {
+      const spawn = data.activeSpawns[token];
+      if (!spawn) {
         await interaction.reply({ content: 'This spawn has expired.', ephemeral: true });
         return;
       }
-      if (data.activeSpawn.claimedBy) {
+      if (spawn.claimedBy) {
         await interaction.reply({ content: 'This one has already been claimed!', ephemeral: true });
         return;
       }
@@ -484,8 +530,9 @@ client.on('interactionCreate', async (interaction) => {
 
     // ---------- Modal submit: check the guess ----------
     if (interaction.isModalSubmit() && interaction.customId.startsWith('guessmodal_')) {
+      const token = interaction.customId.replace('guessmodal_', '');
       const guessText = interaction.fields.getTextInputValue('guessInput');
-      const result = await claimSpawn(interaction, guessText);
+      const result = await claimSpawn(interaction, token, guessText);
 
       if (result.alreadyClaimed) {
         await interaction.reply({ content: 'Too slow — someone already claimed this one!', ephemeral: true });
@@ -519,8 +566,9 @@ client.on('interactionCreate', async (interaction) => {
         '/historybux: balance, daily, give, sell,\n' +
         '             shop view/catchphrase/guarantee/rarespawn/\n' +
         '             rarityboost/reroll/spawnboost/specialboost\n' +
-        '/historyadmin: setspawnchannel, forcespawn, createevent,\n' +
-        '               listevents, runevent, deleteevent\n' +
+        '/historyadmin: setspawnchannel, forcespawn, spawn,\n' +
+        '               createevent, listevents, runevent,\n' +
+        '               deleteevent, status, disable\n' +
         '```';
       await interaction.reply({ content: out, ephemeral: true });
       return;
@@ -649,10 +697,41 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (sub === 'list') {
         const target = interaction.options.getUser('user') || interaction.user;
+        const sortBy = interaction.options.getString('sort') || 'alphabetic';
+        const reverse = interaction.options.getBoolean('reverse') || false;
+        const filterText = interaction.options.getString('filter')?.toLowerCase();
+        const rarityFilter = interaction.options.getString('rarity');
+        const groupByRarity = interaction.options.getBoolean('group') || false;
+
         const collection = getCollection(target.id);
-        const lines = Object.entries(collection).map(([id, e]) => `${findEventById(id)?.name || id} (Lv.${e.level})`);
-        if (lines.length === 0) { await interaction.reply(`${target.username} owns nothing yet.`); return; }
-        await interaction.reply(lines.join(', ').slice(0, 1900));
+        let rows = Object.entries(collection).map(([id, e]) => ({ id, event: findEventById(id), entry: e })).filter((r) => r.event);
+
+        if (filterText) rows = rows.filter((r) => r.event.name.toLowerCase().includes(filterText));
+        if (rarityFilter) rows = rows.filter((r) => r.event.rarity === rarityFilter);
+
+        const sorters = {
+          alphabetic: (a, b) => a.event.name.localeCompare(b.event.name),
+          catch_date: (a, b) => (a.entry.caughtAt || 0) - (b.entry.caughtAt || 0),
+          rarity: (a, b) => rarityIndex(a.event.rarity) - rarityIndex(b.event.rarity),
+          power: (a, b) => a.entry.power - b.entry.power,
+        };
+        rows.sort(sorters[sortBy] || sorters.alphabetic);
+        if (reverse) rows.reverse();
+
+        if (rows.length === 0) { await interaction.reply(`${target.username} owns nothing matching those filters.`); return; }
+
+        if (groupByRarity) {
+          const grouped = {};
+          for (const tier of RARITY_TIERS) grouped[tier.name] = [];
+          for (const r of rows) grouped[r.event.rarity].push(`${r.event.name} (Lv.${r.entry.level}, Power ${r.entry.power})`);
+          const embed = new EmbedBuilder().setTitle(`${target.username}'s List`).setColor(0x5865f2);
+          for (const tier of [...RARITY_TIERS].reverse()) if (grouped[tier.name].length) embed.addFields({ name: `${tier.frame} ${tier.name}`, value: grouped[tier.name].join('\n') });
+          await interaction.reply({ embeds: [embed] });
+          return;
+        }
+
+        const lines = rows.map((r) => `${getRarity(r.event.rarity).frame} ${r.event.name} (Lv.${r.entry.level}, Power ${r.entry.power})`);
+        await interaction.reply(lines.join('\n').slice(0, 1900));
         return;
       }
       if (sub === 'compare') {
@@ -823,6 +902,21 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: '✅ Spawned.', ephemeral: true });
         return;
       }
+      if (sub === 'spawn') {
+        if (!data.config.spawnChannelId) { await interaction.reply({ content: 'Set a spawn channel first.', ephemeral: true }); return; }
+        const eventId = interaction.options.getString('event');
+        const count = interaction.options.getInteger('count') || 1;
+        const forcedEvent = eventId ? findEventById(eventId) : null;
+        if (eventId && !forcedEvent) { await interaction.reply({ content: 'Could not find that event.', ephemeral: true }); return; }
+
+        await interaction.reply({ content: `⏳ Spawning ${count}x ${forcedEvent ? forcedEvent.name : 'random event(s)'}...`, ephemeral: true });
+        for (let i = 0; i < count; i++) {
+          await spawnEvent(interaction.guild, forcedEvent);
+          if (i < count - 1) await new Promise((r) => setTimeout(r, 350)); // avoid rate limits
+        }
+        await interaction.followUp({ content: `✅ Spawned ${count}.`, ephemeral: true });
+        return;
+      }
       if (sub === 'createevent') {
         const eventName = interaction.options.getString('name');
         const era = interaction.options.getString('era');
@@ -855,12 +949,7 @@ client.on('interactionCreate', async (interaction) => {
         const event = Object.values(data.customEvents).find((e) => e.name.toLowerCase() === eventName.toLowerCase());
         if (!event) { await interaction.reply({ content: 'No custom event with that name.', ephemeral: true }); return; }
         if (!data.config.spawnChannelId) { await interaction.reply({ content: 'Set a spawn channel first.', ephemeral: true }); return; }
-        const channel = interaction.guild.channels.cache.get(data.config.spawnChannelId);
-        const token = `${Date.now()}${Math.floor(Math.random() * 10000)}`;
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`guess_${token}`).setLabel('Catch me').setStyle(ButtonStyle.Primary));
-        const message = await channel.send({ embeds: [buildSpawnEmbed(event)], components: [row] });
-        data.activeSpawn = { eventId: event.id, token, claimedBy: null, channelId: channel.id, messageId: message.id };
-        saveData(data);
+        await spawnEvent(interaction.guild, event);
         await interaction.reply({ content: `✅ Ran **${event.name}**.`, ephemeral: true });
         return;
       }
@@ -871,6 +960,23 @@ client.on('interactionCreate', async (interaction) => {
         delete data.customEvents[entry[0]];
         saveData(data);
         await interaction.reply({ content: `🗑️ Deleted **${eventName}**.`, ephemeral: true });
+        return;
+      }
+      if (sub === 'status') {
+        const channel = data.config.spawnChannelId ? `<#${data.config.spawnChannelId}>` : 'not set';
+        const spawning = data.config.disabled ? '❌ Disabled' : '✅ Enabled';
+        const activeCount = Object.keys(data.activeSpawns).length;
+        const customCount = Object.keys(data.customEvents).length;
+        await interaction.reply({
+          content: `**Server Config**\nSpawn channel: ${channel}\nSpawning: ${spawning}\nActive live spawns: ${activeCount}\nCustom events stored: ${customCount}`,
+          ephemeral: true,
+        });
+        return;
+      }
+      if (sub === 'disable') {
+        data.config.disabled = interaction.options.getBoolean('disabled');
+        saveData(data);
+        await interaction.reply({ content: `✅ Automatic spawning is now ${data.config.disabled ? 'disabled' : 'enabled'}.`, ephemeral: true });
         return;
       }
     }
