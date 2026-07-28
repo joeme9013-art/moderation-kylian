@@ -113,6 +113,11 @@ const FLAGS = {
   argentina: cdnFlag('ar'),
   israel: cdnFlag('il'),
   iran: cdnFlag('ir'),
+  mexico: cdnFlag('mx'),
+  southafrica: cdnFlag('za'),
+  china: cdnFlag('cn'),
+  finland: cdnFlag('fi'),
+  afghanistan: cdnFlag('af'),
 };
 
 // ============================================================
@@ -145,6 +150,22 @@ const HISTORICAL_EVENTS = [
     aliases: ['iran iraq war', 'iran-iraq war'] },
   { id: 'gulf-war', name: 'The Gulf War', era: '1990–1991', rarity: 'Bronze', flagA: 'iraq', flagB: 'us',
     aliases: ['gulf war', 'the gulf war', 'operation desert storm'] },
+  { id: 'mexican-american-war', name: 'The Mexican-American War', era: '1846–1848', rarity: 'Bronze', flagA: 'us', flagB: 'mexico',
+    aliases: ['mexican american war', 'mexican-american war'] },
+  { id: 'russo-turkish-war', name: 'The Russo-Turkish War', era: '1877–1878', rarity: 'Iron', flagA: 'russia', flagB: 'turkey',
+    aliases: ['russo turkish war', 'russo-turkish war'] },
+  { id: 'second-boer-war', name: 'The Second Boer War', era: '1899–1902', rarity: 'Bronze', flagA: 'uk', flagB: 'southafrica',
+    aliases: ['second boer war', 'boer war', 'the second boer war'] },
+  { id: 'first-sino-japanese-war', name: 'The First Sino-Japanese War', era: '1894–1895', rarity: 'Iron', flagA: 'china', flagB: 'japan',
+    aliases: ['first sino japanese war', 'sino japanese war', 'first sino-japanese war'] },
+  { id: 'spanish-civil-war', name: 'The Spanish Civil War', era: '1936–1939', rarity: 'Gold', flagA: 'spain', flagB: null,
+    aliases: ['spanish civil war', 'the spanish civil war'] },
+  { id: 'winter-war', name: 'The Winter War', era: '1939–1940', rarity: 'Sapphire', flagA: 'finland', flagB: 'russia',
+    aliases: ['winter war', 'the winter war'] },
+  { id: 'six-day-war', name: 'The Six-Day War', era: '1967', rarity: 'Sapphire', flagA: 'israel', flagB: 'egypt_ancient',
+    aliases: ['six day war', 'the six-day war', 'six-day war'] },
+  { id: 'soviet-afghan-war', name: 'The Soviet-Afghan War', era: '1979–1989', rarity: 'Gold', flagA: 'russia', flagB: 'afghanistan',
+    aliases: ['soviet afghan war', 'soviet-afghan war'] },
 ];
 function allEvents() {
   return [...HISTORICAL_EVENTS, ...Object.values(data.customEvents)];
@@ -178,8 +199,8 @@ function recomputePower(entry, rarity) {
   entry.power = base + (entry.level - 1) * Math.round(rarity.multiplier * 5);
 }
 function rollVariance() {
-  // -20 to +20, matching the flavor of the "-15%/+7%" style stat rolls
-  return Math.round((Math.random() * 40 - 20) * 10) / 10;
+  // -20 to +20, whole numbers only — matches the "-15%/+7%" reference format
+  return Math.round(Math.random() * 40 - 20);
 }
 function grantEvent(userId, eventId) {
   const event = findEventById(eventId);
@@ -325,6 +346,42 @@ function catchIdSuffix(var1, var2) {
 }
 
 // ============================================================
+// FAKE CHAT — a stylized, templated "group chat" bit about a war topic.
+// Templated rather than AI-generated so nothing unpredictable gets posted;
+// swap in a real LLM call here later if you want fully dynamic lines.
+// ============================================================
+const FAKE_USERNAMES = [
+  'HistoryNerd42', 'CasualGamer99', 'TeaEnjoyer', 'QuizWhizz',
+  'LurkerLarry', 'MapObsessed', 'DocumentaryFan', 'JustHereForTrivia',
+];
+const FAKE_CHAT_LINES = [
+  "wait {topic} was actually WILD",
+  "didn't we juuust learn about {topic} in school 💀",
+  "{topic} lowkey changed everything ngl",
+  "anyone else oddly obsessed with {topic} rn",
+  "{topic} enjoyers rise up 🙌",
+  "ngl I still don't fully get {topic} but I nod along",
+  "{topic} but as a Netflix series when",
+  "the way {topic} escalated so fast is insane",
+  "my grandpa still talks about {topic} 😭",
+  "{topic} deserves more attention fr",
+  "just watched a 3 hour documentary on {topic}, ask me anything",
+  "{topic} is criminally underrated as a topic",
+  "someone explain {topic} to me like I'm 5",
+  "{topic} hits different once you know the backstory",
+];
+function generateFakeChat(topicName) {
+  const shuffledUsers = [...FAKE_USERNAMES].sort(() => Math.random() - 0.5);
+  const lineCount = 6 + Math.floor(Math.random() * 3); // 6-8 lines
+  const usedLines = [...FAKE_CHAT_LINES].sort(() => Math.random() - 0.5).slice(0, lineCount);
+  const lines = usedLines.map((line, i) => {
+    const user = shuffledUsers[i % shuffledUsers.length];
+    return `**${user}:** ${line.replace(/{topic}/g, topicName)}`;
+  });
+  return lines.join('\n');
+}
+
+// ============================================================
 // SLASH COMMAND DEFINITIONS
 // ============================================================
 const shopChoices = ['view', 'catchphrase', 'guarantee', 'rarespawn', 'rarityboost', 'reroll', 'spawnboost', 'specialboost'];
@@ -332,6 +389,9 @@ const rarityChoices = RARITY_TIERS.map((r) => ({ name: r.name, value: r.name }))
 
 const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
+
+  new SlashCommandBuilder().setName('historychat').setDescription('Generate a fake group chat about a historical war.')
+    .addStringOption((o) => o.setName('topic').setDescription('War to discuss — leave blank for a random one').setRequired(false).setAutocomplete(true)),
 
   new SlashCommandBuilder().setName('history').setDescription('Historydex collection commands.')
     .addSubcommand((s) => s.setName('count').setDescription('Count how many events you have.'))
@@ -451,9 +511,18 @@ client.on('interactionCreate', async (interaction) => {
   try {
     // ---------- Autocomplete ----------
     if (interaction.isAutocomplete()) {
-      if (interaction.commandName !== 'historyadmin') return;
       const focused = interaction.options.getFocused(true);
       const query = focused.value.toLowerCase();
+
+      if (interaction.commandName === 'historychat' && focused.name === 'topic') {
+        const matches = HISTORICAL_EVENTS
+          .filter((e) => e.name.toLowerCase().includes(query))
+          .slice(0, 25)
+          .map((e) => ({ name: e.name, value: e.id }));
+        await interaction.respond(matches);
+        return;
+      }
+      if (interaction.commandName !== 'historyadmin') { await interaction.respond([]); return; }
 
       if (focused.name === 'event') {
         const matches = allEvents()
@@ -528,6 +597,7 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'help') {
       const out = '```\n' +
         'HISTORYDEX COMMANDS:\n' +
+        '/historychat: generate a fake group chat about a war\n' +
         '/history: count, drop, favorite, give, last, info,\n' +
         '          bulk_give, collection, completion, list,\n' +
         '          compare, duplicate\n' +
@@ -539,6 +609,21 @@ client.on('interactionCreate', async (interaction) => {
         '               deleteevent, status, disable\n' +
         '```';
       await interaction.reply({ content: out, ephemeral: true });
+      return;
+    }
+
+    // ---------- /historychat ----------
+    if (name === 'historychat') {
+      const topicId = interaction.options.getString('topic');
+      const topicEvent = topicId ? findEventById(topicId) : null;
+      const topicName = topicEvent ? topicEvent.name : HISTORICAL_EVENTS[Math.floor(Math.random() * HISTORICAL_EVENTS.length)].name;
+
+      const embed = new EmbedBuilder()
+        .setTitle(`💬 #${topicName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`)
+        .setDescription(generateFakeChat(topicName))
+        .setColor(0x5865f2)
+        .setFooter({ text: 'Historydex — simulated chat, not real messages' });
+      await interaction.reply({ embeds: [embed] });
       return;
     }
 
