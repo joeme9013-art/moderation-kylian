@@ -17,6 +17,7 @@ function loadData() {
   }
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {}; p.tournament ??= null;
+  p.starPlayersSeeded ??= false;
   return p;
 }
 function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
@@ -110,6 +111,67 @@ function getSquadPlayers(userId) {
 }
 function makePlayerId(name) {
   return `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Math.floor(Math.random() * 10000)}`;
+}
+
+// ============================================================
+// DEFAULT SQUADS — real rosters seeded automatically so picking that
+// country doesn't leave you with an empty squad. Brazil's XI reflects
+// Carlo Ancelotti's confirmed 2026 World Cup squad announcement.
+// ============================================================
+const DEFAULT_SQUADS = {
+  br: [
+    { name: 'Alisson', position: 'GK', rating: 89 },
+    { name: 'Danilo', position: 'DEF', rating: 82 },
+    { name: 'Marquinhos', position: 'DEF', rating: 87 },
+    { name: 'Gabriel Magalhães', position: 'DEF', rating: 85 },
+    { name: 'Douglas Santos', position: 'DEF', rating: 80 },
+    { name: 'Bruno Guimarães', position: 'MID', rating: 87 },
+    { name: 'Casemiro', position: 'MID', rating: 85 },
+    { name: 'Raphinha', position: 'MID', rating: 88 },
+    { name: 'Neymar Jr', position: 'FWD', rating: 88 },
+    { name: 'Vinícius Júnior', position: 'FWD', rating: 91 },
+    { name: 'Gabriel Martinelli', position: 'FWD', rating: 85 },
+  ],
+  'gb-eng': [
+    { name: 'Jordan Pickford', position: 'GK', rating: 84 },
+    { name: 'Reece James', position: 'DEF', rating: 84 },
+    { name: 'John Stones', position: 'DEF', rating: 84 },
+    { name: 'Marc Guehi', position: 'DEF', rating: 83 },
+    { name: 'Nico O\'Reilly', position: 'DEF', rating: 78 },
+    { name: 'Declan Rice', position: 'MID', rating: 88 },
+    { name: 'Jude Bellingham', position: 'MID', rating: 90 },
+    { name: 'Elliot Anderson', position: 'MID', rating: 79 },
+    { name: 'Bukayo Saka', position: 'FWD', rating: 88 },
+    { name: 'Harry Kane', position: 'FWD', rating: 89 },
+    { name: 'Marcus Rashford', position: 'FWD', rating: 84 },
+  ],
+};
+
+// ============================================================
+// TRANSFER MARKET — real star players, big price tags. Seeded once
+// as free agents with a "cost" field; /player sign deducts coins for
+// these instead of being free like custom-made players.
+// ============================================================
+const STAR_PLAYERS = [
+  { name: 'Jude Bellingham', position: 'MID', rating: 90, cost: 250000000 },
+  { name: 'Kylian Mbappé', position: 'FWD', rating: 93, cost: 300000000 },
+  { name: 'Erling Haaland', position: 'FWD', rating: 92, cost: 280000000 },
+  { name: 'Bukayo Saka', position: 'FWD', rating: 88, cost: 200000000 },
+  { name: 'Jamal Musiala', position: 'MID', rating: 89, cost: 220000000 },
+  { name: 'Pedri', position: 'MID', rating: 87, cost: 180000000 },
+  { name: 'Neymar Jr', position: 'FWD', rating: 88, cost: 150000000 },
+  { name: 'Lionel Messi', position: 'FWD', rating: 90, cost: 100000000 },
+  { name: 'Cristiano Ronaldo', position: 'FWD', rating: 85, cost: 90000000 },
+  { name: 'Vinícius Júnior', position: 'FWD', rating: 91, cost: 260000000 },
+];
+function seedStarPlayers() {
+  if (data.starPlayersSeeded) return;
+  for (const p of STAR_PLAYERS) {
+    const id = makePlayerId(p.name);
+    data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, cost: p.cost, ownerId: null };
+  }
+  data.starPlayersSeeded = true;
+  saveData(data);
 }
 
 // ============================================================
@@ -220,7 +282,19 @@ async function playMatch(channel, teamAId, teamBId, roundLabel) {
   });
 
   let runningA = 0, runningB = 0;
+  let halfTimeShown = false;
+  const HALF_TIME_MS = 3 * 60 * 1000; // 3 minutes — time to talk strategy with your team
   for (const ev of allEvents) {
+    if (!halfTimeShown && ev.minute > 45) {
+      halfTimeShown = true;
+      await channel.send({
+        embeds: [new EmbedBuilder().setTitle('🟡 Half-Time')
+          .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\nTake 3 minutes to talk tactics with your team — second half kicks off after the break!`)
+          .setColor(0xf1c40f)],
+      });
+      await delay(HALF_TIME_MS);
+      await channel.send({ embeds: [new EmbedBuilder().setTitle('🟢 Second Half — Kickoff!').setColor(0x2ecc71)] });
+    }
     await delay(2500);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     let line = commentaryLine(ev);
@@ -364,7 +438,8 @@ async function crownChampion(guild, championId) {
   t.champion = championId;
   const champTeam = getTeam(championId);
   champTeam.trophies += 1;
-  addCoins(championId, 200);
+  const CHAMPION_PRIZE_COINS = 53000000;
+  addCoins(championId, CHAMPION_PRIZE_COINS);
   saveData(data);
   if (t.prizeRoleId) {
     const member = await guild.members.fetch(championId).catch(() => null);
@@ -374,7 +449,7 @@ async function crownChampion(guild, championId) {
   if (channel) {
     await channel.send({
       embeds: [new EmbedBuilder().setTitle(`🏆🎉 ${champTeam.name} WINS ${tournamentDisplayName(t)}!`)
-        .setDescription(`Prize: ${t.prize}\n+200 coins awarded.`).setThumbnail(cdnFlag(champTeam.code)).setColor(0xffd700)],
+        .setDescription(`Prize: ${t.prize}\n+${CHAMPION_PRIZE_COINS.toLocaleString()} coins awarded.`).setThumbnail(cdnFlag(champTeam.code)).setColor(0xffd700)],
     });
   }
 }
@@ -469,10 +544,10 @@ async function registerCommands() {
   await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: slashCommands });
   console.log(`Registered ${slashCommands.length} guild slash commands.`);
 }
-client.once('ready', async () => { console.log(`Logged in as ${client.user.tag}`); await registerCommands(); });
+client.once('ready', async () => { console.log(`Logged in as ${client.user.tag}`); await registerCommands(); seedStarPlayers(); });
 
 const SHOP_PRICES = { starstriker: 80, ironwall: 80, luckycharm: 120, doubledaily: 50 };
-const DAILY_AMOUNT = 25;
+const DAILY_AMOUNT = 250000;
 const VAR_OUTCOMES = [
   '🟩 VAR confirms the original decision. No change.',
   '🟥 VAR overturns it! That result is getting reviewed by the panel.',
@@ -537,9 +612,22 @@ client.on('interactionCreate', async (interaction) => {
         const code = interaction.options.getString('country');
         const country = COUNTRIES.find((c) => c.code === code);
         if (!country) { await interaction.reply({ content: 'Pick a country from the list.', ephemeral: true }); return; }
-        data.teams[interaction.user.id] = { ...(data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] }), code: country.code, name: country.name };
+        const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
+        data.teams[interaction.user.id] = { ...existing, code: country.code, name: country.name };
+        const team = data.teams[interaction.user.id];
+
+        let squadNote = '';
+        if ((!team.squad || team.squad.length === 0) && DEFAULT_SQUADS[country.code]) {
+          team.squad = [];
+          for (const p of DEFAULT_SQUADS[country.code]) {
+            const id = makePlayerId(p.name);
+            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id };
+            team.squad.push(id);
+          }
+          squadNote = `\nYour squad has been auto-filled with ${country.name}'s real starting XI!`;
+        }
         saveData(data);
-        await interaction.reply({ content: `✅ You now represent **${country.name}**!`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
+        await interaction.reply({ content: `✅ You now represent **${country.name}**!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
         return;
       }
       if (sub === 'profile') {
@@ -549,7 +637,7 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setThumbnail(cdnFlag(team.code))
           .addFields(
             { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
-            { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id)}`, inline: true },
+            { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
             { name: 'Squad Size', value: `${(team.squad || []).length}/11`, inline: true },
           ).setColor(0x3498db);
         await interaction.reply({ embeds: [embed] });
@@ -577,10 +665,17 @@ client.on('interactionCreate', async (interaction) => {
         if (!team) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
         team.squad = team.squad || [];
         if (team.squad.length >= 11) { await interaction.reply({ content: 'Your squad is full (11/11). Release someone first.', ephemeral: true }); return; }
+        if (player.cost) {
+          if (getCoins(interaction.user.id) < player.cost) {
+            await interaction.reply({ content: `💸 **${player.name}** costs ${player.cost.toLocaleString()} coins (you have ${getCoins(interaction.user.id).toLocaleString()}).`, ephemeral: true });
+            return;
+          }
+          addCoins(interaction.user.id, -player.cost);
+        }
         player.ownerId = interaction.user.id;
         team.squad.push(player.id);
         saveData(data);
-        await interaction.reply(`✅ Signed **${player.name}**! Squad: ${team.squad.length}/11.`);
+        await interaction.reply(`✅ Signed **${player.name}**${player.cost ? ` for ${player.cost.toLocaleString()} coins` : ''}! Squad: ${team.squad.length}/11.`);
         return;
       }
       if (sub === 'release') {
@@ -605,13 +700,13 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'list') {
         const freeAgents = Object.values(data.players).filter((p) => !p.ownerId);
         if (freeAgents.length === 0) { await interaction.reply('No free agents right now — create one with /createplayer.'); return; }
-        const lines = freeAgents.slice(0, 40).map((p) => `${p.position} — ${p.name} (${p.rating})`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🆓 Free Agents').setDescription(lines.join('\n')).setColor(0x95a5a6)] });
+        const lines = freeAgents.slice(0, 40).map((p) => `${p.position} — ${p.name} (${p.rating})${p.cost ? ` — 💰 ${p.cost.toLocaleString()} coins` : ' — free'}`);
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🆓 Transfer Market').setDescription(lines.join('\n')).setColor(0x95a5a6)] });
         return;
       }
     }
 
-    if (name === 'balance') { await interaction.reply(`💰 You have **${getCoins(interaction.user.id)} coins**.`); return; }
+    if (name === 'balance') { await interaction.reply(`💰 You have **${getCoins(interaction.user.id).toLocaleString()} coins**.`); return; }
     if (name === 'daily') {
       const last = data.lastDaily[interaction.user.id] || 0;
       if (Date.now() - last < 24 * 60 * 60 * 1000) {
@@ -625,7 +720,7 @@ client.on('interactionCreate', async (interaction) => {
       data.lastDaily[interaction.user.id] = Date.now();
       addCoins(interaction.user.id, amount);
       saveData(data);
-      await interaction.reply(`💰 Claimed **${amount} coins**! Balance: ${getCoins(interaction.user.id)}.`);
+      await interaction.reply(`💰 Claimed **${amount.toLocaleString()} coins**! Balance: ${getCoins(interaction.user.id).toLocaleString()}.`);
       return;
     }
     if (name === 'leaderboard') {
