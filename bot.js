@@ -164,6 +164,23 @@ const STAR_PLAYERS = [
   { name: 'Cristiano Ronaldo', position: 'FWD', rating: 85, cost: 90000000 },
   { name: 'Vinícius Júnior', position: 'FWD', rating: 91, cost: 260000000 },
 ];
+// Fallback for the ~190 countries without a verified real roster — clearly
+// fictional names (never a real athlete's name) so nobody gets falsely
+// attributed to a national team without confirmation.
+const GENERIC_FIRST_NAMES = ['Alex', 'Sam', 'Jordan', 'Chris', 'Kai', 'Milo', 'Theo', 'Luca', 'Nico', 'Ezra', 'Omar', 'Iker', 'Rafa', 'Tomas', 'Diego'];
+const GENERIC_LAST_NAMES = ['Rivera', 'Novak', 'Ferreira', 'Kowalski', 'Haddad', 'Larsen', 'Osei', 'Tanaka', 'Silva', 'Costa', 'Petrov', 'Cruz', 'Adeyemi', 'Moreau', 'Sato'];
+function generateGenericSquad() {
+  const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
+  return positions.map((position) => ({
+    name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
+    position,
+    rating: 60 + Math.floor(Math.random() * 26),
+  }));
+}
+function getDefaultSquad(countryCode) {
+  return DEFAULT_SQUADS[countryCode] || generateGenericSquad();
+}
+
 function seedStarPlayers() {
   if (data.starPlayersSeeded) return;
   for (const p of STAR_PLAYERS) {
@@ -283,13 +300,13 @@ async function playMatch(channel, teamAId, teamBId, roundLabel) {
 
   let runningA = 0, runningB = 0;
   let halfTimeShown = false;
-  const HALF_TIME_MS = 3 * 60 * 1000; // 3 minutes — time to talk strategy with your team
+  const HALF_TIME_MS = 25 * 1000; // 25 seconds — quick breather
   for (const ev of allEvents) {
     if (!halfTimeShown && ev.minute > 45) {
       halfTimeShown = true;
       await channel.send({
         embeds: [new EmbedBuilder().setTitle('🟡 Half-Time')
-          .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\nTake 3 minutes to talk tactics with your team — second half kicks off after the break!`)
+          .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\n25 second break — second half kicks off shortly!`)
           .setColor(0xf1c40f)],
       });
       await delay(HALF_TIME_MS);
@@ -414,6 +431,22 @@ async function startNextKnockoutMatch(guild) {
 
   if (idx === -1) {
     const winners = round.map((m) => m.winner);
+
+    // Semifinals just finished (2 matches, 4 teams) — play the third-place
+    // playoff between the two losers before moving on to the Final.
+    if (round.length === 2 && !t.thirdPlacePlayed) {
+      t.thirdPlacePlayed = true;
+      const losers = round.map((m) => (m.winner === m.p1 ? m.p2 : m.p1));
+      saveData(data);
+      const channel = await getTournamentChannel(guild);
+      if (channel) {
+        await channel.send({ embeds: [new EmbedBuilder().setTitle('🥉 Third Place Playoff').setColor(0xcd7f32)] });
+        const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff');
+        addCoins(thirdResult.winnerId, 5000000);
+        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
+      }
+    }
+
     if (winners.length === 1) { await crownChampion(guild, winners[0]); return; }
     t.rounds.push(buildKnockoutRound(winners));
     saveData(data);
@@ -441,15 +474,22 @@ async function crownChampion(guild, championId) {
   const CHAMPION_PRIZE_COINS = 53000000;
   addCoins(championId, CHAMPION_PRIZE_COINS);
   saveData(data);
-  if (t.prizeRoleId) {
+
+  // The prize role is an ultra-rare 1-in-1000 bonus, not guaranteed
+  let wonRole = false;
+  if (t.prizeRoleId && Math.random() < 1 / 1000) {
+    wonRole = true;
     const member = await guild.members.fetch(championId).catch(() => null);
     if (member) await member.roles.add(t.prizeRoleId).catch(() => {});
   }
+
   const channel = await getTournamentChannel(guild);
   if (channel) {
+    const desc = `Prize: ${t.prize}\n+${CHAMPION_PRIZE_COINS.toLocaleString()} coins awarded.` +
+      (t.prizeRoleId ? (wonRole ? '\n🎉 INCREDIBLE — also won the ultra-rare (1/1000) tournament role!' : '\n(Missed the 1/1000 chance at the bonus tournament role — so close!)') : '');
     await channel.send({
       embeds: [new EmbedBuilder().setTitle(`🏆🎉 ${champTeam.name} WINS ${tournamentDisplayName(t)}!`)
-        .setDescription(`Prize: ${t.prize}\n+${CHAMPION_PRIZE_COINS.toLocaleString()} coins awarded.`).setThumbnail(cdnFlag(champTeam.code)).setColor(0xffd700)],
+        .setDescription(desc).setThumbnail(cdnFlag(champTeam.code)).setColor(0xffd700)],
     });
   }
 }
@@ -484,7 +524,7 @@ const slashCommands = [
     .addSubcommand((s) => s.setName('profile').setDescription("View a team's profile.")
       .addUserOption((o) => o.setName('user').setDescription('Whose profile').setRequired(false))),
 
-  new SlashCommandBuilder().setName('createplayer').setDescription('Create a custom player.')
+  new SlashCommandBuilder().setName('createplayer').setDescription('Create a custom player. Admin only.')
     .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true))
     .addStringOption((o) => o.setName('position').setDescription('Position').setRequired(true).addChoices(...positionChoices))
     .addIntegerOption((o) => o.setName('rating').setDescription('Rating 40-99 (default random 60-90)').setRequired(false).setMinValue(40).setMaxValue(99)),
@@ -613,18 +653,35 @@ client.on('interactionCreate', async (interaction) => {
         const country = COUNTRIES.find((c) => c.code === code);
         if (!country) { await interaction.reply({ content: 'Pick a country from the list.', ephemeral: true }); return; }
         const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
+        const isCountryChange = existing.code && existing.code !== country.code;
+
+        // Switching nations releases the old squad back to free agency —
+        // don't drag Brazil's real XI along when you pick England, etc.
+        if (isCountryChange && existing.squad?.length) {
+          for (const playerId of existing.squad) {
+            const player = data.players[playerId];
+            if (player) player.ownerId = null;
+          }
+          existing.squad = [];
+        }
+
         data.teams[interaction.user.id] = { ...existing, code: country.code, name: country.name };
         const team = data.teams[interaction.user.id];
 
         let squadNote = '';
-        if ((!team.squad || team.squad.length === 0) && DEFAULT_SQUADS[country.code]) {
+        if (!team.squad || team.squad.length === 0) {
           team.squad = [];
-          for (const p of DEFAULT_SQUADS[country.code]) {
+          const roster = getDefaultSquad(country.code);
+          for (const p of roster) {
             const id = makePlayerId(p.name);
             data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id };
             team.squad.push(id);
           }
-          squadNote = `\nYour squad has been auto-filled with ${country.name}'s real starting XI!`;
+          squadNote = DEFAULT_SQUADS[country.code]
+            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI!`
+            : `\nYour squad has been auto-filled with a generated 11 (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
+        } else if (isCountryChange) {
+          squadNote = "\nYour previous squad was released to free agency — sign a fresh one with /player sign.";
         }
         saveData(data);
         await interaction.reply({ content: `✅ You now represent **${country.name}**!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
@@ -646,6 +703,10 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (name === 'createplayer') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+        await interaction.reply({ content: 'Admin only.', ephemeral: true });
+        return;
+      }
       const pName = interaction.options.getString('name');
       const position = interaction.options.getString('position');
       const rating = interaction.options.getInteger('rating') || (60 + Math.floor(Math.random() * 31));
