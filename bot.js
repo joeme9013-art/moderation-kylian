@@ -1,4 +1,4 @@
- require('dotenv').config();
+require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
 } = require('discord.js');
@@ -145,6 +145,32 @@ const DEFAULT_SQUADS = {
     { name: 'Harry Kane', position: 'FWD', rating: 89 },
     { name: 'Marcus Rashford', position: 'FWD', rating: 84 },
   ],
+  ma: [
+    { name: 'Yassine Bounou', position: 'GK', rating: 85 },
+    { name: 'Achraf Hakimi', position: 'DEF', rating: 88 },
+    { name: 'Issa Diop', position: 'DEF', rating: 80 },
+    { name: 'Chadi Riad', position: 'DEF', rating: 79 },
+    { name: 'Noussair Mazraoui', position: 'DEF', rating: 82 },
+    { name: 'Ayyoub Bouaddi', position: 'MID', rating: 78 },
+    { name: 'Neil El Aynaoui', position: 'MID', rating: 79 },
+    { name: 'Azzedine Ounahi', position: 'MID', rating: 81 },
+    { name: 'Brahim Díaz', position: 'FWD', rating: 84 },
+    { name: 'Bilal El Khannouss', position: 'FWD', rating: 81 },
+    { name: 'Soufiane Rahimi', position: 'FWD', rating: 80 },
+  ],
+  no: [
+    { name: 'Ørjan Nyland', position: 'GK', rating: 78 },
+    { name: 'Julian Ryerson', position: 'DEF', rating: 82 },
+    { name: 'Kristoffer Ajer', position: 'DEF', rating: 80 },
+    { name: 'Leo Østigård', position: 'DEF', rating: 79 },
+    { name: 'Fredrik Bjørkan', position: 'DEF', rating: 77 },
+    { name: 'Martin Ødegaard', position: 'MID', rating: 88 },
+    { name: 'Sander Berge', position: 'MID', rating: 80 },
+    { name: 'Kristian Thorstvedt', position: 'MID', rating: 78 },
+    { name: 'Antonio Nusa', position: 'FWD', rating: 83 },
+    { name: 'Erling Haaland', position: 'FWD', rating: 94 },
+    { name: 'Alexander Sørloth', position: 'FWD', rating: 84 },
+  ],
 };
 
 // ============================================================
@@ -221,20 +247,31 @@ function pickGoalkeeper(squadPlayers, teamName) {
   const gk = squadPlayers.find((p) => p.position === 'GK');
   return gk ? gk.name : `The ${teamName} keeper`;
 }
+function pickDefender(squadPlayers, teamName) {
+  const defs = squadPlayers.filter((p) => p.position === 'DEF' || p.position === 'MID');
+  const pool = defs.length ? defs : squadPlayers;
+  if (pool.length === 0) return `A ${teamName} defender`;
+  return pool[Math.floor(Math.random() * pool.length)].name;
+}
 
-function generateGoalEvents(goalCount, squadPlayers, teamName, side) {
+function generateGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, oppTeamName) {
   const events = [];
   for (let i = 0; i < goalCount; i++) {
-    const isPenalty = Math.random() < 0.12;
+    const isPenalty = Math.random() < 0.15;
     const isStoppage = Math.random() < 0.15;
     const minute = isStoppage ? 90 + Math.floor(Math.random() * 8) + 1 : Math.floor(Math.random() * 90) + 1;
-    events.push({ minute, side, type: 'goal', player: pickScorer(squadPlayers, teamName), isPenalty });
+    const scorer = pickScorer(squadPlayers, teamName);
+    if (isPenalty) {
+      // VAR review precedes the penalty goal, same minute, added first so it commentates before the goal
+      events.push({ minute, side, type: 'var_penalty_awarded', player: scorer, foulBy: pickDefender(oppSquad, oppTeamName) });
+    }
+    events.push({ minute, side, type: 'goal', player: scorer, isPenalty });
   }
   return events;
 }
 function generateFlavorEvents(squadA, squadB, teamAName, teamBName) {
   const events = [];
-  const flavorCount = 2 + Math.floor(Math.random() * 3);
+  const flavorCount = 3 + Math.floor(Math.random() * 3);
   for (let i = 0; i < flavorCount; i++) {
     const minute = Math.floor(Math.random() * 90) + 1;
     const side = Math.random() < 0.5 ? 'A' : 'B';
@@ -243,10 +280,19 @@ function generateFlavorEvents(squadA, squadB, teamAName, teamBName) {
     const oppSquad = side === 'A' ? squadB : squadA;
     const oppTeamName = side === 'A' ? teamBName : teamAName;
     const roll = Math.random();
-    if (roll < 0.5) {
+    if (roll < 0.35) {
       events.push({ minute, side, type: 'save', player: pickScorer(squad, teamName), gk: pickGoalkeeper(oppSquad, oppTeamName) });
-    } else {
+    } else if (roll < 0.55) {
       events.push({ minute, side, type: 'card', player: pickScorer(squad, teamName), card: Math.random() < 0.15 ? 'red' : 'yellow' });
+    } else if (roll < 0.7) {
+      events.push({ minute, side, type: 'foul', player: pickDefender(oppSquad, oppTeamName), against: pickScorer(squad, teamName) });
+    } else if (roll < 0.85) {
+      // VAR checks a penalty shout but it's not given
+      events.push({ minute, side, type: 'var_no_penalty', player: pickScorer(squad, teamName) });
+    } else {
+      // VAR gives the penalty, but it's missed or saved — doesn't change the score
+      const outcome = Math.random() < 0.5 ? 'saved' : 'missed';
+      events.push({ minute, side, type: 'var_penalty_missed', player: pickScorer(squad, teamName), gk: pickGoalkeeper(oppSquad, oppTeamName), outcome });
     }
   }
   return events;
@@ -264,6 +310,18 @@ function commentaryLine(ev) {
   if (ev.type === 'save') {
     return `🧤 ${minStr} — **${ev.player}** shoots... but it's saved brilliantly by **${ev.gk}**!`;
   }
+  if (ev.type === 'foul') {
+    return `🟨 ${minStr} — **${ev.player}** brings down **${ev.against}** — foul given.`;
+  }
+  if (ev.type === 'var_penalty_awarded') {
+    return `📺 ${minStr} — **${ev.foulBy}** fouls **${ev.player}** in the box! Referee is called to the monitor...\n🟢 VAR confirms it — PENALTY AWARDED!`;
+  }
+  if (ev.type === 'var_no_penalty') {
+    return `📺 ${minStr} — Shouts for a penalty as **${ev.player}** goes down in the box...\n🔴 VAR review: no infringement, play continues.`;
+  }
+  if (ev.type === 'var_penalty_missed') {
+    return `📺 ${minStr} — Penalty awarded to **${ev.player}**'s side after a VAR review!\n${ev.outcome === 'saved' ? `🧤 The spot-kick is saved by **${ev.gk}**!` : '❌ The penalty goes wide — missed!'}`;
+  }
   return `${ev.card === 'red' ? '🟥' : '🟨'} ${minStr} — **${ev.player}** is shown a ${ev.card} card.`;
 }
 
@@ -271,6 +329,7 @@ function commentaryLine(ev) {
 function formatScorerList(goalEvents) {
   const byPlayer = {};
   for (const ev of goalEvents) {
+    if (ev.type !== 'goal') continue; // skip the paired VAR narrative entries, only count real goals
     byPlayer[ev.player] = byPlayer[ev.player] || [];
     byPlayer[ev.player].push(`${formatMinute(ev.minute)}${ev.isPenalty ? ' (P)' : ''}`);
   }
@@ -287,8 +346,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel) {
   goalsA = applyOpponentReduction(teamBId, goalsA); // teamB's ironWall reduces teamA's goals
   goalsB = applyOpponentReduction(teamAId, goalsB);
 
-  const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A');
-  const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B');
+  const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
+  const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
   const flavorEvents = generateFlavorEvents(squadA, squadB, teamA.name, teamB.name);
   const allEvents = [...goalEventsA, ...goalEventsB, ...flavorEvents].sort((a, b) => a.minute - b.minute);
 
