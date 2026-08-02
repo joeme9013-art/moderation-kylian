@@ -13,10 +13,11 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
-    return { teams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournament: null };
+    return { teams: {}, cityTeams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournament: null };
   }
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {}; p.tournament ??= null;
+  p.cityTeams ??= {};
   p.starPlayersSeeded ??= false;
   return p;
 }
@@ -101,6 +102,10 @@ const COUNTRIES = [
 
 // ---------- Team / player helpers ----------
 function getTeam(userId) { return data.teams[userId] || null; }
+function getCityTeam(userId) { return data.cityTeams[userId] || null; }
+function isCountryTaken(code, excludeUserId) {
+  return Object.entries(data.teams).some(([uid, t]) => t.code === code && uid !== excludeUserId);
+}
 function getCoins(userId) { return data.coins[userId] || 0; }
 function addCoins(userId, amount) { data.coins[userId] = Math.max(0, (data.coins[userId] || 0) + amount); }
 function getBoosts(userId) { data.boosts[userId] = data.boosts[userId] || {}; return data.boosts[userId]; }
@@ -115,8 +120,8 @@ function makePlayerId(name) {
 
 // ============================================================
 // DEFAULT SQUADS — real rosters seeded automatically so picking that
-// country doesn't leave you with an empty squad. Brazil's XI reflects
-// Carlo Ancelotti's confirmed 2026 World Cup squad announcement.
+// country doesn't leave you with an empty squad. Reflects each nation's
+// core 2026 FIFA World Cup starting XI (or best-known regular lineup).
 // ============================================================
 const DEFAULT_SQUADS = {
   br: [
@@ -171,6 +176,149 @@ const DEFAULT_SQUADS = {
     { name: 'Erling Haaland', position: 'FWD', rating: 94 },
     { name: 'Alexander Sørloth', position: 'FWD', rating: 84 },
   ],
+  fr: [
+    { name: 'Mike Maignan', position: 'GK', rating: 87 },
+    { name: 'Jules Koundé', position: 'DEF', rating: 85 },
+    { name: 'William Saliba', position: 'DEF', rating: 87 },
+    { name: 'Dayot Upamecano', position: 'DEF', rating: 85 },
+    { name: 'Théo Hernández', position: 'DEF', rating: 84 },
+    { name: 'Adrien Rabiot', position: 'MID', rating: 82 },
+    { name: 'Aurélien Tchouaméni', position: 'MID', rating: 85 },
+    { name: 'Michael Olise', position: 'FWD', rating: 85 },
+    { name: 'Désiré Doué', position: 'FWD', rating: 84 },
+    { name: 'Kylian Mbappé', position: 'FWD', rating: 93 },
+    { name: 'Ousmane Dembélé', position: 'FWD', rating: 89 },
+  ],
+  ar: [
+    { name: 'Emiliano Martínez', position: 'GK', rating: 88 },
+    { name: 'Nahuel Molina', position: 'DEF', rating: 82 },
+    { name: 'Cristian Romero', position: 'DEF', rating: 86 },
+    { name: 'Nicolás Otamendi', position: 'DEF', rating: 83 },
+    { name: 'Facundo Medina', position: 'DEF', rating: 81 },
+    { name: 'Rodrigo De Paul', position: 'MID', rating: 85 },
+    { name: 'Enzo Fernández', position: 'MID', rating: 86 },
+    { name: 'Alexis Mac Allister', position: 'MID', rating: 86 },
+    { name: 'Lionel Messi', position: 'FWD', rating: 90 },
+    { name: 'Julián Álvarez', position: 'FWD', rating: 87 },
+    { name: 'Lautaro Martínez', position: 'FWD', rating: 87 },
+  ],
+  es: [
+    { name: 'Unai Simón', position: 'GK', rating: 84 },
+    { name: 'Dani Carvajal', position: 'DEF', rating: 84 },
+    { name: 'Robin Le Normand', position: 'DEF', rating: 83 },
+    { name: 'Aymeric Laporte', position: 'DEF', rating: 83 },
+    { name: 'Marc Cucurella', position: 'DEF', rating: 82 },
+    { name: 'Rodri', position: 'MID', rating: 90 },
+    { name: 'Pedri', position: 'MID', rating: 88 },
+    { name: 'Fabián Ruiz', position: 'MID', rating: 84 },
+    { name: 'Lamine Yamal', position: 'FWD', rating: 89 },
+    { name: 'Ferran Torres', position: 'FWD', rating: 82 },
+    { name: 'Nico Williams', position: 'FWD', rating: 85 },
+  ],
+  pt: [
+    { name: 'Diogo Costa', position: 'GK', rating: 85 },
+    { name: 'João Cancelo', position: 'DEF', rating: 84 },
+    { name: 'Rúben Dias', position: 'DEF', rating: 88 },
+    { name: 'Gonçalo Inácio', position: 'DEF', rating: 81 },
+    { name: 'Nuno Mendes', position: 'DEF', rating: 84 },
+    { name: 'Vitinha', position: 'MID', rating: 86 },
+    { name: 'Bruno Fernandes', position: 'MID', rating: 87 },
+    { name: 'Bernardo Silva', position: 'MID', rating: 87 },
+    { name: 'Cristiano Ronaldo', position: 'FWD', rating: 85 },
+    { name: 'Rafael Leão', position: 'FWD', rating: 85 },
+    { name: 'Gonçalo Ramos', position: 'FWD', rating: 82 },
+  ],
+  de: [
+    { name: 'Marc-André ter Stegen', position: 'GK', rating: 87 },
+    { name: 'Joshua Kimmich', position: 'DEF', rating: 87 },
+    { name: 'Antonio Rüdiger', position: 'DEF', rating: 85 },
+    { name: 'Jonathan Tah', position: 'DEF', rating: 82 },
+    { name: 'David Raum', position: 'DEF', rating: 80 },
+    { name: 'Robert Andrich', position: 'MID', rating: 79 },
+    { name: 'Florian Wirtz', position: 'MID', rating: 88 },
+    { name: 'Jamal Musiala', position: 'MID', rating: 89 },
+    { name: 'Serge Gnabry', position: 'FWD', rating: 82 },
+    { name: 'Kai Havertz', position: 'FWD', rating: 84 },
+    { name: 'Leroy Sané', position: 'FWD', rating: 83 },
+  ],
+  nl: [
+    { name: 'Bart Verbruggen', position: 'GK', rating: 81 },
+    { name: 'Denzel Dumfries', position: 'DEF', rating: 83 },
+    { name: 'Virgil van Dijk', position: 'DEF', rating: 87 },
+    { name: 'Stefan de Vrij', position: 'DEF', rating: 80 },
+    { name: 'Nathan Aké', position: 'DEF', rating: 81 },
+    { name: 'Tijjani Reijnders', position: 'MID', rating: 84 },
+    { name: 'Frenkie de Jong', position: 'MID', rating: 86 },
+    { name: 'Xavi Simons', position: 'MID', rating: 85 },
+    { name: 'Cody Gakpo', position: 'FWD', rating: 84 },
+    { name: 'Memphis Depay', position: 'FWD', rating: 82 },
+    { name: 'Donyell Malen', position: 'FWD', rating: 80 },
+  ],
+  us: [
+    { name: 'Matt Turner', position: 'GK', rating: 78 },
+    { name: 'Sergiño Dest', position: 'DEF', rating: 81 },
+    { name: 'Tim Ream', position: 'DEF', rating: 76 },
+    { name: 'Chris Richards', position: 'DEF', rating: 78 },
+    { name: 'Antonee Robinson', position: 'DEF', rating: 80 },
+    { name: 'Tyler Adams', position: 'MID', rating: 81 },
+    { name: 'Weston McKennie', position: 'MID', rating: 82 },
+    { name: 'Yunus Musah', position: 'MID', rating: 80 },
+    { name: 'Christian Pulisic', position: 'FWD', rating: 85 },
+    { name: 'Folarin Balogun', position: 'FWD', rating: 79 },
+    { name: 'Timothy Weah', position: 'FWD', rating: 78 },
+  ],
+  be: [
+    { name: 'Koen Casteels', position: 'GK', rating: 80 },
+    { name: 'Jan Vertonghen', position: 'DEF', rating: 78 },
+    { name: 'Wout Faes', position: 'DEF', rating: 79 },
+    { name: 'Zeno Debast', position: 'DEF', rating: 79 },
+    { name: 'Arthur Theate', position: 'DEF', rating: 78 },
+    { name: 'Amadou Onana', position: 'MID', rating: 82 },
+    { name: 'Youri Tielemans', position: 'MID', rating: 81 },
+    { name: 'Kevin De Bruyne', position: 'MID', rating: 88 },
+    { name: 'Jérémy Doku', position: 'FWD', rating: 84 },
+    { name: 'Romelu Lukaku', position: 'FWD', rating: 83 },
+    { name: 'Loïs Openda', position: 'FWD', rating: 83 },
+  ],
+  uy: [
+    { name: 'Sergio Rochet', position: 'GK', rating: 81 },
+    { name: 'Ronald Araújo', position: 'DEF', rating: 85 },
+    { name: 'José María Giménez', position: 'DEF', rating: 83 },
+    { name: 'Sebastián Cáceres', position: 'DEF', rating: 78 },
+    { name: 'Guillermo Varela', position: 'DEF', rating: 76 },
+    { name: 'Manuel Ugarte', position: 'MID', rating: 82 },
+    { name: 'Federico Valverde', position: 'MID', rating: 88 },
+    { name: 'Rodrigo Bentancur', position: 'MID', rating: 82 },
+    { name: 'Facundo Pellistri', position: 'FWD', rating: 79 },
+    { name: 'Darwin Núñez', position: 'FWD', rating: 84 },
+    { name: 'Cristhian Olivera', position: 'FWD', rating: 76 },
+  ],
+  hr: [
+    { name: 'Dominik Livaković', position: 'GK', rating: 83 },
+    { name: 'Josip Stanišić', position: 'DEF', rating: 79 },
+    { name: 'Joško Gvardiol', position: 'DEF', rating: 86 },
+    { name: 'Josip Šutalo', position: 'DEF', rating: 79 },
+    { name: 'Borna Sosa', position: 'DEF', rating: 77 },
+    { name: 'Luka Modrić', position: 'MID', rating: 86 },
+    { name: 'Martin Baturina', position: 'MID', rating: 80 },
+    { name: 'Mateo Kovačić', position: 'MID', rating: 83 },
+    { name: 'Ante Budimir', position: 'FWD', rating: 78 },
+    { name: 'Andrej Kramarić', position: 'FWD', rating: 80 },
+    { name: 'Marko Pjaca', position: 'FWD', rating: 75 },
+  ],
+  mx: [
+    { name: 'Luis Malagón', position: 'GK', rating: 78 },
+    { name: 'Jorge Sánchez', position: 'DEF', rating: 77 },
+    { name: 'Johan Vásquez', position: 'DEF', rating: 78 },
+    { name: 'César Montes', position: 'DEF', rating: 77 },
+    { name: 'Gerardo Arteaga', position: 'DEF', rating: 78 },
+    { name: 'Edson Álvarez', position: 'MID', rating: 82 },
+    { name: 'Orbelín Pineda', position: 'MID', rating: 77 },
+    { name: 'Luis Chávez', position: 'MID', rating: 79 },
+    { name: 'Santiago Giménez', position: 'FWD', rating: 82 },
+    { name: 'Hirving Lozano', position: 'FWD', rating: 80 },
+    { name: 'Gilberto Mora', position: 'FWD', rating: 78 },
+  ],
 };
 
 // ============================================================
@@ -190,7 +338,7 @@ const STAR_PLAYERS = [
   { name: 'Cristiano Ronaldo', position: 'FWD', rating: 85, cost: 90000000 },
   { name: 'Vinícius Júnior', position: 'FWD', rating: 91, cost: 260000000 },
 ];
-// Fallback for the ~190 countries without a verified real roster — clearly
+// Fallback for countries without a verified real roster — clearly
 // fictional names (never a real athlete's name) so nobody gets falsely
 // attributed to a national team without confirmation.
 const GENERIC_FIRST_NAMES = ['Alex', 'Sam', 'Jordan', 'Chris', 'Kai', 'Milo', 'Theo', 'Luca', 'Nico', 'Ezra', 'Omar', 'Iker', 'Rafa', 'Tomas', 'Diego'];
@@ -337,9 +485,12 @@ function formatScorerList(goalEvents) {
   return lines.length ? lines.join('\n') : '—';
 }
 
-async function playMatch(channel, teamAId, teamBId, roundLabel) {
-  const teamA = getTeam(teamAId), teamB = getTeam(teamBId);
-  const squadA = getSquadPlayers(teamAId), squadB = getSquadPlayers(teamBId);
+async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
+  const isCity = options.isCity || false;
+  const teamA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
+  const teamB = isCity ? getCityTeam(teamBId) : getTeam(teamBId);
+  const squadA = isCity ? [] : getSquadPlayers(teamAId);
+  const squadB = isCity ? [] : getSquadPlayers(teamBId);
 
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
@@ -351,11 +502,9 @@ async function playMatch(channel, teamAId, teamBId, roundLabel) {
   const flavorEvents = generateFlavorEvents(squadA, squadB, teamA.name, teamB.name);
   const allEvents = [...goalEventsA, ...goalEventsB, ...flavorEvents].sort((a, b) => a.minute - b.minute);
 
-  await channel.send({
-    embeds: [new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`)
-      .setDescription(`**${teamA.name}** vs **${teamB.name}**`)
-      .setThumbnail(cdnFlag(teamA.code)).setColor(0x2ecc71)],
-  });
+  const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${teamA.name}** vs **${teamB.name}**`).setColor(0x2ecc71);
+  if (!isCity) kickoffEmbed.setThumbnail(cdnFlag(teamA.code));
+  await channel.send({ embeds: [kickoffEmbed] });
 
   let runningA = 0, runningB = 0;
   let halfTimeShown = false;
@@ -393,8 +542,6 @@ async function playMatch(channel, teamAId, teamBId, roundLabel) {
 
   const resultEmbed = new EmbedBuilder()
     .setTitle(roundLabel)
-    .setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) })
-    .setThumbnail(cdnFlag(teamB.code))
     .setDescription(
       `**${teamA.name}**  ${goalsA} - ${goalsB}  **${teamB.name}**\n` +
       `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''} • <t:${Math.floor(Date.now() / 1000)}:d>`
@@ -404,12 +551,13 @@ async function playMatch(channel, teamAId, teamBId, roundLabel) {
       { name: `${teamB.name} Scorers`, value: formatScorerList(goalEventsB), inline: true },
     )
     .setColor(0x2ecc71);
+  if (!isCity) { resultEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) }); resultEmbed.setThumbnail(cdnFlag(teamB.code)); }
   await channel.send({ embeds: [resultEmbed] });
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
-  getTeam(winnerId).wins += 1;
-  getTeam(loserId).losses += 1;
-  addCoins(winnerId, 25);
+  teamA.wins !== undefined && (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
+  teamB.wins !== undefined && (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+  if (!isCity) addCoins(winnerId, 25); // city/league games are for fun only — no coin reward
   saveData(data);
 
   return { goalsA, goalsB, penalties, winnerId };
@@ -603,6 +751,15 @@ const slashCommands = [
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
       .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' })),
 
+  new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
+    .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
+      .addStringOption((o) => o.setName('name').setDescription('Any team name you want').setRequired(true)))
+    .addSubcommand((s) => s.setName('profile').setDescription("View a custom team's profile.")
+      .addUserOption((o) => o.setName('user').setDescription('Whose team').setRequired(false))),
+
+  new SlashCommandBuilder().setName('citymatch').setDescription('Play a league game between custom teams — no cooldown, no coins, just for fun.')
+    .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
+
   new SlashCommandBuilder().setName('matchsim').setDescription('Play a full animated friendly match against another team.')
     .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
   new SlashCommandBuilder().setName('penalty').setDescription('Take a 5-kick penalty shootout for coins.'),
@@ -711,6 +868,10 @@ client.on('interactionCreate', async (interaction) => {
         const code = interaction.options.getString('country');
         const country = COUNTRIES.find((c) => c.code === code);
         if (!country) { await interaction.reply({ content: 'Pick a country from the list.', ephemeral: true }); return; }
+        if (isCountryTaken(code, interaction.user.id)) {
+          await interaction.reply({ content: `🚫 **${country.name}** is already taken by another player. Pick a different country.`, ephemeral: true });
+          return;
+        }
         const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
         const isCountryChange = existing.code && existing.code !== country.code;
 
@@ -863,6 +1024,32 @@ client.on('interactionCreate', async (interaction) => {
       if (!getTeam(interaction.user.id) || !getTeam(opponent.id)) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
       await interaction.reply('⚽ Kicking off...');
       await playMatch(interaction.channel, interaction.user.id, opponent.id, 'Friendly Match');
+      return;
+    }
+
+    if (name === 'teamcreator') {
+      if (sub === 'create') {
+        const teamName = interaction.options.getString('name').slice(0, 40);
+        data.cityTeams[interaction.user.id] = { ...(data.cityTeams[interaction.user.id] || { wins: 0, losses: 0 }), name: teamName };
+        saveData(data);
+        await interaction.reply(`✅ Your custom team is now **${teamName}**! Use it in \`/citymatch\` — league games only, it can't join \`/tournament\` (that needs a real country from \`/team set\`).`);
+        return;
+      }
+      if (sub === 'profile') {
+        const target = interaction.options.getUser('user') || interaction.user;
+        const team = getCityTeam(target.id);
+        if (!team) { await interaction.reply(`${target.username} hasn't created a custom team yet — use /teamcreator create.`); return; }
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(team.name).addFields({ name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true }).setColor(0x9b59b6)] });
+        return;
+      }
+    }
+
+    if (name === 'citymatch') {
+      const opponent = interaction.options.getUser('opponent');
+      if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
+      if (!getCityTeam(interaction.user.id) || !getCityTeam(opponent.id)) { await interaction.reply({ content: 'Both players need a custom team first — use /teamcreator create.', ephemeral: true }); return; }
+      await interaction.reply('⚽ Kicking off a league game — no coins on the line, just bragging rights!');
+      await playMatch(interaction.channel, interaction.user.id, opponent.id, 'League Game', { isCity: true });
       return;
     }
 
