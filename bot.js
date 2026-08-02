@@ -911,6 +911,23 @@ function generateGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, o
   }
   return events;
 }
+
+// Extra time (91'-105', 106'-120') sees fewer goals than a normal 45 — weighted low
+const ET_GOAL_WEIGHTS = [0, 0, 0, 0, 0, 1, 1, 2];
+function extraTimeGoalCount() { return ET_GOAL_WEIGHTS[Math.floor(Math.random() * ET_GOAL_WEIGHTS.length)]; }
+function generateExtraTimeGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, oppTeamName, minMinute, maxMinute) {
+  const events = [];
+  for (let i = 0; i < goalCount; i++) {
+    const minute = minMinute + Math.floor(Math.random() * (maxMinute - minMinute + 1));
+    const isPenalty = Math.random() < 0.15;
+    const scorer = pickScorer(squadPlayers, teamName);
+    if (isPenalty) {
+      events.push({ minute, side, type: 'var_penalty_awarded', player: scorer, foulBy: pickDefender(oppSquad, oppTeamName), et: true });
+    }
+    events.push({ minute, side, type: 'goal', player: scorer, isPenalty, et: true });
+  }
+  return events;
+}
 function generateFlavorEvents(squadA, squadB, teamAName, teamBName) {
   const events = [];
   const flavorCount = 3 + Math.floor(Math.random() * 3);
@@ -945,7 +962,7 @@ function formatMinute(minute) {
   return `${minute}'`;
 }
 function commentaryLine(ev) {
-  const minStr = formatMinute(ev.minute);
+  const minStr = ev.et ? `${ev.minute}' (ET)` : formatMinute(ev.minute);
   if (ev.type === 'goal') {
     return `⚽ ${minStr} — **${ev.player}** rushes through, dribbles past the defense and SCORES${ev.isPenalty ? ' from the spot' : ''}!`;
   }
@@ -996,7 +1013,7 @@ function computeTrainingBonusGoals(trainingCount) {
   return bonus;
 }
 
-async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB) {
+async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId) {
   const addedSeconds = 5 + Math.floor(Math.random() * 11); // +5 to +15s added time
   const totalMs = HALF_TIME_BASE_MS + addedSeconds * 1000;
   const matchToken = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
@@ -1023,6 +1040,11 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB) {
   const collector = halfTimeMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: totalMs });
   collector.on('collect', async (btn) => {
     const side = btn.customId.startsWith('train_A_') ? 'A' : 'B';
+    const ownerId = side === 'A' ? teamAId : teamBId;
+    if (btn.user.id !== ownerId) {
+      await btn.reply({ content: `🚫 Only the ${side === 'A' ? teamA.name : teamB.name} manager can train this team!`, ephemeral: true }).catch(() => {});
+      return;
+    }
     const now = Date.now();
     const last = lastClick.get(btn.user.id) || 0;
     if (now - last < 10 * 1000) {
@@ -1076,7 +1098,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   }
 
   // ---- Half-time: training window, then apply bonus goals to the second half ----
-  const { trainingCounts, addedSeconds } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB);
+  const { trainingCounts, addedSeconds } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId);
 
   const bonusA = computeTrainingBonusGoals(trainingCounts.A);
   const bonusB = computeTrainingBonusGoals(trainingCounts.B);
@@ -1110,6 +1132,62 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     await channel.send(line);
   }
   await delay(1500);
+
+  // ---- Extra Time: only if still level after 90+ ----
+  if (goalsA === goalsB) {
+    await channel.send({
+      embeds: [new EmbedBuilder().setTitle('⏱️ Full-Time — Still Level!')
+        .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\nHeading to Extra Time — two 15-minute halves!`)
+        .setColor(0xe67e22)],
+    });
+    await delay(30000);
+
+    // ET First Half: 91'-105'
+    await channel.send({ embeds: [new EmbedBuilder().setTitle("🟠 Extra Time — First Half Kickoff! (91')").setColor(0xe67e22)] });
+    const et1Events = [
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadA, teamA.name, 'A', squadB, teamB.name, 91, 105),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadB, teamB.name, 'B', squadA, teamA.name, 91, 105),
+    ].sort((a, b) => a.minute - b.minute);
+    for (const ev of et1Events) {
+      await delay(2500);
+      if (ev.type === 'goal') {
+        if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
+      }
+      let line = commentaryLine(ev);
+      if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
+      await channel.send(line);
+    }
+
+    // ET Half-Time
+    await channel.send({
+      embeds: [new EmbedBuilder().setTitle('🟡 Half-Time (Extra Time)')
+        .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\nShort break — second period of extra time coming up!`)
+        .setColor(0xf1c40f)],
+    });
+    await delay(30000);
+
+    // ET Second Half: 106'-120'
+    await channel.send({ embeds: [new EmbedBuilder().setTitle("🟠 Extra Time — Second Half Kickoff! (106')").setColor(0xe67e22)] });
+    const et2Events = [
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadA, teamA.name, 'A', squadB, teamB.name, 106, 120),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadB, teamB.name, 'B', squadA, teamA.name, 106, 120),
+    ].sort((a, b) => a.minute - b.minute);
+    for (const ev of et2Events) {
+      await delay(2500);
+      if (ev.type === 'goal') {
+        if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
+      }
+      let line = commentaryLine(ev);
+      if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
+      await channel.send(line);
+    }
+    await delay(1500);
+    await channel.send({
+      embeds: [new EmbedBuilder().setTitle('🏁 End of Extra Time (120\')')
+        .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`)
+        .setColor(0xe67e22)],
+    });
+  }
 
   let penalties = null;
   let winnerId;
