@@ -1414,7 +1414,7 @@ client.on('interactionCreate', async (interaction) => {
         const q = focused.value.toLowerCase();
         const sub = interaction.options.getSubcommand();
         let pool;
-        if (sub === 'sign') pool = Object.values(data.players).filter((p) => !p.ownerId);
+        if (sub === 'sign') pool = Object.values(data.players).filter((p) => !p.ownerId && !p.isNational);
         else pool = getSquadPlayers(interaction.user.id);
         const matches = pool.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 25).map((p) => ({ name: `${p.name} (${p.position}, ${p.rating})`, value: p.name }));
         await interaction.respond(matches);
@@ -1458,12 +1458,12 @@ client.on('interactionCreate', async (interaction) => {
         const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
         const isCountryChange = existing.code && existing.code !== country.code;
 
-        // Switching nations releases the old squad back to free agency —
-        // don't drag Brazil's real XI along when you pick England, etc.
+        // Switching nations removes the old national-squad players entirely —
+        // they never enter free agency (they just get regenerated fresh for
+        // whoever picks that country next).
         if (isCountryChange && existing.squad?.length) {
           for (const playerId of existing.squad) {
-            const player = data.players[playerId];
-            if (player) player.ownerId = null;
+            delete data.players[playerId];
           }
           existing.squad = [];
         }
@@ -1477,14 +1477,14 @@ client.on('interactionCreate', async (interaction) => {
           const roster = getDefaultSquad(country.code);
           for (const p of roster) {
             const id = makePlayerId(p.name);
-            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id };
+            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
             team.squad.push(id);
           }
           squadNote = DEFAULT_SQUADS[country.code]
             ? `\nYour squad has been auto-filled with ${country.name}'s starting XI!`
             : `\nYour squad has been auto-filled with a generated 11 (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
         } else if (isCountryChange) {
-          squadNote = "\nYour previous squad was released to free agency — sign a fresh one with /player sign.";
+          squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
         }
         saveData(data);
         await interaction.reply({ content: `✅ You now represent **${country.name}**!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
@@ -1523,7 +1523,7 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'player') {
       if (sub === 'sign') {
         const pName = interaction.options.getString('name');
-        const player = Object.values(data.players).find((p) => p.name.toLowerCase() === pName.toLowerCase() && !p.ownerId);
+        const player = Object.values(data.players).find((p) => p.name.toLowerCase() === pName.toLowerCase() && !p.ownerId && !p.isNational);
         if (!player) { await interaction.reply({ content: 'No free-agent player with that name.', ephemeral: true }); return; }
         const team = getTeam(interaction.user.id);
         if (!team) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
@@ -1547,10 +1547,14 @@ client.on('interactionCreate', async (interaction) => {
         const team = getTeam(interaction.user.id);
         const player = team?.squad?.map((id) => data.players[id]).find((p) => p?.name.toLowerCase() === pName.toLowerCase());
         if (!player) { await interaction.reply({ content: "That player isn't in your squad.", ephemeral: true }); return; }
-        player.ownerId = null;
         team.squad = team.squad.filter((id) => id !== player.id);
+        if (player.isNational) {
+          delete data.players[player.id]; // national-squad players never enter free agency
+        } else {
+          player.ownerId = null;
+        }
         saveData(data);
-        await interaction.reply(`✅ Released **${player.name}** back to free agency.`);
+        await interaction.reply(`✅ Released **${player.name}**${player.isNational ? '.' : ' back to free agency.'}`);
         return;
       }
       if (sub === 'squad') {
@@ -1562,7 +1566,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       if (sub === 'list') {
-        const freeAgents = Object.values(data.players).filter((p) => !p.ownerId);
+        const freeAgents = Object.values(data.players).filter((p) => !p.ownerId && !p.isNational);
         if (freeAgents.length === 0) { await interaction.reply('No free agents right now — create one with /createplayer.'); return; }
         const lines = freeAgents.slice(0, 40).map((p) => `${p.position} — ${p.name} (${p.rating})${p.cost ? ` — 💰 ${p.cost.toLocaleString()} coins` : ' — free'}`);
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🆓 Transfer Market').setDescription(lines.join('\n')).setColor(0x95a5a6)] });
