@@ -1,6 +1,7 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -319,6 +320,499 @@ const DEFAULT_SQUADS = {
     { name: 'Hirving Lozano', position: 'FWD', rating: 80 },
     { name: 'Gilberto Mora', position: 'FWD', rating: 78 },
   ],
+  kr: [
+    { name: 'Jo Hyeon-woo', position: 'GK', rating: 78 },
+    { name: 'Kim Min-jae', position: 'DEF', rating: 85 },
+    { name: 'Kim Young-gwon', position: 'DEF', rating: 78 },
+    { name: 'Kim Jin-su', position: 'DEF', rating: 77 },
+    { name: 'Park Yong-woo', position: 'MID', rating: 79 },
+    { name: 'Hong Hyun-seok', position: 'MID', rating: 78 },
+    { name: 'Lee Kang-in', position: 'MID', rating: 84 },
+    { name: 'Son Heung-min', position: 'FWD', rating: 87 },
+    { name: 'Hwang Hee-chan', position: 'FWD', rating: 82 },
+    { name: 'Cho Gue-sung', position: 'FWD', rating: 78 },
+  ],
+  cz: [
+    { name: 'Jindřich Staněk', position: 'GK', rating: 77 },
+    { name: 'Vladimír Coufal', position: 'DEF', rating: 79 },
+    { name: 'Ladislav Krejčí', position: 'DEF', rating: 78 },
+    { name: 'Robin Hranáč', position: 'DEF', rating: 77 },
+    { name: 'David Doudera', position: 'DEF', rating: 76 },
+    { name: 'Tomáš Souček', position: 'MID', rating: 82 },
+    { name: 'Antonín Barák', position: 'MID', rating: 78 },
+    { name: 'Lukáš Provod', position: 'MID', rating: 77 },
+    { name: 'Patrik Schick', position: 'FWD', rating: 84 },
+    { name: 'Adam Hložek', position: 'FWD', rating: 79 },
+    { name: 'Václav Černý', position: 'FWD', rating: 77 },
+  ],
+  ca: [
+    { name: 'Milan Borjan', position: 'GK', rating: 78 },
+    { name: 'Kamal Miller', position: 'DEF', rating: 78 },
+    { name: 'Moise Bombito', position: 'DEF', rating: 78 },
+    { name: 'Richie Laryea', position: 'DEF', rating: 78 },
+    { name: 'Alphonso Davies', position: 'DEF', rating: 85 },
+    { name: 'Stephen Eustáquio', position: 'MID', rating: 80 },
+    { name: 'Ismaël Koné', position: 'MID', rating: 79 },
+    { name: 'Tajon Buchanan', position: 'MID', rating: 80 },
+    { name: 'Jonathan David', position: 'FWD', rating: 85 },
+    { name: 'Cyle Larin', position: 'FWD', rating: 78 },
+    { name: 'Jacob Shaffelburg', position: 'FWD', rating: 76 },
+  ],
+  ch: [
+    { name: 'Gregor Kobel', position: 'GK', rating: 84 },
+    { name: 'Manuel Akanji', position: 'DEF', rating: 84 },
+    { name: 'Ricardo Rodríguez', position: 'DEF', rating: 77 },
+    { name: 'Nico Elvedi', position: 'DEF', rating: 79 },
+    { name: 'Eray Cömert', position: 'DEF', rating: 77 },
+    { name: 'Granit Xhaka', position: 'MID', rating: 85 },
+    { name: 'Remo Freuler', position: 'MID', rating: 80 },
+    { name: 'Ardon Jashari', position: 'MID', rating: 79 },
+    { name: 'Dan Ndoye', position: 'FWD', rating: 82 },
+    { name: 'Breel Embolo', position: 'FWD', rating: 81 },
+    { name: 'Zeki Amdouni', position: 'FWD', rating: 79 },
+  ],
+  'gb-sct': [
+    { name: 'Craig Gordon', position: 'GK', rating: 76 },
+    { name: 'Andy Robertson', position: 'DEF', rating: 82 },
+    { name: 'Kieran Tierney', position: 'DEF', rating: 79 },
+    { name: 'Grant Hanley', position: 'DEF', rating: 76 },
+    { name: 'John Souttar', position: 'DEF', rating: 76 },
+    { name: 'Scott McTominay', position: 'MID', rating: 84 },
+    { name: 'John McGinn', position: 'MID', rating: 81 },
+    { name: 'Ryan Christie', position: 'MID', rating: 78 },
+    { name: 'Che Adams', position: 'FWD', rating: 78 },
+    { name: 'Lyndon Dykes', position: 'FWD', rating: 76 },
+    { name: 'Ben Doak', position: 'FWD', rating: 78 },
+  ],
+  py: [
+    { name: 'Roberto Fernández', position: 'GK', rating: 78 },
+    { name: 'Gustavo Gómez', position: 'DEF', rating: 82 },
+    { name: 'Omar Alderete', position: 'DEF', rating: 80 },
+    { name: 'Fabián Balbuena', position: 'DEF', rating: 78 },
+    { name: 'Alberto Espínola', position: 'DEF', rating: 75 },
+    { name: 'Mathías Villasanti', position: 'MID', rating: 78 },
+    { name: 'Damián Bobadilla', position: 'MID', rating: 76 },
+    { name: 'Miguel Almirón', position: 'MID', rating: 82 },
+    { name: 'Julio Enciso', position: 'FWD', rating: 80 },
+    { name: 'Antonio Sanabria', position: 'FWD', rating: 78 },
+    { name: 'Ramón Sosa', position: 'FWD', rating: 77 },
+  ],
+  au: [
+    { name: 'Joe Gauci', position: 'GK', rating: 77 },
+    { name: 'Harry Souttar', position: 'DEF', rating: 79 },
+    { name: 'Milos Degenek', position: 'DEF', rating: 77 },
+    { name: 'Aziz Behich', position: 'DEF', rating: 76 },
+    { name: 'Kai Trewin', position: 'DEF', rating: 74 },
+    { name: 'Jackson Irvine', position: 'MID', rating: 79 },
+    { name: 'Aiden O\'Neill', position: 'MID', rating: 76 },
+    { name: 'Cameron Devlin', position: 'MID', rating: 75 },
+    { name: 'Mathew Leckie', position: 'FWD', rating: 76 },
+    { name: 'Awer Mabil', position: 'FWD', rating: 76 },
+    { name: 'Nestory Irankunda', position: 'FWD', rating: 78 },
+  ],
+  tr: [
+    { name: 'Uğurcan Çakır', position: 'GK', rating: 81 },
+    { name: 'Zeki Çelik', position: 'DEF', rating: 79 },
+    { name: 'Merih Demiral', position: 'DEF', rating: 82 },
+    { name: 'Abdülkerim Bardakcı', position: 'DEF', rating: 77 },
+    { name: 'Ferdi Kadıoğlu', position: 'DEF', rating: 80 },
+    { name: 'Hakan Çalhanoğlu', position: 'MID', rating: 86 },
+    { name: 'Orkun Kökçü', position: 'MID', rating: 81 },
+    { name: 'İsmail Yüksek', position: 'MID', rating: 77 },
+    { name: 'Arda Güler', position: 'FWD', rating: 85 },
+    { name: 'Kenan Yıldız', position: 'FWD', rating: 84 },
+    { name: 'Kerem Aktürkoğlu', position: 'FWD', rating: 79 },
+  ],
+  ec: [
+    { name: 'Hernán Galíndez', position: 'GK', rating: 78 },
+    { name: 'Piero Hincapié', position: 'DEF', rating: 83 },
+    { name: 'Willian Pacho', position: 'DEF', rating: 82 },
+    { name: 'Pervis Estupiñán', position: 'DEF', rating: 81 },
+    { name: 'Ángelo Preciado', position: 'DEF', rating: 78 },
+    { name: 'Moisés Caicedo', position: 'MID', rating: 87 },
+    { name: 'José Cifuentes', position: 'MID', rating: 78 },
+    { name: 'Kendry Páez', position: 'MID', rating: 80 },
+    { name: 'Enner Valencia', position: 'FWD', rating: 79 },
+    { name: 'Gonzalo Plata', position: 'FWD', rating: 78 },
+    { name: 'Jeremy Sarmiento', position: 'FWD', rating: 77 },
+  ],
+  ci: [
+    { name: 'Yahia Fofana', position: 'GK', rating: 78 },
+    { name: 'Wilfried Singo', position: 'DEF', rating: 82 },
+    { name: 'Evan Ndicka', position: 'DEF', rating: 82 },
+    { name: 'Ousmane Diomande', position: 'DEF', rating: 81 },
+    { name: 'Ghislain Konan', position: 'DEF', rating: 77 },
+    { name: 'Franck Kessié', position: 'MID', rating: 83 },
+    { name: 'Jean Séri', position: 'MID', rating: 79 },
+    { name: 'Ibrahim Sangaré', position: 'MID', rating: 80 },
+    { name: 'Simon Adingra', position: 'FWD', rating: 80 },
+    { name: 'Yoan-Ange Bonny', position: 'FWD', rating: 77 },
+    { name: 'Nicolas Pépé', position: 'FWD', rating: 78 },
+  ],
+  jp: [
+    { name: 'Zion Suzuki', position: 'GK', rating: 79 },
+    { name: 'Takehiro Tomiyasu', position: 'DEF', rating: 81 },
+    { name: 'Ko Itakura', position: 'DEF', rating: 79 },
+    { name: 'Hiroki Ito', position: 'DEF', rating: 78 },
+    { name: 'Yukinari Sugawara', position: 'DEF', rating: 77 },
+    { name: 'Hidemasa Morita', position: 'MID', rating: 80 },
+    { name: 'Ao Tanaka', position: 'MID', rating: 79 },
+    { name: 'Daichi Kamada', position: 'MID', rating: 80 },
+    { name: 'Takefusa Kubo', position: 'FWD', rating: 85 },
+    { name: 'Kaoru Mitoma', position: 'FWD', rating: 85 },
+    { name: 'Ritsu Dōan', position: 'FWD', rating: 82 },
+  ],
+  se: [
+    { name: 'Robin Olsen', position: 'GK', rating: 78 },
+    { name: 'Pontus Jansson', position: 'DEF', rating: 78 },
+    { name: 'Emil Krafth', position: 'DEF', rating: 76 },
+    { name: 'Ludwig Augustinsson', position: 'DEF', rating: 76 },
+    { name: 'Gustav Isaksson', position: 'DEF', rating: 74 },
+    { name: 'Yasin Ayari', position: 'MID', rating: 79 },
+    { name: 'Jesper Karlström', position: 'MID', rating: 75 },
+    { name: 'Dejan Kulusevski', position: 'MID', rating: 85 },
+    { name: 'Alexander Isak', position: 'FWD', rating: 88 },
+    { name: 'Viktor Gyökeres', position: 'FWD', rating: 87 },
+    { name: 'Anthony Elanga', position: 'FWD', rating: 81 },
+  ],
+  tn: [
+    { name: 'Aymen Dahmen', position: 'GK', rating: 78 },
+    { name: 'Mohamed Dräger', position: 'DEF', rating: 77 },
+    { name: 'Yassine Meriah', position: 'DEF', rating: 76 },
+    { name: 'Ali Abdi', position: 'DEF', rating: 76 },
+    { name: 'Bilel Ifa', position: 'DEF', rating: 75 },
+    { name: 'Ellyes Skhiri', position: 'MID', rating: 81 },
+    { name: 'Aïssa Laïdouni', position: 'MID', rating: 79 },
+    { name: 'Hannibal Mejbri', position: 'MID', rating: 80 },
+    { name: 'Youssef Msakni', position: 'FWD', rating: 79 },
+    { name: 'Seifeddine Jaziri', position: 'FWD', rating: 76 },
+    { name: 'Elias Achouri', position: 'FWD', rating: 77 },
+  ],
+  eg: [
+    { name: 'Mohamed El-Shenawy', position: 'GK', rating: 78 },
+    { name: 'Ahmed Hegazi', position: 'DEF', rating: 77 },
+    { name: 'Akram Tawfik', position: 'DEF', rating: 76 },
+    { name: 'Ahmed Fatouh', position: 'DEF', rating: 76 },
+    { name: 'Mohamed Abdelmonem', position: 'DEF', rating: 76 },
+    { name: 'Mohamed Elneny', position: 'MID', rating: 79 },
+    { name: 'Emam Ashour', position: 'MID', rating: 78 },
+    { name: 'Mahmoud Trézéguet', position: 'MID', rating: 78 },
+    { name: 'Mohamed Salah', position: 'FWD', rating: 89 },
+    { name: 'Omar Marmoush', position: 'FWD', rating: 83 },
+    { name: 'Mostafa Mohamed', position: 'FWD', rating: 78 },
+  ],
+  ir: [
+    { name: 'Alireza Beiranvand', position: 'GK', rating: 79 },
+    { name: 'Milad Mohammadi', position: 'DEF', rating: 77 },
+    { name: 'Sadegh Moharrami', position: 'DEF', rating: 77 },
+    { name: 'Shoja Khalilzadeh', position: 'DEF', rating: 75 },
+    { name: 'Ali Gholizadeh', position: 'DEF', rating: 76 },
+    { name: 'Ahmad Nourollahi', position: 'MID', rating: 78 },
+    { name: 'Saman Ghoddos', position: 'MID', rating: 78 },
+    { name: 'Alireza Jahanbakhsh', position: 'MID', rating: 78 },
+    { name: 'Mehdi Taremi', position: 'FWD', rating: 83 },
+    { name: 'Mehdi Ghayedi', position: 'FWD', rating: 76 },
+    { name: 'Shahriar Moghanlou', position: 'FWD', rating: 74 },
+  ],
+  sn: [
+    { name: 'Édouard Mendy', position: 'GK', rating: 82 },
+    { name: 'Kalidou Koulibaly', position: 'DEF', rating: 85 },
+    { name: 'Moussa Niakhaté', position: 'DEF', rating: 79 },
+    { name: 'Krépin Diatta', position: 'DEF', rating: 79 },
+    { name: 'El Hadji Malick Diouf', position: 'DEF', rating: 76 },
+    { name: 'Idrissa Gana Gueye', position: 'MID', rating: 81 },
+    { name: 'Pape Matar Sarr', position: 'MID', rating: 80 },
+    { name: 'Habib Diarra', position: 'MID', rating: 79 },
+    { name: 'Sadio Mané', position: 'FWD', rating: 85 },
+    { name: 'Ismaïla Sarr', position: 'FWD', rating: 81 },
+    { name: 'Nicolas Jackson', position: 'FWD', rating: 81 },
+  ],
+  dz: [
+    { name: 'Alexandre Oukidja', position: 'GK', rating: 78 },
+    { name: 'Ramy Bensebaini', position: 'DEF', rating: 82 },
+    { name: 'Aïssa Mandi', position: 'DEF', rating: 78 },
+    { name: 'Youcef Atal', position: 'DEF', rating: 79 },
+    { name: 'Ahmed Touba', position: 'DEF', rating: 76 },
+    { name: 'Ismaël Bennacer', position: 'MID', rating: 82 },
+    { name: 'Houssem Aouar', position: 'MID', rating: 79 },
+    { name: 'Nabil Bentaleb', position: 'MID', rating: 78 },
+    { name: 'Riyad Mahrez', position: 'FWD', rating: 84 },
+    { name: 'Amine Gouiri', position: 'FWD', rating: 80 },
+    { name: 'Baghdad Bounedjah', position: 'FWD', rating: 76 },
+  ],
+  at: [
+    { name: 'Patrick Pentz', position: 'GK', rating: 78 },
+    { name: 'David Alaba', position: 'DEF', rating: 83 },
+    { name: 'Kevin Danso', position: 'DEF', rating: 80 },
+    { name: 'Philipp Lienhart', position: 'DEF', rating: 78 },
+    { name: 'Alexander Prass', position: 'DEF', rating: 76 },
+    { name: 'Marcel Sabitzer', position: 'MID', rating: 82 },
+    { name: 'Konrad Laimer', position: 'MID', rating: 81 },
+    { name: 'Nicolas Seiwald', position: 'MID', rating: 78 },
+    { name: 'Michael Gregoritsch', position: 'FWD', rating: 78 },
+    { name: 'Marko Arnautović', position: 'FWD', rating: 78 },
+    { name: 'Patrick Wimmer', position: 'FWD', rating: 77 },
+  ],
+  co: [
+    { name: 'Camilo Vargas', position: 'GK', rating: 79 },
+    { name: 'Davinson Sánchez', position: 'DEF', rating: 79 },
+    { name: 'Yerry Mina', position: 'DEF', rating: 78 },
+    { name: 'Daniel Muñoz', position: 'DEF', rating: 80 },
+    { name: 'Johan Mojica', position: 'DEF', rating: 77 },
+    { name: 'Jefferson Lerma', position: 'MID', rating: 80 },
+    { name: 'Richard Ríos', position: 'MID', rating: 81 },
+    { name: 'James Rodríguez', position: 'MID', rating: 82 },
+    { name: 'Luis Díaz', position: 'FWD', rating: 87 },
+    { name: 'Jhon Durán', position: 'FWD', rating: 82 },
+    { name: 'Jhon Arias', position: 'FWD', rating: 79 },
+  ],
+  gh: [
+    { name: 'Lawrence Ati-Zigi', position: 'GK', rating: 78 },
+    { name: 'Mohammed Salisu', position: 'DEF', rating: 80 },
+    { name: 'Alidu Seidu', position: 'DEF', rating: 77 },
+    { name: 'Denis Odoi', position: 'DEF', rating: 76 },
+    { name: 'Gideon Mensah', position: 'DEF', rating: 76 },
+    { name: 'Thomas Partey', position: 'MID', rating: 82 },
+    { name: 'Iddrisu Baba', position: 'MID', rating: 77 },
+    { name: 'Mohammed Kudus', position: 'MID', rating: 85 },
+    { name: 'Jordan Ayew', position: 'FWD', rating: 78 },
+    { name: 'Antoine Semenyo', position: 'FWD', rating: 80 },
+    { name: 'Ernest Nuamah', position: 'FWD', rating: 79 },
+  ],
+  sa: [
+    { name: 'Nawaf Al-Aqidi', position: 'GK', rating: 78 },
+    { name: 'Ali Al-Bulaihi', position: 'DEF', rating: 76 },
+    { name: 'Abdulelah Al-Amri', position: 'DEF', rating: 76 },
+    { name: 'Saud Abdulhamid', position: 'DEF', rating: 77 },
+    { name: 'Sultan Al-Ghannam', position: 'DEF', rating: 75 },
+    { name: 'Mohammed Kanno', position: 'MID', rating: 78 },
+    { name: 'Salman Al-Faraj', position: 'MID', rating: 76 },
+    { name: 'Nasser Al-Dawsari', position: 'MID', rating: 76 },
+    { name: 'Salem Al-Dawsari', position: 'FWD', rating: 81 },
+    { name: 'Firas Al-Buraikan', position: 'FWD', rating: 77 },
+    { name: 'Abdullah Al-Hamdan', position: 'FWD', rating: 75 },
+  ],
+  za: [
+    { name: 'Ronwen Williams', position: 'GK', rating: 78 },
+    { name: 'Mothobi Mvala', position: 'DEF', rating: 76 },
+    { name: 'Siyabonga Ngezana', position: 'DEF', rating: 76 },
+    { name: 'Aubrey Modiba', position: 'DEF', rating: 75 },
+    { name: 'Thapelo Morena', position: 'DEF', rating: 75 },
+    { name: 'Teboho Mokoena', position: 'MID', rating: 78 },
+    { name: 'Themba Zwane', position: 'MID', rating: 79 },
+    { name: 'Sphephelo Sithole', position: 'MID', rating: 75 },
+    { name: 'Percy Tau', position: 'FWD', rating: 79 },
+    { name: 'Lyle Foster', position: 'FWD', rating: 78 },
+    { name: 'Evidence Makgopa', position: 'FWD', rating: 75 },
+  ],
+  pl: [
+    { name: 'Wojciech Szczęsny', position: 'GK', rating: 82 },
+    { name: 'Kamil Glik', position: 'DEF', rating: 76 },
+    { name: 'Jakub Kiwior', position: 'DEF', rating: 80 },
+    { name: 'Jan Bednarek', position: 'DEF', rating: 78 },
+    { name: 'Przemysław Frankowski', position: 'DEF', rating: 77 },
+    { name: 'Piotr Zieliński', position: 'MID', rating: 82 },
+    { name: 'Nicola Zalewski', position: 'MID', rating: 78 },
+    { name: 'Sebastian Szymański', position: 'MID', rating: 79 },
+    { name: 'Robert Lewandowski', position: 'FWD', rating: 87 },
+    { name: 'Krzysztof Piątek', position: 'FWD', rating: 76 },
+    { name: 'Arkadiusz Milik', position: 'FWD', rating: 78 },
+  ],
+  dk: [
+    { name: 'Kasper Schmeichel', position: 'GK', rating: 81 },
+    { name: 'Andreas Christensen', position: 'DEF', rating: 82 },
+    { name: 'Joachim Andersen', position: 'DEF', rating: 81 },
+    { name: 'Simon Kjær', position: 'DEF', rating: 78 },
+    { name: 'Joakim Mæhle', position: 'DEF', rating: 78 },
+    { name: 'Pierre-Emile Højbjerg', position: 'MID', rating: 83 },
+    { name: 'Christian Eriksen', position: 'MID', rating: 84 },
+    { name: 'Mikkel Damsgaard', position: 'MID', rating: 80 },
+    { name: 'Rasmus Højlund', position: 'FWD', rating: 83 },
+    { name: 'Jonas Wind', position: 'FWD', rating: 78 },
+    { name: 'Andreas Skov Olsen', position: 'FWD', rating: 78 },
+  ],
+  'gb-wls': [
+    { name: 'Wayne Hennessey', position: 'GK', rating: 76 },
+    { name: 'Ben Davies', position: 'DEF', rating: 78 },
+    { name: 'Chris Mepham', position: 'DEF', rating: 76 },
+    { name: 'Neco Williams', position: 'DEF', rating: 78 },
+    { name: 'Connor Roberts', position: 'DEF', rating: 76 },
+    { name: 'Aaron Ramsey', position: 'MID', rating: 82 },
+    { name: 'Joe Allen', position: 'MID', rating: 76 },
+    { name: 'Ethan Ampadu', position: 'MID', rating: 79 },
+    { name: 'Gareth Bale', position: 'FWD', rating: 83 },
+    { name: 'Daniel James', position: 'FWD', rating: 78 },
+    { name: 'Kieffer Moore', position: 'FWD', rating: 76 },
+  ],
+  cr: [
+    { name: 'Keylor Navas', position: 'GK', rating: 82 },
+    { name: 'Óscar Duarte', position: 'DEF', rating: 76 },
+    { name: 'Francisco Calvo', position: 'DEF', rating: 76 },
+    { name: 'Kendall Waston', position: 'DEF', rating: 76 },
+    { name: 'Ronald Matarrita', position: 'DEF', rating: 77 },
+    { name: 'Yeltsin Tejeda', position: 'MID', rating: 76 },
+    { name: 'Celso Borges', position: 'MID', rating: 75 },
+    { name: 'Anthony Contreras', position: 'MID', rating: 75 },
+    { name: 'Joel Campbell', position: 'FWD', rating: 78 },
+    { name: 'Johan Venegas', position: 'FWD', rating: 75 },
+    { name: 'Bryan Ruiz', position: 'FWD', rating: 76 },
+  ],
+  rs: [
+    { name: 'Vanja Milinković-Savić', position: 'GK', rating: 80 },
+    { name: 'Nikola Milenković', position: 'DEF', rating: 82 },
+    { name: 'Strahinja Pavlović', position: 'DEF', rating: 80 },
+    { name: 'Srđan Babić', position: 'DEF', rating: 76 },
+    { name: 'Andrija Živković', position: 'DEF', rating: 78 },
+    { name: 'Sergej Milinković-Savić', position: 'MID', rating: 85 },
+    { name: 'Nemanja Gudelj', position: 'MID', rating: 77 },
+    { name: 'Filip Kostić', position: 'MID', rating: 81 },
+    { name: 'Dušan Vlahović', position: 'FWD', rating: 85 },
+    { name: 'Aleksandar Mitrović', position: 'FWD', rating: 82 },
+    { name: 'Dušan Tadić', position: 'FWD', rating: 80 },
+  ],
+  cm: [
+    { name: 'André Onana', position: 'GK', rating: 82 },
+    { name: 'Nicolas Nkoulou', position: 'DEF', rating: 76 },
+    { name: 'Jean-Charles Castelletto', position: 'DEF', rating: 77 },
+    { name: 'Collins Fai', position: 'DEF', rating: 75 },
+    { name: 'Christopher Wooh', position: 'DEF', rating: 76 },
+    { name: 'André-Frank Zambo Anguissa', position: 'MID', rating: 83 },
+    { name: 'Martin Hongla', position: 'MID', rating: 76 },
+    { name: 'Olivier Ntcham', position: 'MID', rating: 76 },
+    { name: 'Vincent Aboubakar', position: 'FWD', rating: 79 },
+    { name: 'Bryan Mbeumo', position: 'FWD', rating: 84 },
+    { name: 'Karl Toko Ekambi', position: 'FWD', rating: 78 },
+  ],
+  qa: [
+    { name: 'Meshaal Barsham', position: 'GK', rating: 77 },
+    { name: 'Boualem Khoukhi', position: 'DEF', rating: 76 },
+    { name: 'Pedro Miguel', position: 'DEF', rating: 76 },
+    { name: 'Mohammed Waad', position: 'DEF', rating: 74 },
+    { name: 'Homam Ahmed', position: 'DEF', rating: 74 },
+    { name: 'Karim Boudiaf', position: 'MID', rating: 76 },
+    { name: 'Abdulaziz Hatem', position: 'MID', rating: 76 },
+    { name: 'Ismail Mohamad', position: 'MID', rating: 75 },
+    { name: 'Hassan Al-Haydos', position: 'FWD', rating: 78 },
+    { name: 'Akram Afif', position: 'FWD', rating: 81 },
+    { name: 'Almoez Ali', position: 'FWD', rating: 79 },
+  ],
+  nz: [
+    { name: 'Oliver Sail', position: 'GK', rating: 75 },
+    { name: 'Michael Boxall', position: 'DEF', rating: 75 },
+    { name: 'Liberato Cacace', position: 'DEF', rating: 78 },
+    { name: 'Tim Payne', position: 'DEF', rating: 74 },
+    { name: 'Bill Tuiloma', position: 'DEF', rating: 75 },
+    { name: 'Joe Bell', position: 'MID', rating: 76 },
+    { name: 'Callum McCowatt', position: 'MID', rating: 74 },
+    { name: 'Sarpreet Singh', position: 'MID', rating: 76 },
+    { name: 'Chris Wood', position: 'FWD', rating: 81 },
+    { name: 'Ben Waine', position: 'FWD', rating: 76 },
+    { name: 'Logan Rogerson', position: 'FWD', rating: 75 },
+  ],
+  cd: [
+    { name: 'Lionel Mpasi', position: 'GK', rating: 76 },
+    { name: 'Chancel Mbemba', position: 'DEF', rating: 80 },
+    { name: 'Christian Luyindama', position: 'DEF', rating: 76 },
+    { name: 'Arthur Masuaku', position: 'DEF', rating: 77 },
+    { name: 'Aaron Tshibola', position: 'DEF', rating: 74 },
+    { name: 'Samuel Moutoussamy', position: 'MID', rating: 77 },
+    { name: 'Gaël Kakuta', position: 'MID', rating: 78 },
+    { name: 'Silas Katompa Mvumpa', position: 'MID', rating: 79 },
+    { name: 'Cédric Bakambu', position: 'FWD', rating: 77 },
+    { name: 'Yannick Bolasie', position: 'FWD', rating: 74 },
+    { name: 'Meschack Elia', position: 'FWD', rating: 76 },
+  ],
+  uz: [
+    { name: 'Utkir Yusupov', position: 'GK', rating: 75 },
+    { name: 'Abduqodir Khusanov', position: 'DEF', rating: 80 },
+    { name: 'Sherzod Nasrullaev', position: 'DEF', rating: 75 },
+    { name: 'Ruslanbek Jiyanov', position: 'DEF', rating: 74 },
+    { name: 'Sardor Sabirkhodjaev', position: 'DEF', rating: 74 },
+    { name: 'Azizbek Turgunboev', position: 'MID', rating: 76 },
+    { name: 'Marufjon Yoqubov', position: 'MID', rating: 74 },
+    { name: 'Abbosbek Fayzullaev', position: 'MID', rating: 79 },
+    { name: 'Eldor Shomurodov', position: 'FWD', rating: 79 },
+    { name: 'Jasur Yakhshiboev', position: 'FWD', rating: 76 },
+    { name: 'Otabek Shukurov', position: 'FWD', rating: 74 },
+  ],
+  jo: [
+    { name: 'Yazeed Abulaila', position: 'GK', rating: 75 },
+    { name: 'Anas Bani Yaseen', position: 'DEF', rating: 76 },
+    { name: 'Salem Al-Ajalin', position: 'DEF', rating: 75 },
+    { name: 'Mohammad Abu Taha', position: 'DEF', rating: 74 },
+    { name: 'Yazan Naimat', position: 'DEF', rating: 74 },
+    { name: 'Ihsan Haddad', position: 'MID', rating: 76 },
+    { name: 'Baha Faisal', position: 'MID', rating: 75 },
+    { name: 'Noor Al-Rawabdeh', position: 'MID', rating: 75 },
+    { name: 'Musa Al-Taamari', position: 'FWD', rating: 80 },
+    { name: 'Ali Olwan', position: 'FWD', rating: 76 },
+    { name: 'Yazan Al-Naimat', position: 'FWD', rating: 76 },
+  ],
+  iq: [
+    { name: 'Fahad Talib', position: 'GK', rating: 75 },
+    { name: 'Rebin Sulaka', position: 'DEF', rating: 75 },
+    { name: 'Merchas Doski', position: 'DEF', rating: 75 },
+    { name: 'Zaid Tahseen', position: 'DEF', rating: 74 },
+    { name: 'Ahmed Maknzi', position: 'DEF', rating: 74 },
+    { name: 'Amir Al-Ammari', position: 'MID', rating: 76 },
+    { name: 'Ali Jasim', position: 'MID', rating: 75 },
+    { name: 'Youssef Al-Amin', position: 'MID', rating: 75 },
+    { name: 'Ayman Hussein', position: 'FWD', rating: 76 },
+    { name: 'Mohanad Ali', position: 'FWD', rating: 75 },
+    { name: 'Hussein Ali', position: 'FWD', rating: 74 },
+  ],
+  pa: [
+    { name: 'Orlando Mosquera', position: 'GK', rating: 76 },
+    { name: 'Fidel Escobar', position: 'DEF', rating: 76 },
+    { name: 'Eric Davis', position: 'DEF', rating: 76 },
+    { name: 'Michael Amir Murillo', position: 'DEF', rating: 78 },
+    { name: 'César Blackman', position: 'DEF', rating: 74 },
+    { name: 'Adalberto Carrasquilla', position: 'MID', rating: 77 },
+    { name: 'José Luis Rodríguez', position: 'MID', rating: 76 },
+    { name: 'Ismael Díaz', position: 'MID', rating: 76 },
+    { name: 'Cecilio Waterman', position: 'FWD', rating: 77 },
+    { name: 'Rolando Blackburn', position: 'FWD', rating: 76 },
+    { name: 'Josimar Alcocer', position: 'FWD', rating: 74 },
+  ],
+  ht: [
+    { name: 'Josué Duverger', position: 'GK', rating: 73 },
+    { name: 'Carlens Arcus', position: 'DEF', rating: 75 },
+    { name: 'Ricardo Adé', position: 'DEF', rating: 74 },
+    { name: 'Steven Moreira', position: 'DEF', rating: 75 },
+    { name: 'Bryan Alceus', position: 'DEF', rating: 74 },
+    { name: 'Djimy Alexis', position: 'MID', rating: 75 },
+    { name: 'Danley Jean Jacques', position: 'MID', rating: 74 },
+    { name: 'Frantzdy Pierrot', position: 'MID', rating: 75 },
+    { name: 'Duckens Nazon', position: 'FWD', rating: 77 },
+    { name: 'Ruben Providence', position: 'FWD', rating: 74 },
+    { name: 'Garven Metusala', position: 'FWD', rating: 74 },
+  ],
+  ba: [
+    { name: 'Nikola Vasilj', position: 'GK', rating: 78 },
+    { name: 'Toni Šunjić', position: 'DEF', rating: 77 },
+    { name: 'Anel Ahmedhodžić', position: 'DEF', rating: 79 },
+    { name: 'Sead Kolašinac', position: 'DEF', rating: 77 },
+    { name: 'Amar Dedić', position: 'DEF', rating: 77 },
+    { name: 'Rade Krunić', position: 'MID', rating: 78 },
+    { name: 'Amer Gojak', position: 'MID', rating: 76 },
+    { name: 'Ajdin Hasić', position: 'MID', rating: 75 },
+    { name: 'Edin Džeko', position: 'FWD', rating: 82 },
+    { name: 'Amar Rahmanović', position: 'FWD', rating: 76 },
+    { name: 'Benjamin Tahirović', position: 'FWD', rating: 76 },
+  ],
+  cw: [
+    { name: 'Eloy Room', position: 'GK', rating: 77 },
+    { name: 'Cuco Martina', position: 'DEF', rating: 77 },
+    { name: 'Darryl Lachman', position: 'DEF', rating: 75 },
+    { name: 'Gino van Kessel', position: 'DEF', rating: 74 },
+    { name: 'Elson Hooi', position: 'DEF', rating: 74 },
+    { name: 'Juninho Bacuna', position: 'MID', rating: 78 },
+    { name: 'Leandro Bacuna', position: 'MID', rating: 78 },
+    { name: 'Godfried Roemeratoe', position: 'MID', rating: 75 },
+    { name: 'Tahith Chong', position: 'FWD', rating: 79 },
+    { name: 'Charlison Benschop', position: 'FWD', rating: 76 },
+    { name: 'Rangelo Janga', position: 'FWD', rating: 75 },
+  ],
 };
 
 // ============================================================
@@ -485,6 +979,69 @@ function formatScorerList(goalEvents) {
   return lines.length ? lines.join('\n') : '—';
 }
 
+// ============================================================
+// HALF-TIME TRAINING WINDOW — a button each for TEAM A / TEAM B.
+// Every click (10s cooldown per user) banks one "training point" for
+// that side. More training points = more rolls at a bonus goal for
+// the second half (see computeTrainingBonusGoals below).
+// ============================================================
+const HALF_TIME_BASE_MS = 25 * 1000; // 25 second core break
+function computeTrainingBonusGoals(trainingCount) {
+  // one bonus-goal "roll" per 3 training points banked, 40% each, capped at +2 goals
+  let bonus = 0;
+  const rolls = Math.floor(trainingCount / 3);
+  for (let i = 0; i < rolls && bonus < 2; i++) {
+    if (Math.random() < 0.4) bonus++;
+  }
+  return bonus;
+}
+
+async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB) {
+  const addedSeconds = 5 + Math.floor(Math.random() * 11); // +5 to +15s added time
+  const totalMs = HALF_TIME_BASE_MS + addedSeconds * 1000;
+  const matchToken = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`train_A_${matchToken}`).setLabel(`🏋️ Train ${teamA.name}`).setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`train_B_${matchToken}`).setLabel(`🏋️ Train ${teamB.name}`).setStyle(ButtonStyle.Danger),
+  );
+
+  const halfTimeMsg = await channel.send({
+    embeds: [new EmbedBuilder().setTitle('🟡 Half-Time')
+      .setDescription(
+        `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\n` +
+        `⏱️ Added time for the break: **+${addedSeconds}s** (total break: ${Math.round(totalMs / 1000)}s)\n` +
+        `Hit the buttons below to train your squad — every training rep improves that team's odds of a bonus goal in the second half! (10s cooldown per person)`
+      )
+      .setColor(0xf1c40f)],
+    components: [row],
+  });
+
+  const trainingCounts = { A: 0, B: 0 };
+  const lastClick = new Map(); // userId -> timestamp
+
+  const collector = halfTimeMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: totalMs });
+  collector.on('collect', async (btn) => {
+    const side = btn.customId.startsWith('train_A_') ? 'A' : 'B';
+    const now = Date.now();
+    const last = lastClick.get(btn.user.id) || 0;
+    if (now - last < 10 * 1000) {
+      const waitSec = Math.ceil((10 * 1000 - (now - last)) / 1000);
+      await btn.reply({ content: `⏳ Catch your breath! Wait ${waitSec}s before training again.`, ephemeral: true }).catch(() => {});
+      return;
+    }
+    lastClick.set(btn.user.id, now);
+    trainingCounts[side]++;
+    const teamName = side === 'A' ? teamA.name : teamB.name;
+    await btn.reply({ content: `💪 Trained **${teamName}**! (${trainingCounts[side]} reps banked)`, ephemeral: true }).catch(() => {});
+  });
+
+  await new Promise((resolve) => collector.on('end', resolve));
+  await halfTimeMsg.edit({ components: [] }).catch(() => {});
+
+  return { trainingCounts, addedSeconds };
+}
+
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const isCity = options.isCity || false;
   const teamA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
@@ -501,25 +1058,51 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
   const flavorEvents = generateFlavorEvents(squadA, squadB, teamA.name, teamB.name);
   const allEvents = [...goalEventsA, ...goalEventsB, ...flavorEvents].sort((a, b) => a.minute - b.minute);
+  const firstHalfEvents = allEvents.filter((e) => e.minute <= 45);
+  const secondHalfEvents = allEvents.filter((e) => e.minute > 45);
 
   const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${teamA.name}** vs **${teamB.name}**`).setColor(0x2ecc71);
   if (!isCity) kickoffEmbed.setThumbnail(cdnFlag(teamA.code));
   await channel.send({ embeds: [kickoffEmbed] });
 
   let runningA = 0, runningB = 0;
-  let halfTimeShown = false;
-  const HALF_TIME_MS = 25 * 1000; // 25 seconds — quick breather
-  for (const ev of allEvents) {
-    if (!halfTimeShown && ev.minute > 45) {
-      halfTimeShown = true;
-      await channel.send({
-        embeds: [new EmbedBuilder().setTitle('🟡 Half-Time')
-          .setDescription(`**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\n25 second break — second half kicks off shortly!`)
-          .setColor(0xf1c40f)],
-      });
-      await delay(HALF_TIME_MS);
-      await channel.send({ embeds: [new EmbedBuilder().setTitle('🟢 Second Half — Kickoff!').setColor(0x2ecc71)] });
-    }
+
+  for (const ev of firstHalfEvents) {
+    await delay(2500);
+    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
+    let line = commentaryLine(ev);
+    if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
+    await channel.send(line);
+  }
+
+  // ---- Half-time: training window, then apply bonus goals to the second half ----
+  const { trainingCounts, addedSeconds } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB);
+
+  const bonusA = computeTrainingBonusGoals(trainingCounts.A);
+  const bonusB = computeTrainingBonusGoals(trainingCounts.B);
+  if (bonusA > 0) {
+    goalsA += bonusA;
+    const bonusEvents = generateGoalEvents(bonusA, squadA, teamA.name, 'A', squadB, teamB.name)
+      .map((e) => ({ ...e, minute: 46 + Math.floor(Math.random() * 44) }));
+    goalEventsA.push(...bonusEvents);
+    secondHalfEvents.push(...bonusEvents);
+  }
+  if (bonusB > 0) {
+    goalsB += bonusB;
+    const bonusEvents = generateGoalEvents(bonusB, squadB, teamB.name, 'B', squadA, teamA.name)
+      .map((e) => ({ ...e, minute: 46 + Math.floor(Math.random() * 44) }));
+    goalEventsB.push(...bonusEvents);
+    secondHalfEvents.push(...bonusEvents);
+  }
+  secondHalfEvents.sort((a, b) => a.minute - b.minute);
+
+  const kickoffLines = [`🟢 Second Half — Kickoff! (${addedSeconds}s added time played out at the break)`];
+  if (bonusA > 0) kickoffLines.push(`🏋️ ${teamA.name}'s training paid off — **+${bonusA} bonus goal${bonusA > 1 ? 's' : ''}** coming their way!`);
+  if (bonusB > 0) kickoffLines.push(`🏋️ ${teamB.name}'s training paid off — **+${bonusB} bonus goal${bonusB > 1 ? 's' : ''}** coming their way!`);
+  if (bonusA === 0 && bonusB === 0) kickoffLines.push('No bonus goals earned from the training session — back to open play!');
+  await channel.send({ embeds: [new EmbedBuilder().setTitle('🟢 Second Half').setDescription(kickoffLines.join('\n')).setColor(0x2ecc71)] });
+
+  for (const ev of secondHalfEvents) {
     await delay(2500);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     let line = commentaryLine(ev);
