@@ -7,6 +7,46 @@ const fs = require('fs');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// ============================================================
+// GOAL / SAVE GIFS — shown on the commentary embed for that event
+// ============================================================
+const GOAL_GIFS = [
+  'https://media.giphy.com/media/lD76yTC5zxZPG/giphy.gif',
+  'https://media.giphy.com/media/xUPGcyjuFraskbBUQ8/giphy.gif',
+  'https://media.giphy.com/media/3o7TKUM3IgJBX2as9O/giphy.gif',
+  'https://media.giphy.com/media/l0MYt5jPR6QX5pnqM/giphy.gif',
+];
+const SAVE_GIFS = [
+  'https://media.giphy.com/media/3o6Zt6ML6BklcajjsA/giphy.gif',
+  'https://media.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif',
+  'https://media.giphy.com/media/l0MYGB1LuZ3n7dRnO/giphy.gif',
+];
+function randomGif(list) { return list[Math.floor(Math.random() * list.length)]; }
+
+// ============================================================
+// DERBIES — special rivalry names shown instead of "Friendly Match"
+// when these two country codes face off
+// ============================================================
+const DERBIES = {
+  'es|mx': 'Battle of the Latins 🇪🇸🇲🇽',
+  'fr|de': 'France vs Germany — European Rivalry 🇫🇷🇩🇪',
+  'ar|br': 'Superclásico de las Américas 🇦🇷🇧🇷',
+  'gb-eng|fr': 'Cross-Channel Clash 🏴󠁧󠁢󠁥󠁮󠁧󠁿🇫🇷',
+  'de|nl': 'Der Klassiker 🇩🇪🇳🇱',
+  'pt|es': 'Iberian Derby 🇵🇹🇪🇸',
+};
+function getDerbyName(codeA, codeB) {
+  return DERBIES[`${codeA}|${codeB}`] || DERBIES[`${codeB}|${codeA}`] || null;
+}
+
+// Per-channel cooldown so people can't chain matches back to back
+const matchCooldowns = new Map(); // channelId -> timestamp match ended
+const MATCH_COOLDOWN_MS = 30 * 1000;
+
+function recordGoal(playerName) {
+  data.playerGoals[playerName] = (data.playerGoals[playerName] || 0) + 1;
+}
+
 const GUILD_ID = '1324059331406069872';
 const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/data.json`
@@ -19,6 +59,7 @@ function loadData() {
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {}; p.tournament ??= null;
   p.cityTeams ??= {};
+  p.playerGoals ??= {};
   p.starPlayersSeeded ??= false;
   return p;
 }
@@ -984,6 +1025,20 @@ function commentaryLine(ev) {
   return `${ev.card === 'red' ? '🟥' : '🟨'} ${minStr} — **${ev.player}** is shown a ${ev.card} card.`;
 }
 
+// Sends a commentary line; goals and saves get a gif attached and a
+// scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
+async function sendEventLine(channel, ev, scoreLine) {
+  const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
+  if (ev.type === 'goal') {
+    recordGoal(ev.player);
+    await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
+  } else if (ev.type === 'save') {
+    await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
+  } else {
+    await channel.send(text);
+  }
+}
+
 // Groups scorers by player for the final result screen, e.g. "K. Mbappé 48', 66'"
 function formatScorerList(goalEvents) {
   const byPlayer = {};
@@ -1064,12 +1119,60 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
   return { trainingCounts, addedSeconds };
 }
 
+// ============================================================
+// PRE-MATCH PREDICTION — one vote per person, changeable, 30s window
+// ============================================================
+async function runPrediction(channel, teamA, teamB) {
+  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`predict_A_${token}`).setLabel(`🔮 ${teamA.name}`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`predict_B_${token}`).setLabel(`🔮 ${teamB.name}`).setStyle(ButtonStyle.Success),
+  );
+  const predictMsg = await channel.send({
+    embeds: [new EmbedBuilder().setTitle('🔮 Who wins this one?')
+      .setDescription(`Cast your prediction below! One vote per person — click again anytime to change it.\n⏱️ Voting closes in 30 seconds.`)
+      .setColor(0x9b59b6)],
+    components: [row],
+  });
+
+  const votes = new Map(); // userId -> 'A' | 'B'
+  const collector = predictMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: 30 * 1000 });
+  collector.on('collect', async (btn) => {
+    const side = btn.customId.startsWith('predict_A_') ? 'A' : 'B';
+    votes.set(btn.user.id, side);
+    const teamName = side === 'A' ? teamA.name : teamB.name;
+    await btn.reply({ content: `✅ Locked in: **${teamName}** to win!`, ephemeral: true }).catch(() => {});
+  });
+
+  await new Promise((resolve) => collector.on('end', resolve));
+  await predictMsg.edit({ components: [] }).catch(() => {});
+
+  let votesA = 0, votesB = 0;
+  for (const side of votes.values()) { if (side === 'A') votesA++; else votesB++; }
+  const total = votesA + votesB;
+  const pctA = total ? Math.round((votesA / total) * 100) : 0;
+  const pctB = total ? Math.round((votesB / total) * 100) : 0;
+  await channel.send({
+    embeds: [new EmbedBuilder().setTitle('🔮 Prediction Results')
+      .setDescription(total ? `**${teamA.name}**: ${votesA} votes (${pctA}%)\n**${teamB.name}**: ${votesB} votes (${pctB}%)` : 'No predictions cast — bold silence from the crowd!')
+      .setColor(0x9b59b6)],
+  });
+}
+
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const isCity = options.isCity || false;
   const teamA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
   const teamB = isCity ? getCityTeam(teamBId) : getTeam(teamBId);
   const squadA = isCity ? [] : getSquadPlayers(teamAId);
   const squadB = isCity ? [] : getSquadPlayers(teamBId);
+
+  // ---- Cooldown: 30s minimum gap between matches in this channel ----
+  const lastEnd = matchCooldowns.get(channel.id) || 0;
+  const waitLeft = MATCH_COOLDOWN_MS - (Date.now() - lastEnd);
+  if (waitLeft > 0) await delay(waitLeft);
+
+  // ---- Pre-match prediction voting (one vote per person, changeable, 30s) ----
+  await runPrediction(channel, teamA, teamB);
 
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
@@ -1092,9 +1195,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   for (const ev of firstHalfEvents) {
     await delay(2500);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
-    let line = commentaryLine(ev);
-    if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
-    await channel.send(line);
+    const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
+    await sendEventLine(channel, ev, scoreLine);
   }
 
   // ---- Half-time: training window, then apply bonus goals to the second half ----
@@ -1127,9 +1229,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   for (const ev of secondHalfEvents) {
     await delay(2500);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
-    let line = commentaryLine(ev);
-    if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
-    await channel.send(line);
+    const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
+    await sendEventLine(channel, ev, scoreLine);
   }
   await delay(1500);
 
@@ -1153,9 +1254,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
       if (ev.type === 'goal') {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
-      let line = commentaryLine(ev);
-      if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
-      await channel.send(line);
+      const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
+      await sendEventLine(channel, ev, scoreLine);
     }
 
     // ET Half-Time
@@ -1177,9 +1277,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
       if (ev.type === 'goal') {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
-      let line = commentaryLine(ev);
-      if (ev.type === 'goal') line += `\n**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**`;
-      await channel.send(line);
+      const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
+      await sendEventLine(channel, ev, scoreLine);
     }
     await delay(1500);
     await channel.send({
@@ -1220,6 +1319,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   teamB.wins !== undefined && (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
   if (!isCity) addCoins(winnerId, 25); // city/league games are for fun only — no coin reward
   saveData(data);
+  matchCooldowns.set(channel.id, Date.now());
 
   return { goalsA, goalsB, penalties, winnerId };
 }
@@ -1261,6 +1361,10 @@ function buildKnockoutRound(participants) {
 function tournamentDisplayName(t) {
   if (t.type === 'worldcup') return `FIFA World Cup ${new Date().getFullYear()}™`;
   if (t.type === 'championsleague') return 'UEFA Champions League';
+  if (t.type === 'europaleague') return 'UEFA Europa League';
+  if (t.type === 'copaamerica') return 'Copa América';
+  if (t.type === 'euros') return 'UEFA European Championship';
+  if (t.type === 'afcon') return 'Africa Cup of Nations';
   return t.name;
 }
 async function getTournamentChannel(guild) {
@@ -1370,7 +1474,10 @@ const sizeChoices = [
   { name: 'Quarterfinals (8 teams)', value: '8' }, { name: 'Semifinals (4 teams)', value: '4' },
 ];
 const typeChoices = [
-  { name: 'FIFA World Cup', value: 'worldcup' }, { name: 'Champions League', value: 'championsleague' }, { name: 'Custom', value: 'custom' },
+  { name: 'FIFA World Cup', value: 'worldcup' }, { name: 'Champions League', value: 'championsleague' },
+  { name: 'Europa League', value: 'europaleague' }, { name: 'Copa América', value: 'copaamerica' },
+  { name: 'UEFA Euros', value: 'euros' }, { name: 'Africa Cup of Nations', value: 'afcon' },
+  { name: 'Custom', value: 'custom' },
 ];
 const positionChoices = [
   { name: 'Goalkeeper (GK)', value: 'GK' }, { name: 'Defender (DEF)', value: 'DEF' },
@@ -1410,7 +1517,7 @@ const slashCommands = [
   new SlashCommandBuilder().setName('daily').setDescription('Claim your daily coins.'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Top players.')
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
-      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' })),
+      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' })),
 
   new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
     .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
@@ -1671,6 +1778,17 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (name === 'leaderboard') {
       const type = interaction.options.getString('type');
+      if (type === 'goldenboot' || type === 'ballondor') {
+        const entries = Object.entries(data.playerGoals)
+          .map(([player, goals]) => [player, type === 'ballondor' ? goals * 3 : goals])
+          .sort((a, b) => b[1] - a[1]).slice(0, 10);
+        if (entries.length === 0) { await interaction.reply('No goals scored yet — get some matches going!'); return; }
+        const unit = type === 'ballondor' ? 'pts' : 'goals';
+        const lines = entries.map(([player, val], i) => `**${i + 1}.** ${player} — ${val} ${unit}`);
+        const title = type === 'ballondor' ? "🥇 Ballon d'Or Race" : '👟 Golden Boot';
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(title).setDescription(lines.join('\n')).setColor(0xf1c40f)] });
+        return;
+      }
       let entries = type === 'coins'
         ? Object.entries(data.coins).sort((a, b) => b[1] - a[1]).slice(0, 10)
         : Object.entries(data.teams).map(([id, t]) => [id, t.trophies]).sort((a, b) => b[1] - a[1]).slice(0, 10);
@@ -1686,9 +1804,12 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'matchsim') {
       const opponent = interaction.options.getUser('opponent');
       if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
-      if (!getTeam(interaction.user.id) || !getTeam(opponent.id)) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
-      await interaction.reply('⚽ Kicking off...');
-      await playMatch(interaction.channel, interaction.user.id, opponent.id, 'Friendly Match');
+      const myTeam = getTeam(interaction.user.id);
+      const oppTeam = getTeam(opponent.id);
+      if (!myTeam || !oppTeam) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
+      const label = getDerbyName(myTeam.code, oppTeam.code) || 'Friendly Match';
+      await interaction.reply(label !== 'Friendly Match' ? `🔥 **${label}** kicking off...` : '⚽ Kicking off...');
+      await playMatch(interaction.channel, interaction.user.id, opponent.id, label);
       return;
     }
 
@@ -1924,4 +2045,4 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(process.env.BOT_TOKEN); 
+client.login(process.env.BOT_TOKEN);
