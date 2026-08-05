@@ -54,10 +54,12 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
-    return { teams: {}, cityTeams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournament: null };
+    return { teams: {}, cityTeams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {}, tournamentsCompleted: {} };
   }
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {}; p.tournament ??= null;
+  p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
+  p.tournaments ??= {};
+  p.tournamentsCompleted ??= {};
   p.cityTeams ??= {};
   p.playerGoals ??= {};
   p.starPlayersSeeded ??= false;
@@ -143,16 +145,18 @@ const COUNTRIES = [
 ];
 
 // ---------- Team / player helpers ----------
-function getTeam(userId) { return data.teams[userId] || null; }
+// National teams are scoped per Discord server: data.teams[guildId][userId]
+function getGuildTeams(guildId) { data.teams[guildId] = data.teams[guildId] || {}; return data.teams[guildId]; }
+function getTeam(guildId, userId) { return getGuildTeams(guildId)[userId] || null; }
 function getCityTeam(userId) { return data.cityTeams[userId] || null; }
-function isCountryTaken(code, excludeUserId) {
-  return Object.entries(data.teams).some(([uid, t]) => t.code === code && uid !== excludeUserId);
+function isCountryTaken(guildId, code, excludeUserId) {
+  return Object.entries(getGuildTeams(guildId)).some(([uid, t]) => t.code === code && uid !== excludeUserId);
 }
 function getCoins(userId) { return data.coins[userId] || 0; }
 function addCoins(userId, amount) { data.coins[userId] = Math.max(0, (data.coins[userId] || 0) + amount); }
 function getBoosts(userId) { data.boosts[userId] = data.boosts[userId] || {}; return data.boosts[userId]; }
-function getSquadPlayers(userId) {
-  const team = getTeam(userId);
+function getSquadPlayers(guildId, userId) {
+  const team = getTeam(guildId, userId);
   if (!team?.squad) return [];
   return team.squad.map((id) => data.players[id]).filter(Boolean);
 }
@@ -1161,10 +1165,11 @@ async function runPrediction(channel, teamA, teamB) {
 
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const isCity = options.isCity || false;
-  const teamA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
-  const teamB = isCity ? getCityTeam(teamBId) : getTeam(teamBId);
-  const squadA = isCity ? [] : getSquadPlayers(teamAId);
-  const squadB = isCity ? [] : getSquadPlayers(teamBId);
+  const guildId = channel.guild.id;
+  const teamA = isCity ? getCityTeam(teamAId) : getTeam(guildId, teamAId);
+  const teamB = isCity ? getCityTeam(teamBId) : getTeam(guildId, teamBId);
+  const squadA = isCity ? [] : getSquadPlayers(guildId, teamAId);
+  const squadB = isCity ? [] : getSquadPlayers(guildId, teamBId);
 
   // ---- Cooldown: 30s minimum gap between matches in this channel ----
   const lastEnd = matchCooldowns.get(channel.id) || 0;
@@ -1321,7 +1326,12 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   saveData(data);
   matchCooldowns.set(channel.id, Date.now());
 
-  return { goalsA, goalsB, penalties, winnerId };
+  return {
+    goalsA, goalsB, penalties, winnerId,
+    teamAId, teamBId, goalEventsA, goalEventsB,
+    keeperA: pickGoalkeeper(squadA, teamA.name),
+    keeperB: pickGoalkeeper(squadB, teamB.name),
+  };
 }
 
 // ============================================================
@@ -1367,8 +1377,9 @@ function tournamentDisplayName(t) {
   if (t.type === 'afcon') return 'Africa Cup of Nations';
   return t.name;
 }
+function getTournament(guildId) { return data.tournaments[guildId] || null; }
 async function getTournamentChannel(guild) {
-  const t = data.tournament;
+  const t = getTournament(guild.id);
   if (!t?.channelId) return null;
   return guild.channels.cache.get(t.channelId) || await guild.channels.fetch(t.channelId).catch(() => null);
 }
@@ -1395,8 +1406,30 @@ function groupStandings(group, matches) {
   return Object.values(table).sort((a, b) => (b.pts - a.pts) || ((b.gf - b.ga) - (a.gf - a.ga)) || (b.gf - a.gf));
 }
 
+// Accumulates scorer/keeper/concede stats from a playMatch result onto
+// the tournament object, so end-of-tournament awards can be computed.
+function recordTournamentMatchStats(t, result) {
+  t.tourneyGoals = t.tourneyGoals || {};
+  t.tourneyGoalEvents = t.tourneyGoalEvents || [];
+  t.concededByTeam = t.concededByTeam || {};
+  t.keeperByTeam = t.keeperByTeam || {};
+
+  for (const ev of result.goalEventsA.filter((e) => e.type === 'goal')) {
+    t.tourneyGoals[ev.player] = (t.tourneyGoals[ev.player] || 0) + 1;
+    t.tourneyGoalEvents.push({ player: ev.player, minute: ev.minute, et: !!ev.et, isPenalty: !!ev.isPenalty, teamId: result.teamAId });
+  }
+  for (const ev of result.goalEventsB.filter((e) => e.type === 'goal')) {
+    t.tourneyGoals[ev.player] = (t.tourneyGoals[ev.player] || 0) + 1;
+    t.tourneyGoalEvents.push({ player: ev.player, minute: ev.minute, et: !!ev.et, isPenalty: !!ev.isPenalty, teamId: result.teamBId });
+  }
+  t.concededByTeam[result.teamAId] = (t.concededByTeam[result.teamAId] || 0) + result.goalsB;
+  t.concededByTeam[result.teamBId] = (t.concededByTeam[result.teamBId] || 0) + result.goalsA;
+  t.keeperByTeam[result.teamAId] = result.keeperA;
+  t.keeperByTeam[result.teamBId] = result.keeperB;
+}
+
 async function startNextKnockoutMatch(guild) {
-  const t = data.tournament;
+  const t = getTournament(guild.id);
   if (!t || t.status !== 'knockout') return;
   const round = t.rounds[t.rounds.length - 1];
   const idx = round.findIndex((m) => !m.winner);
@@ -1414,8 +1447,9 @@ async function startNextKnockoutMatch(guild) {
       if (channel) {
         await channel.send({ embeds: [new EmbedBuilder().setTitle('🥉 Third Place Playoff').setColor(0xcd7f32)] });
         const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff');
+        recordTournamentMatchStats(t, thirdResult);
         addCoins(thirdResult.winnerId, 5000000);
-        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
+        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(guild.id, thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
       }
     }
 
@@ -1431,20 +1465,78 @@ async function startNextKnockoutMatch(guild) {
   const channel = await getTournamentChannel(guild);
   if (!channel) return;
   const result = await playMatch(channel, match.p1, match.p2, roundNameForSize(round.length * 2));
+  recordTournamentMatchStats(t, result);
   match.winner = result.winnerId;
   match.result = result;
   saveData(data);
   await startNextKnockoutMatch(guild);
 }
 
+// End-of-tournament individual awards: Golden Boot, Ballon d'Or, the ultra-rare
+// Super Ballon d'Or, Golden Glove, and Goal of the Tournament.
+async function announceTournamentAwards(guild, t) {
+  const channel = await getTournamentChannel(guild);
+  if (!channel) return;
+  const goalEntries = Object.entries(t.tourneyGoals || {}).sort((a, b) => b[1] - a[1]);
+  if (goalEntries.length === 0) return; // no scorer data captured — nothing to award
+
+  const guildId = guild.id;
+  const topScorer = goalEntries[0];
+  const goldenBootTies = goalEntries.filter(([, g]) => g === topScorer[1]).map(([n]) => n);
+
+  // Ballon d'Or — goals-weighted, with a bonus for being on the champion squad
+  const champSquadNames = new Set(getSquadPlayers(guildId, t.champion).map((p) => p.name));
+  const ballonDorRanked = goalEntries.map(([n, g]) => [n, g * 10 + (champSquadNames.has(n) ? 15 : 0)]).sort((a, b) => b[1] - a[1]);
+  const ballonDorWinner = ballonDorRanked[0]?.[0] || topScorer[0];
+
+  // Super Ballon d'Or — a legendary honor, only handed out once every
+  // 5 completed tournaments in this server (regardless of stats).
+  const completedCount = data.tournamentsCompleted[guildId] || 0;
+  const superAwarded = completedCount > 0 && completedCount % 5 === 0;
+
+  // Golden Glove — best defensive record across the tournament
+  let gloveLine = 'Not enough data to award.';
+  const concedeEntries = Object.entries(t.concededByTeam || {}).sort((a, b) => a[1] - b[1]);
+  if (concedeEntries.length) {
+    const [bestTeamId, conceded] = concedeEntries[0];
+    const keeperName = (t.keeperByTeam || {})[bestTeamId] || 'Unknown';
+    const teamName = getTeam(guildId, bestTeamId)?.name || 'Unknown';
+    gloveLine = `**${keeperName}** (${teamName}) — only ${conceded} conceded all tournament`;
+  }
+
+  // Goal of the Tournament — weighted toward extra-time / stoppage-time / open-play strikes
+  let gotLine = 'No goals scored — a defensive masterclass all tournament!';
+  if (t.tourneyGoalEvents?.length) {
+    const weighted = t.tourneyGoalEvents.map((e) => ({ ...e, weight: 1 + (e.et ? 2 : 0) + (e.minute > 90 ? 1 : 0) + (e.isPenalty ? 0 : 1) }));
+    let r = Math.random() * weighted.reduce((s, e) => s + e.weight, 0);
+    let picked = weighted[0];
+    for (const e of weighted) { r -= e.weight; if (r <= 0) { picked = e; break; } }
+    const teamName = getTeam(guildId, picked.teamId)?.name || '';
+    gotLine = `**${picked.player}** (${teamName}) — ${picked.et ? `${picked.minute}' (ET)` : formatMinute(picked.minute)}${picked.isPenalty ? ' from the spot' : ''}`;
+  }
+
+  await channel.send({
+    embeds: [new EmbedBuilder().setTitle('🏅 Tournament Awards').setColor(0xf1c40f)
+      .addFields(
+        { name: '👟 Golden Boot', value: `${goldenBootTies.join(', ')} — ${topScorer[1]} goal${topScorer[1] > 1 ? 's' : ''}` },
+        { name: "🥇 Ballon d'Or", value: `**${ballonDorWinner}**` },
+        { name: "🌟 Super Ballon d'Or", value: superAwarded ? `**${ballonDorWinner}** — awarded once every 5 tournaments, and this is the one!` : `Not this time — only handed out every 5th tournament (${5 - (completedCount % 5)} to go).` },
+        { name: '🏆 FIFA Best Player', value: `**${ballonDorWinner}**` },
+        { name: '🧤 Golden Glove', value: gloveLine },
+        { name: '🎯 Goal of the Tournament', value: gotLine },
+      )],
+  });
+}
+
 async function crownChampion(guild, championId) {
-  const t = data.tournament;
+  const t = getTournament(guild.id);
   t.status = 'completed';
   t.champion = championId;
-  const champTeam = getTeam(championId);
+  const champTeam = getTeam(guild.id, championId);
   champTeam.trophies += 1;
   const CHAMPION_PRIZE_COINS = 53000000;
   addCoins(championId, CHAMPION_PRIZE_COINS);
+  data.tournamentsCompleted[guild.id] = (data.tournamentsCompleted[guild.id] || 0) + 1;
   saveData(data);
 
   // The prize role is an ultra-rare 1-in-1000 bonus, not guaranteed
@@ -1464,6 +1556,33 @@ async function crownChampion(guild, championId) {
         .setDescription(desc).setThumbnail(cdnFlag(champTeam.code)).setColor(0xffd700)],
     });
   }
+  await announceTournamentAwards(guild, t);
+}
+
+// Groups-only format: no knockout bracket — crown the top team of each
+// group once all group matches are played.
+async function crownGroupWinners(guild, t) {
+  t.status = 'completed';
+  const letters = 'ABCDEFGH';
+  const winners = t.groups.map((g, i) => groupStandings(g, t.groupMatches[i])[0]?.id).filter(Boolean);
+  t.champions = winners;
+  const CHAMPION_PRIZE_COINS = winners.length > 1 ? 20000000 : 53000000;
+  const lines = [];
+  for (const winnerId of winners) {
+    const team = getTeam(guild.id, winnerId);
+    if (!team) continue;
+    team.trophies += 1;
+    addCoins(winnerId, CHAMPION_PRIZE_COINS);
+    lines.push(`🏆 **${team.name}** — Group ${letters[t.groups.findIndex((g) => g.includes(winnerId))]} Champions (+${CHAMPION_PRIZE_COINS.toLocaleString()} coins)`);
+  }
+  saveData(data);
+  const channel = await getTournamentChannel(guild);
+  if (channel) {
+    await channel.send({
+      embeds: [new EmbedBuilder().setTitle(`🏆🎉 ${tournamentDisplayName(t)} — Group Stage Complete!`)
+        .setDescription(lines.join('\n') || 'No group winners could be determined.').setColor(0xffd700)],
+    });
+  }
 }
 
 // ============================================================
@@ -1472,6 +1591,10 @@ async function crownChampion(guild, championId) {
 const sizeChoices = [
   { name: 'Round of 32 (32 teams)', value: '32' }, { name: 'Round of 16 (16 teams)', value: '16' },
   { name: 'Quarterfinals (8 teams)', value: '8' }, { name: 'Semifinals (4 teams)', value: '4' },
+];
+const formatChoices = [
+  { name: 'Group Stage → Knockout', value: 'groups_knockout' },
+  { name: 'Group Stage Only (no knockout)', value: 'groups_only' },
 ];
 const typeChoices = [
   { name: 'FIFA World Cup', value: 'worldcup' }, { name: 'Champions League', value: 'championsleague' },
@@ -1545,8 +1668,9 @@ const slashCommands = [
   new SlashCommandBuilder().setName('tournament').setDescription('Tournament commands.')
     .addSubcommand((s) => s.setName('create').setDescription('Create a new tournament. Admin only.')
       .addStringOption((o) => o.setName('type').setDescription('Tournament type').setRequired(true).addChoices(...typeChoices))
-      .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size').setRequired(true).addChoices(...sizeChoices))
+      .addStringOption((o) => o.setName('format').setDescription('Group Stage → Knockout, or Group Stage Only').setRequired(true).addChoices(...formatChoices))
       .addStringOption((o) => o.setName('prize').setDescription('Prize description').setRequired(true))
+      .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size (only needed for Group→Knockout or direct knockout)').setRequired(false).addChoices(...sizeChoices))
       .addStringOption((o) => o.setName('name').setDescription('Custom name (only used if type = Custom)').setRequired(false))
       .addRoleOption((o) => o.setName('prize_role').setDescription('Role to award the champion').setRequired(false)))
     .addSubcommand((s) => s.setName('join').setDescription('Join the open tournament.'))
@@ -1600,7 +1724,7 @@ client.on('interactionCreate', async (interaction) => {
         const sub = interaction.options.getSubcommand();
         let pool;
         if (sub === 'sign') pool = Object.values(data.players).filter((p) => !p.ownerId && !p.isNational);
-        else pool = getSquadPlayers(interaction.user.id);
+        else pool = getSquadPlayers(interaction.guildId, interaction.user.id);
         const matches = pool.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 25).map((p) => ({ name: `${p.name} (${p.position}, ${p.rating})`, value: p.name }));
         await interaction.respond(matches);
         return;
@@ -1636,11 +1760,12 @@ client.on('interactionCreate', async (interaction) => {
         const code = interaction.options.getString('country');
         const country = COUNTRIES.find((c) => c.code === code);
         if (!country) { await interaction.reply({ content: 'Pick a country from the list.', ephemeral: true }); return; }
-        if (isCountryTaken(code, interaction.user.id)) {
-          await interaction.reply({ content: `🚫 **${country.name}** is already taken by another player. Pick a different country.`, ephemeral: true });
+        if (isCountryTaken(interaction.guild.id, code, interaction.user.id)) {
+          await interaction.reply({ content: `🚫 **${country.name}** is already taken by another player in this server. Pick a different country.`, ephemeral: true });
           return;
         }
-        const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
+        const guildTeams = getGuildTeams(interaction.guild.id);
+        const existing = guildTeams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
         const isCountryChange = existing.code && existing.code !== country.code;
 
         // Switching nations removes the old national-squad players entirely —
@@ -1653,8 +1778,8 @@ client.on('interactionCreate', async (interaction) => {
           existing.squad = [];
         }
 
-        data.teams[interaction.user.id] = { ...existing, code: country.code, name: country.name };
-        const team = data.teams[interaction.user.id];
+        guildTeams[interaction.user.id] = { ...existing, code: country.code, name: country.name };
+        const team = guildTeams[interaction.user.id];
 
         let squadNote = '';
         if (!team.squad || team.squad.length === 0) {
@@ -1672,13 +1797,13 @@ client.on('interactionCreate', async (interaction) => {
           squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
         }
         saveData(data);
-        await interaction.reply({ content: `✅ You now represent **${country.name}**!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
+        await interaction.reply({ content: `✅ You now represent **${country.name}** in this server!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
         return;
       }
       if (sub === 'profile') {
         const target = interaction.options.getUser('user') || interaction.user;
-        const team = getTeam(target.id);
-        if (!team) { await interaction.reply(`${target.username} hasn't picked a team yet — use /team set.`); return; }
+        const team = getTeam(interaction.guild.id, target.id);
+        if (!team) { await interaction.reply(`${target.username} hasn't picked a team in this server yet — use /team set.`); return; }
         const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setThumbnail(cdnFlag(team.code))
           .addFields(
             { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
@@ -1710,7 +1835,7 @@ client.on('interactionCreate', async (interaction) => {
         const pName = interaction.options.getString('name');
         const player = Object.values(data.players).find((p) => p.name.toLowerCase() === pName.toLowerCase() && !p.ownerId && !p.isNational);
         if (!player) { await interaction.reply({ content: 'No free-agent player with that name.', ephemeral: true }); return; }
-        const team = getTeam(interaction.user.id);
+        const team = getTeam(interaction.guild.id, interaction.user.id);
         if (!team) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
         team.squad = team.squad || [];
         if (team.squad.length >= 11) { await interaction.reply({ content: 'Your squad is full (11/11). Release someone first.', ephemeral: true }); return; }
@@ -1729,7 +1854,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (sub === 'release') {
         const pName = interaction.options.getString('name');
-        const team = getTeam(interaction.user.id);
+        const team = getTeam(interaction.guild.id, interaction.user.id);
         const player = team?.squad?.map((id) => data.players[id]).find((p) => p?.name.toLowerCase() === pName.toLowerCase());
         if (!player) { await interaction.reply({ content: "That player isn't in your squad.", ephemeral: true }); return; }
         team.squad = team.squad.filter((id) => id !== player.id);
@@ -1744,10 +1869,10 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (sub === 'squad') {
         const target = interaction.options.getUser('user') || interaction.user;
-        const players = getSquadPlayers(target.id);
+        const players = getSquadPlayers(interaction.guild.id, target.id);
         if (players.length === 0) { await interaction.reply(`${target.username} has no squad players yet.`); return; }
         const lines = players.map((p) => `${p.position} — ${p.name} (${p.rating})`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${getTeam(target.id)?.name || target.username}'s Squad`).setDescription(lines.join('\n')).setColor(0x3498db)] });
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${getTeam(interaction.guild.id, target.id)?.name || target.username}'s Squad`).setDescription(lines.join('\n')).setColor(0x3498db)] });
         return;
       }
       if (sub === 'list') {
@@ -1804,8 +1929,8 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'matchsim') {
       const opponent = interaction.options.getUser('opponent');
       if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
-      const myTeam = getTeam(interaction.user.id);
-      const oppTeam = getTeam(opponent.id);
+      const myTeam = getTeam(interaction.guild.id, interaction.user.id);
+      const oppTeam = getTeam(interaction.guild.id, opponent.id);
       if (!myTeam || !oppTeam) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
       const label = getDerbyName(myTeam.code, oppTeam.code) || 'Friendly Match';
       await interaction.reply(label !== 'Friendly Match' ? `🔥 **${label}** kicking off...` : '⚽ Kicking off...');
@@ -1862,7 +1987,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     if (name === 'chant') {
-      const team = getTeam(interaction.user.id);
+      const team = getTeam(interaction.guild.id, interaction.user.id);
       if (!team) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
       await interaction.reply(CHANTS[Math.floor(Math.random() * CHANTS.length)].replace(/{team}/g, team.name));
       return;
@@ -1896,48 +2021,58 @@ client.on('interactionCreate', async (interaction) => {
 
     if (name === 'tournament') {
       const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+      const guildId = interaction.guild.id;
 
       if (sub === 'create') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        if (data.tournament && data.tournament.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active. End it first.', ephemeral: true }); return; }
+        const existingT = getTournament(guildId);
+        if (existingT && existingT.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active in this server. End it first.', ephemeral: true }); return; }
         const type = interaction.options.getString('type');
-        const size = parseInt(interaction.options.getString('size'), 10);
+        const size = parseInt(interaction.options.getString('size') || '0', 10) || null;
+        const format = interaction.options.getString('format') || 'groups_knockout';
         const prize = interaction.options.getString('prize');
         const customName = interaction.options.getString('name') || 'Custom Cup';
         const prizeRole = interaction.options.getRole('prize_role');
-        data.tournament = {
-          type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size,
+        data.tournaments[guildId] = {
+          type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format,
           status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
         };
         saveData(data);
-        const displayName = tournamentDisplayName(data.tournament);
+        const t = data.tournaments[guildId];
+        const displayName = tournamentDisplayName(t);
+        const formatNote = format === 'groups_only'
+          ? 'Format: **Group Stage Only** — no knockout, group winners are crowned directly.'
+          : `Format: **Group Stage → Knockout** (need ${size || '2/4/8/16/32'} teams for the knockout stage, or run a group stage first with \`/tournament creategroups\`).`;
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle(`🏆 ${displayName}`)
-            .setDescription(`Registration open! Need **${size}** teams for the knockout stage (or more if you want a group stage first).\nPrize: ${prize}\nJoin with \`/tournament join\` (set a team with \`/team set\` first).`)
+            .setDescription(`Registration open!\n${formatNote}\nPrize: ${prize}\nJoin with \`/tournament join\` (set a team with \`/team set\` first).`)
             .setColor(0x3498db)],
         });
         return;
       }
       if (sub === 'join') {
-        if (!data.tournament || data.tournament.status !== 'registration') { await interaction.reply({ content: 'No tournament open for registration.', ephemeral: true }); return; }
-        if (!getTeam(interaction.user.id)) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
-        if (data.tournament.participants.includes(interaction.user.id)) { await interaction.reply({ content: "You're already in.", ephemeral: true }); return; }
-        data.tournament.participants.push(interaction.user.id);
+        const t = getTournament(guildId);
+        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament open for registration.', ephemeral: true }); return; }
+        if (!getTeam(guildId, interaction.user.id)) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
+        if (t.participants.includes(interaction.user.id)) { await interaction.reply({ content: "You're already in.", ephemeral: true }); return; }
+        t.participants.push(interaction.user.id);
         saveData(data);
-        await interaction.reply(`✅ ${getTeam(interaction.user.id).name} joined! (${data.tournament.participants.length} teams so far)`);
+        await interaction.reply(`✅ ${getTeam(guildId, interaction.user.id).name} joined! (${t.participants.length} teams so far)`);
         return;
       }
       if (sub === 'leave') {
-        if (!data.tournament || data.tournament.status !== 'registration') { await interaction.reply({ content: 'No open registration to leave.', ephemeral: true }); return; }
-        data.tournament.participants = data.tournament.participants.filter((id) => id !== interaction.user.id);
+        const t = getTournament(guildId);
+        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No open registration to leave.', ephemeral: true }); return; }
+        t.participants = t.participants.filter((id) => id !== interaction.user.id);
         saveData(data);
         await interaction.reply('✅ You left the tournament.');
         return;
       }
       if (sub === 'creategroups') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        const t = data.tournament;
-        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration.', ephemeral: true }); return; }
+        const t = getTournament(guildId);
+        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration — run `/tournament create` first, then `/tournament join`.', ephemeral: true }); return; }
+        if (t.participants.length < 2) { await interaction.reply({ content: 'Need at least 2 registered teams before creating groups.', ephemeral: true }); return; }
         const numGroups = interaction.options.getInteger('num_groups');
         const shuffled = shuffle(t.participants);
         const groups = Array.from({ length: numGroups }, () => []);
@@ -1947,13 +2082,13 @@ client.on('interactionCreate', async (interaction) => {
         t.status = 'groups';
         saveData(data);
         const letters = 'ABCDEFGH';
-        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(id).name).join(', ')}`);
+        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(guildId, id).name).join(', ')}`);
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — Group Stage`).setDescription(lines.join('\n')).setColor(0x3498db)] });
         return;
       }
       if (sub === 'playgroups') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        const t = data.tournament;
+        const t = getTournament(guildId);
         if (!t || t.status !== 'groups') { await interaction.reply({ content: 'No group stage in progress.', ephemeral: true }); return; }
         await interaction.reply('⏳ Simulating all remaining group matches...');
         for (const groupMatches of t.groupMatches) {
@@ -1964,17 +2099,22 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
         saveData(data);
-        await interaction.followUp('✅ Group stage matches complete! Check `/tournament standings`.');
+        if (t.format === 'groups_only') {
+          await crownGroupWinners(interaction.guild, t);
+          await interaction.followUp('✅ Group stage complete — winners crowned above!');
+        } else {
+          await interaction.followUp('✅ Group stage matches complete! Check `/tournament standings`, then `/tournament advancegroups` when ready for knockout.');
+        }
         return;
       }
       if (sub === 'standings') {
-        const t = data.tournament;
+        const t = getTournament(guildId);
         if (!t?.groups) { await interaction.reply({ content: 'No group stage set up.', ephemeral: true }); return; }
         const letters = 'ABCDEFGH';
         const embed = new EmbedBuilder().setTitle(`📊 ${tournamentDisplayName(t)} — Standings`).setColor(0x3498db);
         t.groups.forEach((g, i) => {
           const table = groupStandings(g, t.groupMatches[i]);
-          const lines = table.map((row, pos) => `${pos + 1}. ${getTeam(row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
+          const lines = table.map((row, pos) => `${pos + 1}. ${getTeam(guildId, row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
           embed.addFields({ name: `Group ${letters[i]}`, value: lines.join('\n') });
         });
         await interaction.reply({ embeds: [embed] });
@@ -1982,8 +2122,9 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (sub === 'advancegroups') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        const t = data.tournament;
+        const t = getTournament(guildId);
         if (!t?.groups) { await interaction.reply({ content: 'No group stage set up.', ephemeral: true }); return; }
+        if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is Group-Stage-Only format — run `/tournament playgroups` to finish it up, no knockout needed.', ephemeral: true }); return; }
         const top = interaction.options.getInteger('top');
         const advancers = [];
         t.groups.forEach((g, i) => {
@@ -2003,9 +2144,10 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (sub === 'start') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        const t = data.tournament;
+        const t = getTournament(guildId);
         if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration.', ephemeral: true }); return; }
-        if (t.participants.length !== t.size) { await interaction.reply({ content: `Need exactly ${t.size} participants (have ${t.participants.length}).`, ephemeral: true }); return; }
+        if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is Group-Stage-Only format — use `/tournament creategroups` instead of `/tournament start`.', ephemeral: true }); return; }
+        if (!t.size || t.participants.length !== t.size) { await interaction.reply({ content: `Need exactly ${t.size || 'a set number of'} participants (have ${t.participants.length}).`, ephemeral: true }); return; }
         t.rounds = [buildKnockoutRound(t.participants)];
         t.status = 'knockout';
         t.channelId = interaction.channel.id;
@@ -2015,24 +2157,29 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
       if (sub === 'bracket' || sub === 'status') {
-        const t = data.tournament;
+        const t = getTournament(guildId);
         if (!t) { await interaction.reply({ content: 'No tournament right now.', ephemeral: true }); return; }
         if (t.status === 'registration') { await interaction.reply(`**${tournamentDisplayName(t)}** — Registration: ${t.participants.length} teams joined.`); return; }
         if (t.status === 'groups') { await interaction.reply('Group stage in progress — use `/tournament standings`.'); return; }
+        if (t.status === 'completed' && t.champions) {
+          const names = t.champions.map((id) => getTeam(guildId, id)?.name || 'Unknown').join(', ');
+          await interaction.reply(`**${tournamentDisplayName(t)}** — Completed! Group winners: ${names}`);
+          return;
+        }
         const currentRound = t.rounds[t.rounds.length - 1];
         const lines = currentRound.map((m) => {
-          const p1Name = getTeam(m.p1)?.name || '???';
-          const p2Name = getTeam(m.p2)?.name || '???';
-          return m.winner ? `~~${p1Name} vs ${p2Name}~~ → **${getTeam(m.winner).name}**` : `${p1Name} vs ${p2Name}`;
+          const p1Name = getTeam(guildId, m.p1)?.name || '???';
+          const p2Name = getTeam(guildId, m.p2)?.name || '???';
+          return m.winner ? `~~${p1Name} vs ${p2Name}~~ → **${getTeam(guildId, m.winner).name}**` : `${p1Name} vs ${p2Name}`;
         });
         const embed = new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(currentRound.length * 2)}`).setDescription(lines.join('\n')).setColor(0x3498db);
-        if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getTeam(t.champion)?.name || 'Unknown'}` });
+        if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getTeam(guildId, t.champion)?.name || 'Unknown'}` });
         await interaction.reply({ embeds: [embed] });
         return;
       }
       if (sub === 'end') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        data.tournament = null;
+        data.tournaments[guildId] = null;
         saveData(data);
         await interaction.reply('✅ Tournament cancelled.');
         return;
