@@ -1690,9 +1690,8 @@ const slashCommands = [
   new SlashCommandBuilder().setName('tournament').setDescription('Tournament commands.')
     .addSubcommand((s) => s.setName('create').setDescription('Create a new tournament. Admin only.')
       .addStringOption((o) => o.setName('type').setDescription('Tournament type').setRequired(true).addChoices(...typeChoices))
-      .addStringOption((o) => o.setName('format').setDescription('Group Stage → Knockout, or Group Stage Only').setRequired(true).addChoices(...formatChoices))
+      .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size').setRequired(true).addChoices(...sizeChoices))
       .addStringOption((o) => o.setName('prize').setDescription('Prize description').setRequired(true))
-      .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size (only needed for Group→Knockout or direct knockout)').setRequired(false).addChoices(...sizeChoices))
       .addStringOption((o) => o.setName('name').setDescription('Custom name (only used if type = Custom)').setRequired(false))
       .addRoleOption((o) => o.setName('prize_role').setDescription('Role to award the champion').setRequired(false)))
     .addSubcommand((s) => s.setName('join').setDescription('Join the open tournament.'))
@@ -2123,24 +2122,20 @@ client.on('interactionCreate', async (interaction) => {
         const existingT = getTournament(guildId);
         if (existingT && existingT.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active in this server. End it first.', ephemeral: true }); return; }
         const type = interaction.options.getString('type');
-        const size = parseInt(interaction.options.getString('size') || '0', 10) || null;
-        const format = interaction.options.getString('format') || 'groups_knockout';
+        const size = parseInt(interaction.options.getString('size'), 10);
         const prize = interaction.options.getString('prize');
         const customName = interaction.options.getString('name') || 'Custom Cup';
         const prizeRole = interaction.options.getRole('prize_role');
         data.tournaments[guildId] = {
-          type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format,
+          type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format: 'groups_knockout',
           status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
         };
         saveData(data);
         const t = data.tournaments[guildId];
         const displayName = tournamentDisplayName(t);
-        const formatNote = format === 'groups_only'
-          ? 'Format: **Group Stage Only** — no knockout, group winners are crowned directly.'
-          : `Format: **Group Stage → Knockout** (need ${size || '2/4/8/16/32'} teams for the knockout stage, or run a group stage first with \`/tournament creategroups\`).`;
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle(`🏆 ${displayName}`)
-            .setDescription(`Registration open!\n${formatNote}\nPrize: ${prize}\nJoin with \`/tournament join\` (set a team with \`/team set\` first).`)
+            .setDescription(`Registration open! Need **${size}** teams for the knockout stage (or more if you want a group stage first).\nPrize: ${prize}\nJoin with \`/tournament join\` (set a team with \`/team set\` first).`)
             .setColor(0x3498db)],
         });
         return;
