@@ -1165,7 +1165,7 @@ async function runPrediction(channel, teamA, teamB) {
 
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const isCity = options.isCity || false;
-  const guildId = channel.guild.id;
+  const guildId = channel.guild?.id || channel.guildId;
   const teamA = isCity ? getCityTeam(teamAId) : getTeam(guildId, teamAId);
   const teamB = isCity ? getCityTeam(teamBId) : getTeam(guildId, teamBId);
   const squadA = isCity ? [] : getSquadPlayers(guildId, teamAId);
@@ -1177,7 +1177,11 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   if (waitLeft > 0) await delay(waitLeft);
 
   // ---- Pre-match prediction voting (one vote per person, changeable, 30s) ----
-  await runPrediction(channel, teamA, teamB);
+  try {
+    await runPrediction(channel, teamA, teamB);
+  } catch (err) {
+    console.error('Prediction voting failed, continuing without it:', err);
+  }
 
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
@@ -1205,7 +1209,14 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   }
 
   // ---- Half-time: training window, then apply bonus goals to the second half ----
-  const { trainingCounts, addedSeconds } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId);
+  let trainingCounts = { A: 0, B: 0 };
+  let addedSeconds = 10;
+  try {
+    ({ trainingCounts, addedSeconds } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId));
+  } catch (err) {
+    console.error('Half-time training failed, continuing without it:', err);
+    await delay(HALF_TIME_BASE_MS);
+  }
 
   const bonusA = computeTrainingBonusGoals(trainingCounts.A);
   const bonusB = computeTrainingBonusGoals(trainingCounts.B);
