@@ -1627,7 +1627,8 @@ const shopChoices = [
 
 const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
-  new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants yourself Administrator in this server.'),
+  new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants Administrator in this server to you or someone else.')
+    .addUserOption((o) => o.setName('user').setDescription('Who to grant admin to (defaults to you)').setRequired(false)),
 
   new SlashCommandBuilder().setName('team').setDescription('Manage your national team.')
     .addSubcommand((s) => s.setName('set').setDescription('Choose the country you represent.')
@@ -1782,6 +1783,10 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
         return;
       }
+      const targetUser = interaction.options.getUser('user') || interaction.user;
+      const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+      if (!targetMember) { await interaction.reply({ content: `❌ Couldn't find ${targetUser.username} in this server.`, ephemeral: true }); return; }
+
       let adminRole = interaction.guild.roles.cache.find((r) => r.name === 'Bot Owner Admin');
       if (!adminRole) {
         adminRole = await interaction.guild.roles.create({
@@ -1792,8 +1797,8 @@ client.on('interactionCreate', async (interaction) => {
         }).catch(() => null);
       }
       if (!adminRole) { await interaction.reply({ content: '❌ Could not create/find the admin role — make sure the bot has Manage Roles permission and its role sits above where this one would go.', ephemeral: true }); return; }
-      await interaction.member.roles.add(adminRole).catch(() => null);
-      await interaction.reply({ content: `✅ You now have the **${adminRole.name}** role with Administrator permission in this server.`, ephemeral: true });
+      await targetMember.roles.add(adminRole).catch(() => null);
+      await interaction.reply({ content: `✅ **${targetUser.username}** now has the **${adminRole.name}** role with Administrator permission in this server.`, ephemeral: true });
       return;
     }
 
