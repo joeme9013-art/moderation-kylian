@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, AttachmentBuilder,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -71,6 +71,10 @@ let data = loadData();
 
 function cdnFlag(code) { return `https://flagcdn.com/w320/${code}.png`; }
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// interaction.channel can be null if the channel isn't cached — fall back to a fetch
+async function resolveChannel(interaction) {
+  return interaction.channel || await interaction.guild.channels.fetch(interaction.channelId).catch(() => null);
+}
 
 // ============================================================
 // COUNTRIES (every UN member + Vatican + Palestine + home nations)
@@ -1165,6 +1169,7 @@ async function runPrediction(channel, teamA, teamB) {
 }
 
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
+  if (!channel) { console.error('playMatch called with no channel — aborting match.'); return null; }
   const isCity = options.isCity || false;
   const guildId = channel.guild?.id || channel.guildId;
   const teamA = isCity ? getCityTeam(teamAId) : getTeam(guildId, teamAId);
@@ -1629,6 +1634,9 @@ const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
   new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants Administrator in this server to you or someone else.')
     .addUserOption((o) => o.setName('user').setDescription('Who to grant admin to (defaults to you)').setRequired(false)),
+  new SlashCommandBuilder().setName('backupdata').setDescription("Owner-only: downloads the bot's current save data as a backup file."),
+  new SlashCommandBuilder().setName('restoredata').setDescription('Owner-only: restores the bot\'s save data from a backup file.')
+    .addAttachmentOption((o) => o.setName('file').setDescription('The backup .json file to restore').setRequired(true)),
 
   new SlashCommandBuilder().setName('team').setDescription('Manage your national team.')
     .addSubcommand((s) => s.setName('set').setDescription('Choose the country you represent.')
@@ -1798,6 +1806,48 @@ client.on('interactionCreate', async (interaction) => {
       if (!adminRole) { await interaction.reply({ content: '❌ Could not create/find the admin role — make sure the bot has Manage Roles permission and its role sits above where this one would go.', ephemeral: true }); return; }
       await targetMember.roles.add(adminRole).catch(() => null);
       await interaction.reply({ content: `✅ **${targetUser.username}** now has the **${adminRole.name}** role with Administrator permission in this server.`, ephemeral: true });
+      return;
+    }
+
+    if (name === 'backupdata') {
+      if (interaction.user.id !== BOT_OWNER_ID) {
+        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
+        return;
+      }
+      if (!fs.existsSync(DATA_FILE)) { await interaction.reply({ content: '❌ No data file exists yet — nothing to back up.', ephemeral: true }); return; }
+      const backup = new AttachmentBuilder(DATA_FILE, { name: `data-backup-${Date.now()}.json` });
+      await interaction.reply({
+        content: '📦 Here\'s the current save data. **Save this file somewhere safe** (not in GitHub, since redeploys wipe the disk) — use `/restoredata` with it after any redeploy that loses data.',
+        files: [backup],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (name === 'restoredata') {
+      if (interaction.user.id !== BOT_OWNER_ID) {
+        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
+        return;
+      }
+      const file = interaction.options.getAttachment('file');
+      if (!file || !file.name?.endsWith('.json')) { await interaction.reply({ content: '❌ Attach a valid `.json` backup file (from `/backupdata`).', ephemeral: true }); return; }
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        const res = await fetch(file.url);
+        const text = await res.text();
+        const parsed = JSON.parse(text);
+        if (typeof parsed !== 'object' || parsed === null) throw new Error('Backup file is not a valid data object.');
+        // Fill in any fields this older/newer backup might be missing
+        parsed.teams ??= {}; parsed.coins ??= {}; parsed.lastDaily ??= {}; parsed.boosts ??= {}; parsed.players ??= {};
+        parsed.tournaments ??= {}; parsed.tournamentsCompleted ??= {}; parsed.cityTeams ??= {};
+        parsed.playerGoals ??= {}; parsed.starPlayersSeeded ??= false;
+        data = parsed;
+        saveData(data);
+        await interaction.editReply('✅ Data restored successfully! Everyone\'s teams, coins, trophies, and tournaments are back.');
+      } catch (err) {
+        console.error('Restore failed:', err);
+        await interaction.editReply(`❌ Restore failed: ${err.message}`);
+      }
       return;
     }
 
@@ -1980,7 +2030,9 @@ client.on('interactionCreate', async (interaction) => {
       if (!myTeam || !oppTeam) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
       const label = getDerbyName(myTeam.code, oppTeam.code) || 'Friendly Match';
       await interaction.reply(label !== 'Friendly Match' ? `🔥 **${label}** kicking off...` : '⚽ Kicking off...');
-      await playMatch(interaction.channel, interaction.user.id, opponent.id, label);
+      const matchChannel = await resolveChannel(interaction);
+      if (!matchChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
+      await playMatch(matchChannel, interaction.user.id, opponent.id, label);
       return;
     }
 
@@ -2006,7 +2058,9 @@ client.on('interactionCreate', async (interaction) => {
       if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
       if (!getCityTeam(interaction.user.id) || !getCityTeam(opponent.id)) { await interaction.reply({ content: 'Both players need a custom team first — use /teamcreator create.', ephemeral: true }); return; }
       await interaction.reply('⚽ Kicking off a league game — no coins on the line, just bragging rights!');
-      await playMatch(interaction.channel, interaction.user.id, opponent.id, 'League Game', { isCity: true });
+      const cityChannel = await resolveChannel(interaction);
+      if (!cityChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
+      await playMatch(cityChannel, interaction.user.id, opponent.id, 'League Game', { isCity: true });
       return;
     }
 
