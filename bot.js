@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, AttachmentBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -68,6 +68,7 @@ function loadData() {
 }
 function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
 let data = loadData();
+console.log(`[data] Using file: ${DATA_FILE} | RAILWAY_VOLUME_MOUNT_PATH=${process.env.RAILWAY_VOLUME_MOUNT_PATH || '(not set)'}`);
 
 function cdnFlag(code) { return `https://flagcdn.com/w320/${code}.png`; }
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -1634,10 +1635,6 @@ const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
   new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants Administrator in this server to you or someone else.')
     .addUserOption((o) => o.setName('user').setDescription('Who to grant admin to (defaults to you)').setRequired(false)),
-  new SlashCommandBuilder().setName('backupdata').setDescription("Owner-only: downloads the bot's current save data as a backup file."),
-  new SlashCommandBuilder().setName('restoredata').setDescription('Owner-only: restores the bot\'s save data from a backup file.')
-    .addAttachmentOption((o) => o.setName('file').setDescription('The backup .json file to restore').setRequired(true)),
-
   new SlashCommandBuilder().setName('team').setDescription('Manage your national team.')
     .addSubcommand((s) => s.setName('set').setDescription('Choose the country you represent.')
       .addStringOption((o) => o.setName('country').setDescription('Country name').setRequired(true).setAutocomplete(true)))
@@ -1806,48 +1803,6 @@ client.on('interactionCreate', async (interaction) => {
       if (!adminRole) { await interaction.reply({ content: '❌ Could not create/find the admin role — make sure the bot has Manage Roles permission and its role sits above where this one would go.', ephemeral: true }); return; }
       await targetMember.roles.add(adminRole).catch(() => null);
       await interaction.reply({ content: `✅ **${targetUser.username}** now has the **${adminRole.name}** role with Administrator permission in this server.`, ephemeral: true });
-      return;
-    }
-
-    if (name === 'backupdata') {
-      if (interaction.user.id !== BOT_OWNER_ID) {
-        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
-        return;
-      }
-      if (!fs.existsSync(DATA_FILE)) { await interaction.reply({ content: '❌ No data file exists yet — nothing to back up.', ephemeral: true }); return; }
-      const backup = new AttachmentBuilder(DATA_FILE, { name: `data-backup-${Date.now()}.json` });
-      await interaction.reply({
-        content: '📦 Here\'s the current save data. **Save this file somewhere safe** (not in GitHub, since redeploys wipe the disk) — use `/restoredata` with it after any redeploy that loses data.',
-        files: [backup],
-        ephemeral: true,
-      });
-      return;
-    }
-
-    if (name === 'restoredata') {
-      if (interaction.user.id !== BOT_OWNER_ID) {
-        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
-        return;
-      }
-      const file = interaction.options.getAttachment('file');
-      if (!file || !file.name?.endsWith('.json')) { await interaction.reply({ content: '❌ Attach a valid `.json` backup file (from `/backupdata`).', ephemeral: true }); return; }
-      await interaction.deferReply({ ephemeral: true });
-      try {
-        const res = await fetch(file.url);
-        const text = await res.text();
-        const parsed = JSON.parse(text);
-        if (typeof parsed !== 'object' || parsed === null) throw new Error('Backup file is not a valid data object.');
-        // Fill in any fields this older/newer backup might be missing
-        parsed.teams ??= {}; parsed.coins ??= {}; parsed.lastDaily ??= {}; parsed.boosts ??= {}; parsed.players ??= {};
-        parsed.tournaments ??= {}; parsed.tournamentsCompleted ??= {}; parsed.cityTeams ??= {};
-        parsed.playerGoals ??= {}; parsed.starPlayersSeeded ??= false;
-        data = parsed;
-        saveData(data);
-        await interaction.editReply('✅ Data restored successfully! Everyone\'s teams, coins, trophies, and tournaments are back.');
-      } catch (err) {
-        console.error('Restore failed:', err);
-        await interaction.editReply(`❌ Restore failed: ${err.message}`);
-      }
       return;
     }
 
