@@ -71,6 +71,13 @@ let data = loadData();
 console.log(`[data] Using file: ${DATA_FILE} | RAILWAY_VOLUME_MOUNT_PATH=${process.env.RAILWAY_VOLUME_MOUNT_PATH || '(not set)'}`);
 
 function cdnFlag(code) { return `https://flagcdn.com/w320/${code}.png`; }
+const SPECIAL_FLAG_EMOJI = { 'gb-eng': '🏴󠁧󠁢󠁥󠁮󠁧󠁿', 'gb-sct': '🏴󠁧󠁢󠁳󠁣󠁴󠁿', 'gb-wls': '🏴󠁧󠁢󠁷󠁬󠁳󠁿' };
+function flagEmoji(code) {
+  if (!code) return '';
+  if (SPECIAL_FLAG_EMOJI[code]) return SPECIAL_FLAG_EMOJI[code];
+  if (code.length !== 2) return '';
+  return code.toUpperCase().replace(/./g, (c) => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65));
+}
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // interaction.channel can be null if the channel isn't cached — fall back to a fetch
 async function resolveChannel(interaction) {
@@ -916,8 +923,29 @@ function seedStarPlayers() {
 // ============================================================
 // MATCH ENGINE — goal generation, scorer commentary, animation
 // ============================================================
-const GOAL_WEIGHTS = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5];
-function baseGoalCount() { return GOAL_WEIGHTS[Math.floor(Math.random() * GOAL_WEIGHTS.length)]; }
+// Team strength drives the score now instead of pure randomness: a squad's
+// average rating sets its attack/defense power, and the matchup between two
+// teams' ratings shifts the expected goals (Poisson mean) for each side.
+// Upsets can still happen — just far less often the bigger the gap.
+function teamOverallRating(squad) {
+  if (!squad.length) return 75; // city/custom teams with no rated players — average default
+  return squad.reduce((sum, p) => sum + (p.rating || 70), 0) / squad.length;
+}
+function poissonRandom(lambda) {
+  const L = Math.exp(-lambda);
+  let k = 0, p = 1;
+  do { k++; p *= Math.random(); } while (p > L);
+  return k - 1;
+}
+// ~1.35 goals/team is the real-world average; a full 20-rating gap swings it hard either way
+function expectedGoals(myRating, oppRating) {
+  const diff = myRating - oppRating;
+  const lambda = 1.35 + diff / 11;
+  return Math.max(0.15, Math.min(4.5, lambda));
+}
+function baseGoalCount(myRating, oppRating) {
+  return Math.min(9, poissonRandom(expectedGoals(myRating, oppRating)));
+}
 
 function applyBoostsToGoals(userId, goals) {
   const boosts = getBoosts(userId);
@@ -967,8 +995,11 @@ function generateGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, o
 }
 
 // Extra time (91'-105', 106'-120') sees fewer goals than a normal 45 — weighted low
-const ET_GOAL_WEIGHTS = [0, 0, 0, 0, 0, 1, 1, 2];
-function extraTimeGoalCount() { return ET_GOAL_WEIGHTS[Math.floor(Math.random() * ET_GOAL_WEIGHTS.length)]; }
+// Extra time sees far fewer goals than a normal 45 — same strength model, lower baseline
+function extraTimeGoalCount(myRating, oppRating) {
+  const lambda = Math.max(0.05, Math.min(1.2, expectedGoals(myRating, oppRating) * 0.35));
+  return Math.min(4, poissonRandom(lambda));
+}
 function generateExtraTimeGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, oppTeamName, minMinute, maxMinute) {
   const events = [];
   for (let i = 0; i < goalCount; i++) {
@@ -1040,11 +1071,12 @@ const SAVE_LINES = [
   (p, gk) => `**${gk}** flies across goal to deny **${p}** — world class save!`,
   (p, gk) => `**${p}** thought that was in, but **${gk}** says no!`,
 ];
-function commentaryLine(ev) {
+function commentaryLine(ev, flag) {
   const minStr = ev.et ? `${ev.minute}' (ET)` : formatMinute(ev.minute);
   if (ev.type === 'goal') {
+    const playerDisplay = flag ? `${ev.player} ${flag}` : ev.player;
     const lines = ev.isPenalty ? PENALTY_GOAL_LINES : GOAL_LINES;
-    const line = lines[Math.floor(Math.random() * lines.length)](ev.player);
+    const line = lines[Math.floor(Math.random() * lines.length)](playerDisplay);
     return `⚽ ${minStr} — ${line}`;
   }
   if (ev.type === 'save') {
@@ -1068,8 +1100,8 @@ function commentaryLine(ev) {
 
 // Sends a commentary line; goals and saves get a gif attached and a
 // scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
-async function sendEventLine(channel, ev, scoreLine) {
-  const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
+async function sendEventLine(channel, ev, scoreLine, flag) {
+  const text = commentaryLine(ev, flag) + (scoreLine ? `\n${scoreLine}` : '');
   if (ev.type === 'goal') {
     recordGoal(ev.player);
     await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
@@ -1081,14 +1113,16 @@ async function sendEventLine(channel, ev, scoreLine) {
 }
 
 // Groups scorers by player for the final result screen, e.g. "K. Mbappé 48', 66'"
-function formatScorerList(goalEvents) {
+function formatScorerList(goalEvents, flag) {
   const byPlayer = {};
   for (const ev of goalEvents) {
     if (ev.type !== 'goal') continue; // skip the paired VAR narrative entries, only count real goals
     byPlayer[ev.player] = byPlayer[ev.player] || [];
-    byPlayer[ev.player].push(`${formatMinute(ev.minute)}${ev.isPenalty ? ' (P)' : ''}`);
+    const minStr = ev.et ? `${ev.minute}' (ET)` : formatMinute(ev.minute);
+    byPlayer[ev.player].push(`${minStr}${ev.isPenalty ? ' (P)' : ''}`);
   }
-  const lines = Object.entries(byPlayer).map(([player, mins]) => `${player} ${mins.join(', ')}`);
+  const prefix = flag ? `${flag} ` : '';
+  const lines = Object.entries(byPlayer).map(([player, mins]) => `${prefix}${player} ${mins.join(', ')}`);
   return lines.length ? lines.join('\n') : '—';
 }
 
@@ -1113,6 +1147,7 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
   const addedSeconds = 8 + Math.floor(Math.random() * 16); // +8 to +23s added time — longer breather
   const totalMs = HALF_TIME_BASE_MS + addedSeconds * 1000;
   const matchToken = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const MAX_SUBS = 4;
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`train_A_${matchToken}`).setLabel(`🏋️ Train ${teamA.name}`).setStyle(ButtonStyle.Primary),
@@ -1129,14 +1164,15 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
         `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\n` +
         `⏱️ Added time for the break: **+${addedSeconds}s** (total break: ${Math.round(totalMs / 1000)}s)\n` +
         `🏋️ Train your squad — every rep improves that team's odds of a bonus goal next half! (10s cooldown per person)\n` +
-        `🔄 Each manager gets **one substitution** — swaps a random bench player on for a random starter for the rest of the match.`
+        `🔄 Each manager gets up to **${MAX_SUBS} substitutions** — swaps a random bench player on for a random starter for the rest of the match.`
       )
       .setColor(0xf1c40f)],
     components: [row1, row2],
   });
 
   const trainingCounts = { A: 0, B: 0 };
-  const subs = { A: null, B: null }; // { outName, inPlayer }
+  const subs = { A: [], B: [] }; // arrays of { inPlayer }, up to MAX_SUBS each
+  const usedBenchIds = { A: new Set(), B: new Set() };
   const lastClick = new Map(); // userId -> timestamp
 
   const collector = halfTimeMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: totalMs });
@@ -1150,12 +1186,14 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
     }
 
     if (isSub) {
-      const bench = side === 'A' ? benchA : benchB;
-      if (subs[side]) { await btn.reply({ content: 'You already made your one substitution this match!', ephemeral: true }).catch(() => {}); return; }
-      if (bench.length === 0) { await btn.reply({ content: 'No bench players available to sub on.', ephemeral: true }).catch(() => {}); return; }
+      const bench = (side === 'A' ? benchA : benchB).filter((p) => !usedBenchIds[side].has(p.id));
       const teamName = side === 'A' ? teamA.name : teamB.name;
-      subs[side] = { inPlayer: bench[Math.floor(Math.random() * bench.length)] };
-      await btn.reply({ content: `🔄 Substitution queued for **${teamName}** — will be revealed at kickoff of the second half!`, ephemeral: true }).catch(() => {});
+      if (subs[side].length >= MAX_SUBS) { await btn.reply({ content: `You've already used all ${MAX_SUBS} substitutions this match!`, ephemeral: true }).catch(() => {}); return; }
+      if (bench.length === 0) { await btn.reply({ content: 'No bench players left to sub on.', ephemeral: true }).catch(() => {}); return; }
+      const inPlayer = bench[Math.floor(Math.random() * bench.length)];
+      usedBenchIds[side].add(inPlayer.id);
+      subs[side].push({ inPlayer });
+      await btn.reply({ content: `🔄 Substitution ${subs[side].length}/${MAX_SUBS} queued for **${teamName}** — will be revealed at kickoff of the second half!`, ephemeral: true }).catch(() => {});
       return;
     }
 
@@ -1228,6 +1266,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   let squadB = isCity ? [] : getStartingXI(guildId, teamBId);
   const benchA = isCity ? [] : getBench(guildId, teamAId);
   const benchB = isCity ? [] : getBench(guildId, teamBId);
+  const flagA = isCity ? '' : flagEmoji(teamA.code);
+  const flagB = isCity ? '' : flagEmoji(teamB.code);
 
   // ---- Cooldown: 30s minimum gap between matches in this channel ----
   const lastEnd = matchCooldowns.get(channel.id) || 0;
@@ -1241,8 +1281,10 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     console.error('Prediction voting failed, continuing without it:', err);
   }
 
-  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
-  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
+  const ratingA = teamOverallRating(squadA);
+  const ratingB = teamOverallRating(squadB);
+  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount(ratingA, ratingB));
+  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount(ratingB, ratingA));
   goalsA = applyOpponentReduction(teamBId, goalsA); // teamB's ironWall reduces teamA's goals
   goalsB = applyOpponentReduction(teamAId, goalsB);
 
@@ -1263,13 +1305,13 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     await delay(4000);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-    await sendEventLine(channel, ev, scoreLine);
+    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
   }
 
   // ---- Half-time: training window, then apply bonus goals to the second half ----
   let trainingCounts = { A: 0, B: 0 };
   let addedSeconds = 10;
-  let subs = { A: null, B: null };
+  let subs = { A: [], B: [] };
   try {
     ({ trainingCounts, addedSeconds, subs } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB));
   } catch (err) {
@@ -1277,18 +1319,26 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     await delay(HALF_TIME_BASE_MS);
   }
 
-  // Apply substitutions: swap a starter out for the bench player, and retroactively
-  // rename the subbed-off player in any already-generated second-half moments.
-  function applySub(squad, subInfo, sideLetter) {
-    if (!subInfo) return null;
-    const idx = squad.findIndex((p) => p.position !== 'GK');
-    const outPlayer = squad[idx !== -1 ? idx : 0];
-    squad[idx !== -1 ? idx : 0] = subInfo.inPlayer;
-    for (const ev of secondHalfEvents) { if (ev.side === sideLetter && ev.player === outPlayer.name) ev.player = subInfo.inPlayer.name; }
-    return outPlayer;
+  // Apply substitutions (up to 4 per team): swap a starter out for each bench
+  // player, and retroactively rename the subbed-off player in any already-
+  // generated second-half moments so the sub actually shows up in commentary.
+  function applySubs(squad, subList, sideLetter) {
+    const appliedIdx = new Set();
+    const changes = [];
+    for (const subInfo of subList) {
+      let idx = squad.findIndex((p, i) => p.position !== 'GK' && !appliedIdx.has(i));
+      if (idx === -1) idx = squad.findIndex((p) => p.position !== 'GK');
+      if (idx === -1) idx = 0;
+      const outPlayer = squad[idx];
+      squad[idx] = subInfo.inPlayer;
+      appliedIdx.add(idx);
+      for (const ev of secondHalfEvents) { if (ev.side === sideLetter && ev.player === outPlayer.name) ev.player = subInfo.inPlayer.name; }
+      changes.push({ out: outPlayer, in: subInfo.inPlayer });
+    }
+    return changes;
   }
-  const subOutA = applySub(squadA, subs.A, 'A');
-  const subOutB = applySub(squadB, subs.B, 'B');
+  const subsOutA = applySubs(squadA, subs.A, 'A');
+  const subsOutB = applySubs(squadB, subs.B, 'B');
 
   const bonusA = computeTrainingBonusGoals(trainingCounts.A);
   const bonusB = computeTrainingBonusGoals(trainingCounts.B);
@@ -1309,8 +1359,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   secondHalfEvents.sort((a, b) => a.minute - b.minute);
 
   const kickoffLines = [`🟢 Second Half — Kickoff! (${addedSeconds}s added time played out at the break)`];
-  if (subOutA) kickoffLines.push(`🔄 **${teamA.name}** substitution: ${subOutA.name} ➡️ **${subs.A.inPlayer.name}**`);
-  if (subOutB) kickoffLines.push(`🔄 **${teamB.name}** substitution: ${subOutB.name} ➡️ **${subs.B.inPlayer.name}**`);
+  for (const c of subsOutA) kickoffLines.push(`🔄 **${teamA.name}** substitution: ${c.out.name} ➡️ **${c.in.name}**`);
+  for (const c of subsOutB) kickoffLines.push(`🔄 **${teamB.name}** substitution: ${c.out.name} ➡️ **${c.in.name}**`);
   if (bonusA > 0) kickoffLines.push(`🏋️ ${teamA.name}'s training paid off — **+${bonusA} bonus goal${bonusA > 1 ? 's' : ''}** coming their way!`);
   if (bonusB > 0) kickoffLines.push(`🏋️ ${teamB.name}'s training paid off — **+${bonusB} bonus goal${bonusB > 1 ? 's' : ''}** coming their way!`);
   if (bonusA === 0 && bonusB === 0) kickoffLines.push('No bonus goals earned from the training session — back to open play!');
@@ -1320,7 +1370,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     await delay(4000);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-    await sendEventLine(channel, ev, scoreLine);
+    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
   }
   await delay(1500);
 
@@ -1335,9 +1385,11 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 
     // ET First Half: 91'-105'
     await channel.send({ embeds: [new EmbedBuilder().setTitle("🟠 Extra Time — First Half Kickoff! (91')").setColor(0xe67e22)] });
+    const etRatingA1 = teamOverallRating(squadA);
+    const etRatingB1 = teamOverallRating(squadB);
     const et1Events = [
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadA, teamA.name, 'A', squadB, teamB.name, 91, 105),
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadB, teamB.name, 'B', squadA, teamA.name, 91, 105),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingA1, etRatingB1), squadA, teamA.name, 'A', squadB, teamB.name, 91, 105),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingB1, etRatingA1), squadB, teamB.name, 'B', squadA, teamA.name, 91, 105),
     ].sort((a, b) => a.minute - b.minute);
     for (const ev of et1Events) {
       await delay(4000);
@@ -1345,7 +1397,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
       const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-      await sendEventLine(channel, ev, scoreLine);
+      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
     }
 
     // ET Half-Time
@@ -1358,9 +1410,11 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 
     // ET Second Half: 106'-120'
     await channel.send({ embeds: [new EmbedBuilder().setTitle("🟠 Extra Time — Second Half Kickoff! (106')").setColor(0xe67e22)] });
+    const etRatingA2 = teamOverallRating(squadA);
+    const etRatingB2 = teamOverallRating(squadB);
     const et2Events = [
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadA, teamA.name, 'A', squadB, teamB.name, 106, 120),
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadB, teamB.name, 'B', squadA, teamA.name, 106, 120),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingA2, etRatingB2), squadA, teamA.name, 'A', squadB, teamB.name, 106, 120),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingB2, etRatingA2), squadB, teamB.name, 'B', squadA, teamA.name, 106, 120),
     ].sort((a, b) => a.minute - b.minute);
     for (const ev of et2Events) {
       await delay(4000);
@@ -1368,7 +1422,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
       const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-      await sendEventLine(channel, ev, scoreLine);
+      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
     }
     await delay(1500);
     await channel.send({
@@ -1397,8 +1451,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
       `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''} • <t:${Math.floor(Date.now() / 1000)}:d>`
     )
     .addFields(
-      { name: `${teamA.name} Scorers`, value: formatScorerList(goalEventsA), inline: true },
-      { name: `${teamB.name} Scorers`, value: formatScorerList(goalEventsB), inline: true },
+      { name: `${teamA.name} Scorers`, value: formatScorerList(goalEventsA, flagA), inline: true },
+      { name: `${teamB.name} Scorers`, value: formatScorerList(goalEventsB, flagB), inline: true },
     )
     .setColor(0x2ecc71);
   if (!isCity) { resultEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) }); resultEmbed.setThumbnail(cdnFlag(teamB.code)); }
@@ -1423,9 +1477,11 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 // INSTANT (unanimated) MATCH — used for group-stage fixtures, so a
 // full group phase doesn't take forever to play through
 // ============================================================
-function simulateMatchInstant(teamAId, teamBId) {
-  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
-  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
+function simulateMatchInstant(guildId, teamAId, teamBId) {
+  const ratingA = teamOverallRating(getStartingXI(guildId, teamAId));
+  const ratingB = teamOverallRating(getStartingXI(guildId, teamBId));
+  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount(ratingA, ratingB));
+  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount(ratingB, ratingA));
   goalsA = applyOpponentReduction(teamBId, goalsA);
   goalsB = applyOpponentReduction(teamAId, goalsB);
   return { goalsA, goalsB };
@@ -2260,7 +2316,7 @@ client.on('interactionCreate', async (interaction) => {
         for (const groupMatches of t.groupMatches) {
           for (const m of groupMatches) {
             if (m.played) continue;
-            const result = simulateMatchInstant(m.p1, m.p2);
+            const result = simulateMatchInstant(guildId, m.p1, m.p2);
             m.goalsA = result.goalsA; m.goalsB = result.goalsB; m.played = true;
           }
         }
@@ -2359,3 +2415,4 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.login(process.env.BOT_TOKEN);
+
