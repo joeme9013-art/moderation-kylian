@@ -30,7 +30,7 @@ function randomGif(list) { return list[Math.floor(Math.random() * list.length)];
 // ============================================================
 const DERBIES = {
   'es|mx': 'Battle of the Latins 🇪🇸🇲🇽',
-  'fr|de': 'France vs Germany — European Rivalry 🇫🇷🇩🇪',
+  'fr|de': 'France vs Germany — wait hasnt this happened before 🇫🇷🇩🇪',
   'ar|br': 'Superclásico de las Américas 🇦🇷🇧🇷',
   'gb-eng|fr': 'Cross-Channel Clash 🏴󠁧󠁢󠁥󠁮󠁧󠁿🇫🇷',
   'de|nl': 'Der Klassiker 🇩🇪🇳🇱',
