@@ -44,8 +44,10 @@ function getDerbyName(codeA, codeB) {
 const matchCooldowns = new Map(); // channelId -> timestamp match ended
 const MATCH_COOLDOWN_MS = 30 * 1000;
 
-function recordGoal(playerName) {
-  data.playerGoals[playerName] = (data.playerGoals[playerName] || 0) + 1;
+function getGuildPlayerGoals(guildId) { data.playerGoals[guildId] = data.playerGoals[guildId] || {}; return data.playerGoals[guildId]; }
+function recordGoal(guildId, playerName) {
+  const g = getGuildPlayerGoals(guildId);
+  g[playerName] = (g[playerName] || 0) + 1;
 }
 
 const GUILD_ID = '1324059331406069872';
@@ -877,6 +879,278 @@ const DEFAULT_SQUADS = {
 };
 
 // ============================================================
+// DEFAULT BENCH — real reserve players seeded alongside each starting XI
+// so national squads come with subs ready to go, not just an empty bench.
+// ============================================================
+const DEFAULT_BENCH = {
+  br: [
+    { name: 'Ederson', position: 'GK', rating: 87 },
+    { name: 'Éder Militão', position: 'DEF', rating: 85 },
+    { name: 'Rodrygo', position: 'FWD', rating: 86 },
+  ],
+  'gb-eng': [
+    { name: 'Aaron Ramsdale', position: 'GK', rating: 80 },
+    { name: 'Levi Colwill', position: 'DEF', rating: 79 },
+    { name: 'Ollie Watkins', position: 'FWD', rating: 82 },
+  ],
+  ma: [
+    { name: 'Munir', position: 'GK', rating: 78 },
+    { name: 'Nayef Aguerd', position: 'DEF', rating: 81 },
+    { name: 'Zakaria Aboukhlal', position: 'FWD', rating: 78 },
+  ],
+  no: [
+    { name: 'Kristoffer Klaesson', position: 'GK', rating: 74 },
+    { name: 'David Møller Wolfe', position: 'DEF', rating: 76 },
+    { name: 'Erik Botheim', position: 'FWD', rating: 77 },
+  ],
+  fr: [
+    { name: 'Brice Samba', position: 'GK', rating: 80 },
+    { name: 'Ibrahima Konaté', position: 'DEF', rating: 84 },
+    { name: 'Randal Kolo Muani', position: 'FWD', rating: 83 },
+  ],
+  ar: [
+    { name: 'Gerónimo Rulli', position: 'GK', rating: 79 },
+    { name: 'Germán Pezzella', position: 'DEF', rating: 78 },
+    { name: 'Ángel Correa', position: 'FWD', rating: 79 },
+  ],
+  es: [
+    { name: 'David Raya', position: 'GK', rating: 82 },
+    { name: 'Íñigo Martínez', position: 'DEF', rating: 81 },
+    { name: 'Mikel Oyarzabal', position: 'FWD', rating: 82 },
+  ],
+  pt: [
+    { name: 'José Sá', position: 'GK', rating: 80 },
+    { name: 'António Silva', position: 'DEF', rating: 82 },
+    { name: 'João Félix', position: 'FWD', rating: 80 },
+  ],
+  de: [
+    { name: 'Oliver Baumann', position: 'GK', rating: 78 },
+    { name: 'Waldemar Anton', position: 'DEF', rating: 78 },
+    { name: 'Niclas Füllkrug', position: 'FWD', rating: 80 },
+  ],
+  nl: [
+    { name: 'Justin Bijlow', position: 'GK', rating: 78 },
+    { name: 'Micky van de Ven', position: 'DEF', rating: 81 },
+    { name: 'Wout Weghorst', position: 'FWD', rating: 78 },
+  ],
+  us: [
+    { name: 'Ethan Horvath', position: 'GK', rating: 74 },
+    { name: 'Miles Robinson', position: 'DEF', rating: 76 },
+    { name: 'Ricardo Pepi', position: 'FWD', rating: 77 },
+  ],
+  be: [
+    { name: 'Matz Sels', position: 'GK', rating: 79 },
+    { name: 'Thomas Meunier', position: 'DEF', rating: 78 },
+    { name: 'Charles De Ketelaere', position: 'FWD', rating: 79 },
+  ],
+  uy: [
+    { name: 'Franco Israel', position: 'GK', rating: 76 },
+    { name: 'Mathías Olivera', position: 'DEF', rating: 78 },
+    { name: 'Facundo Torres', position: 'FWD', rating: 78 },
+  ],
+  hr: [
+    { name: 'Ivica Ivušić', position: 'GK', rating: 76 },
+    { name: 'Domagoj Bradarić', position: 'DEF', rating: 76 },
+    { name: 'Bruno Petković', position: 'FWD', rating: 77 },
+  ],
+  mx: [
+    { name: 'Carlos Acevedo', position: 'GK', rating: 74 },
+    { name: 'Julián Araujo', position: 'DEF', rating: 77 },
+    { name: 'Alexis Vega', position: 'FWD', rating: 79 },
+  ],
+  kr: [
+    { name: 'Song Bum-keun', position: 'GK', rating: 75 },
+    { name: 'Kim Moon-hwan', position: 'DEF', rating: 75 },
+    { name: 'Oh Hyeon-gyu', position: 'FWD', rating: 76 },
+  ],
+  cz: [
+    { name: 'Matěj Kovář', position: 'GK', rating: 75 },
+    { name: 'Filip Panák', position: 'DEF', rating: 75 },
+    { name: 'Matěj Vydra', position: 'FWD', rating: 75 },
+  ],
+  ca: [
+    { name: 'James Pantemis', position: 'GK', rating: 74 },
+    { name: 'Derek Cornelius', position: 'DEF', rating: 75 },
+    { name: 'Liam Millar', position: 'FWD', rating: 76 },
+  ],
+  ch: [
+    { name: 'Yann Sommer', position: 'GK', rating: 82 },
+    { name: 'Fabian Schär', position: 'DEF', rating: 79 },
+    { name: 'Ruben Vargas', position: 'FWD', rating: 78 },
+  ],
+  'gb-sct': [
+    { name: 'Angus Gunn', position: 'GK', rating: 75 },
+    { name: 'Jack Hendry', position: 'DEF', rating: 75 },
+    { name: 'Kevin Nisbet', position: 'FWD', rating: 74 },
+  ],
+  py: [
+    { name: 'Alfredo Aguilar', position: 'GK', rating: 73 },
+    { name: 'Junior Alonso', position: 'DEF', rating: 76 },
+    { name: 'Adam Bareiro', position: 'FWD', rating: 75 },
+  ],
+  au: [
+    { name: 'Danny Vukovic', position: 'GK', rating: 74 },
+    { name: 'Bailey Wright', position: 'DEF', rating: 75 },
+    { name: 'Marco Tilio', position: 'FWD', rating: 75 },
+  ],
+  tr: [
+    { name: 'Altay Bayındır', position: 'GK', rating: 78 },
+    { name: 'Çağlar Söyüncü', position: 'DEF', rating: 78 },
+    { name: 'Yunus Akgün', position: 'FWD', rating: 76 },
+  ],
+  ec: [
+    { name: 'Alexander Domínguez', position: 'GK', rating: 76 },
+    { name: 'Félix Torres', position: 'DEF', rating: 78 },
+    { name: 'Michael Estrada', position: 'FWD', rating: 76 },
+  ],
+  ci: [
+    { name: 'Fabrice Ondoa', position: 'GK', rating: 75 },
+    { name: 'Odilon Kossounou', position: 'DEF', rating: 80 },
+    { name: 'Christian Kouamé', position: 'FWD', rating: 77 },
+  ],
+  jp: [
+    { name: 'Keisuke Osako', position: 'GK', rating: 75 },
+    { name: 'Yuto Nagatomo', position: 'DEF', rating: 74 },
+    { name: 'Ayase Ueda', position: 'FWD', rating: 78 },
+  ],
+  se: [
+    { name: 'Kristoffer Nordfeldt', position: 'GK', rating: 75 },
+    { name: 'Victor Nilsson Lindelöf', position: 'DEF', rating: 79 },
+    { name: 'Robin Quaison', position: 'FWD', rating: 76 },
+  ],
+  tn: [
+    { name: 'Mouez Hassen', position: 'GK', rating: 75 },
+    { name: 'Dylan Bronn', position: 'DEF', rating: 77 },
+    { name: 'Naim Sliti', position: 'FWD', rating: 76 },
+  ],
+  eg: [
+    { name: 'Mohamed Sobhi', position: 'GK', rating: 75 },
+    { name: 'Mahmoud Hamdy', position: 'DEF', rating: 75 },
+    { name: 'Ahmed Refaat', position: 'FWD', rating: 74 },
+  ],
+  ir: [
+    { name: 'Hossein Hosseini', position: 'GK', rating: 76 },
+    { name: 'Majid Hosseini', position: 'DEF', rating: 77 },
+    { name: 'Karim Ansarifard', position: 'FWD', rating: 75 },
+  ],
+  sn: [
+    { name: 'Alfred Gomis', position: 'GK', rating: 77 },
+    { name: 'Formose Mendy', position: 'DEF', rating: 76 },
+    { name: 'Iliman Ndiaye', position: 'FWD', rating: 80 },
+  ],
+  dz: [
+    { name: "Rais M'Bolhi", position: 'GK', rating: 74 },
+    { name: 'Mohamed Amine Tougai', position: 'DEF', rating: 74 },
+    { name: 'Andy Delort', position: 'FWD', rating: 77 },
+  ],
+  at: [
+    { name: 'Heinz Lindner', position: 'GK', rating: 74 },
+    { name: 'Maximilian Wöber', position: 'DEF', rating: 78 },
+    { name: 'Junior Adamu', position: 'FWD', rating: 76 },
+  ],
+  co: [
+    { name: 'David Ospina', position: 'GK', rating: 77 },
+    { name: 'William Tesillo', position: 'DEF', rating: 75 },
+    { name: 'Rafael Santos Borré', position: 'FWD', rating: 79 },
+  ],
+  gh: [
+    { name: 'Joe Wollacott', position: 'GK', rating: 75 },
+    { name: 'Alexander Djiku', position: 'DEF', rating: 78 },
+    { name: 'Fatawu Issahaku', position: 'FWD', rating: 79 },
+  ],
+  sa: [
+    { name: 'Mohammed Al-Owais', position: 'GK', rating: 76 },
+    { name: 'Hassan Tambakti', position: 'DEF', rating: 75 },
+    { name: 'Saleh Al-Shehri', position: 'FWD', rating: 76 },
+  ],
+  za: [
+    { name: 'Veli Mothwa', position: 'GK', rating: 74 },
+    { name: 'Njabulo Ngcobo', position: 'DEF', rating: 74 },
+    { name: 'Iqraam Rayners', position: 'FWD', rating: 74 },
+  ],
+  pl: [
+    { name: 'Łukasz Skorupski', position: 'GK', rating: 78 },
+    { name: 'Bartosz Salamon', position: 'DEF', rating: 74 },
+    { name: 'Karol Świderski', position: 'FWD', rating: 76 },
+  ],
+  dk: [
+    { name: 'Frederik Rønnow', position: 'GK', rating: 77 },
+    { name: 'Victor Kristiansen', position: 'DEF', rating: 77 },
+    { name: 'Mathias Jensen', position: 'MID', rating: 77 },
+  ],
+  'gb-wls': [
+    { name: 'Danny Ward', position: 'GK', rating: 76 },
+    { name: 'James Lawrence', position: 'DEF', rating: 75 },
+    { name: 'Brennan Johnson', position: 'FWD', rating: 79 },
+  ],
+  cr: [
+    { name: 'Patrick Sequeira', position: 'GK', rating: 74 },
+    { name: 'Waylon Francis', position: 'DEF', rating: 74 },
+    { name: 'Alonso Martínez', position: 'FWD', rating: 76 },
+  ],
+  rs: [
+    { name: 'Predrag Rajković', position: 'GK', rating: 79 },
+    { name: 'Miloš Veljković', position: 'DEF', rating: 77 },
+    { name: 'Luka Jović', position: 'FWD', rating: 79 },
+  ],
+  cm: [
+    { name: 'Devis Epassy', position: 'GK', rating: 75 },
+    { name: 'Enzo Ebosse', position: 'DEF', rating: 76 },
+    { name: 'Georges-Kevin Nkoudou', position: 'FWD', rating: 76 },
+  ],
+  qa: [
+    { name: 'Yousef Hassan', position: 'GK', rating: 74 },
+    { name: 'Musaab Khidir', position: 'DEF', rating: 74 },
+    { name: 'Mohammed Muntari', position: 'FWD', rating: 75 },
+  ],
+  nz: [
+    { name: 'Max Crocombe', position: 'GK', rating: 73 },
+    { name: 'Storm Roux', position: 'DEF', rating: 73 },
+    { name: 'Kosta Barbarouses', position: 'FWD', rating: 75 },
+  ],
+  cd: [
+    { name: 'Timothy Fayulu', position: 'GK', rating: 74 },
+    { name: 'Marcel Tisserand', position: 'DEF', rating: 76 },
+    { name: 'Fiston Mayele', position: 'FWD', rating: 76 },
+  ],
+  uz: [
+    { name: 'Bekhruz Norchaev', position: 'GK', rating: 73 },
+    { name: 'Farrukh Sayfiev', position: 'DEF', rating: 74 },
+    { name: 'Jaloliddin Masharipov', position: 'FWD', rating: 76 },
+  ],
+  jo: [
+    { name: 'Amer Shafi', position: 'GK', rating: 74 },
+    { name: 'Yazan Al-Arab', position: 'DEF', rating: 74 },
+    { name: 'Mahmoud Al-Mardi', position: 'FWD', rating: 74 },
+  ],
+  iq: [
+    { name: 'Jalal Hassan', position: 'GK', rating: 75 },
+    { name: 'Ali Faez', position: 'DEF', rating: 74 },
+    { name: 'Amjad Attwan', position: 'FWD', rating: 74 },
+  ],
+  pa: [
+    { name: 'Luis Mejía', position: 'GK', rating: 75 },
+    { name: 'José Córdoba', position: 'DEF', rating: 74 },
+    { name: 'Freddy Góndola', position: 'FWD', rating: 74 },
+  ],
+  ht: [
+    { name: 'Johny Placide', position: 'GK', rating: 73 },
+    { name: 'Wilde Donald Guerrier', position: 'DEF', rating: 73 },
+    { name: 'Emmanuel Antoine', position: 'FWD', rating: 73 },
+  ],
+  ba: [
+    { name: 'Ibrahim Šehić', position: 'GK', rating: 76 },
+    { name: 'Adnan Kovačević', position: 'DEF', rating: 75 },
+    { name: 'Rifet Kapić', position: 'FWD', rating: 74 },
+  ],
+  cw: [
+    { name: 'Shendrick Berkel', position: 'GK', rating: 73 },
+    { name: 'Michael Maria', position: 'DEF', rating: 74 },
+    { name: 'Roly Bonevacia', position: 'FWD', rating: 76 },
+  ],
+};
+
+// ============================================================
 // TRANSFER MARKET — real star players, big price tags. Seeded once
 // as free agents with a "cost" field; /player sign deducts coins for
 // these instead of being free like custom-made players.
@@ -908,6 +1182,9 @@ function generateGenericSquad() {
 }
 function getDefaultSquad(countryCode) {
   return DEFAULT_SQUADS[countryCode] || generateGenericSquad();
+}
+function getDefaultBench(countryCode) {
+  return DEFAULT_BENCH[countryCode] || []; // no verified bench on file — team just starts with an empty bench
 }
 
 function seedStarPlayers() {
@@ -1100,10 +1377,10 @@ function commentaryLine(ev, flag) {
 
 // Sends a commentary line; goals and saves get a gif attached and a
 // scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
-async function sendEventLine(channel, ev, scoreLine, flag) {
+async function sendEventLine(channel, ev, scoreLine, flag, guildId) {
   const text = commentaryLine(ev, flag) + (scoreLine ? `\n${scoreLine}` : '');
   if (ev.type === 'goal') {
-    recordGoal(ev.player);
+    recordGoal(guildId, ev.player);
     await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
   } else if (ev.type === 'save') {
     await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
@@ -1305,7 +1582,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     await delay(4000);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
+    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
   }
 
   // ---- Half-time: training window, then apply bonus goals to the second half ----
@@ -1370,7 +1647,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     await delay(4000);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
+    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
   }
   await delay(1500);
 
@@ -1397,7 +1674,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
       const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
+      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
     }
 
     // ET Half-Time
@@ -1422,7 +1699,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
       const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB);
+      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
     }
     await delay(1500);
     await channel.send({
@@ -1964,8 +2241,14 @@ client.on('interactionCreate', async (interaction) => {
             data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
             team.squad.push(id);
           }
+          const bench = getDefaultBench(country.code);
+          for (const p of bench) {
+            const id = makePlayerId(p.name);
+            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
+            team.squad.push(id);
+          }
           squadNote = DEFAULT_SQUADS[country.code]
-            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI!`
+            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI${bench.length ? ` plus ${bench.length} real bench players ready to substitute in` : ''}!`
             : `\nYour squad has been auto-filled with a generated 11 (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
         } else if (isCountryChange) {
           squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
@@ -2078,7 +2361,7 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'leaderboard') {
       const type = interaction.options.getString('type');
       if (type === 'goldenboot' || type === 'ballondor') {
-        const entries = Object.entries(data.playerGoals)
+        const entries = Object.entries(getGuildPlayerGoals(interaction.guild.id))
           .map(([player, goals]) => [player, type === 'ballondor' ? goals * 3 : goals])
           .sort((a, b) => b[1] - a[1]).slice(0, 10);
         if (entries.length === 0) { await interaction.reply('No goals scored yet — get some matches going!'); return; }
@@ -2090,7 +2373,7 @@ client.on('interactionCreate', async (interaction) => {
       }
       let entries = type === 'coins'
         ? Object.entries(data.coins).sort((a, b) => b[1] - a[1]).slice(0, 10)
-        : Object.entries(data.teams).map(([id, t]) => [id, t.trophies]).sort((a, b) => b[1] - a[1]).slice(0, 10);
+        : Object.entries(getGuildTeams(interaction.guild.id)).map(([id, t]) => [id, t.trophies]).sort((a, b) => b[1] - a[1]).slice(0, 10);
       if (entries.length === 0) { await interaction.reply('No data yet.'); return; }
       const lines = await Promise.all(entries.map(async ([userId, val], i) => {
         const user = await client.users.fetch(userId).catch(() => null);
@@ -2225,6 +2508,7 @@ client.on('interactionCreate', async (interaction) => {
         status: 'registration', participants, groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
       };
       data.tournaments[guildId] = t;
+      data.playerGoals[guildId] = {}; // fresh Golden Boot race for this tournament
 
       const shuffled = shuffle(participants);
       const groups = Array.from({ length: numGroups }, () => []);
@@ -2262,6 +2546,7 @@ client.on('interactionCreate', async (interaction) => {
           type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format: 'groups_knockout',
           status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
         };
+        data.playerGoals[guildId] = {}; // fresh Golden Boot race for this tournament
         saveData(data);
         const t = data.tournaments[guildId];
         const displayName = tournamentDisplayName(t);
@@ -2415,4 +2700,3 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 client.login(process.env.BOT_TOKEN);
-
