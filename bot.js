@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -1180,11 +1180,19 @@ function generateGenericSquad() {
     rating: 60 + Math.floor(Math.random() * 26),
   }));
 }
+function generateGenericBench() {
+  const positions = ['GK', 'DEF', 'MID', 'FWD'];
+  return positions.map((position) => ({
+    name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
+    position,
+    rating: 58 + Math.floor(Math.random() * 24),
+  }));
+}
 function getDefaultSquad(countryCode) {
   return DEFAULT_SQUADS[countryCode] || generateGenericSquad();
 }
 function getDefaultBench(countryCode) {
-  return DEFAULT_BENCH[countryCode] || []; // no verified bench on file — team just starts with an empty bench
+  return DEFAULT_BENCH[countryCode] || generateGenericBench(); // real subs for the 53 verified rosters, random subs otherwise
 }
 
 function seedStarPlayers() {
@@ -1420,7 +1428,7 @@ function computeTrainingBonusGoals(trainingCount) {
   return bonus;
 }
 
-async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB) {
+async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB, squadA, squadB) {
   const addedSeconds = 8 + Math.floor(Math.random() * 16); // +8 to +23s added time — longer breather
   const totalMs = HALF_TIME_BASE_MS + addedSeconds * 1000;
   const matchToken = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
@@ -1441,15 +1449,16 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
         `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\n` +
         `⏱️ Added time for the break: **+${addedSeconds}s** (total break: ${Math.round(totalMs / 1000)}s)\n` +
         `🏋️ Train your squad — every rep improves that team's odds of a bonus goal next half! (10s cooldown per person)\n` +
-        `🔄 Each manager gets up to **${MAX_SUBS} substitutions** — swaps a random bench player on for a random starter for the rest of the match.`
+        `🔄 Each manager gets up to **${MAX_SUBS} substitutions** — pick exactly who comes off and who comes on.`
       )
       .setColor(0xf1c40f)],
     components: [row1, row2],
   });
 
   const trainingCounts = { A: 0, B: 0 };
-  const subs = { A: [], B: [] }; // arrays of { inPlayer }, up to MAX_SUBS each
+  const subs = { A: [], B: [] }; // arrays of { outName, inPlayer }, up to MAX_SUBS each
   const usedBenchIds = { A: new Set(), B: new Set() };
+  const usedOutNames = { A: new Set(), B: new Set() };
   const lastClick = new Map(); // userId -> timestamp
 
   const collector = halfTimeMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: totalMs });
@@ -1457,20 +1466,41 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
     const isSub = btn.customId.startsWith('sub_');
     const side = btn.customId.includes('_A_') ? 'A' : 'B';
     const ownerId = side === 'A' ? teamAId : teamBId;
+    const teamName = side === 'A' ? teamA.name : teamB.name;
     if (btn.user.id !== ownerId) {
-      await btn.reply({ content: `🚫 Only the ${side === 'A' ? teamA.name : teamB.name} manager can manage this team!`, ephemeral: true }).catch(() => {});
+      await btn.reply({ content: `🚫 Only the ${teamName} manager can manage this team!`, ephemeral: true }).catch(() => {});
       return;
     }
 
     if (isSub) {
+      const squad = side === 'A' ? squadA : squadB;
       const bench = (side === 'A' ? benchA : benchB).filter((p) => !usedBenchIds[side].has(p.id));
-      const teamName = side === 'A' ? teamA.name : teamB.name;
+      const eligibleOut = squad.filter((p) => p.position !== 'GK' && !usedOutNames[side].has(p.name));
       if (subs[side].length >= MAX_SUBS) { await btn.reply({ content: `You've already used all ${MAX_SUBS} substitutions this match!`, ephemeral: true }).catch(() => {}); return; }
       if (bench.length === 0) { await btn.reply({ content: 'No bench players left to sub on.', ephemeral: true }).catch(() => {}); return; }
-      const inPlayer = bench[Math.floor(Math.random() * bench.length)];
+      if (eligibleOut.length === 0) { await btn.reply({ content: 'No eligible starters left to sub off.', ephemeral: true }).catch(() => {}); return; }
+
+      // Step 1: pick who comes ON
+      const inSelect = new StringSelectMenuBuilder().setCustomId(`subin_${matchToken}`).setPlaceholder('Who comes ON?')
+        .addOptions(bench.slice(0, 25).map((p) => ({ label: `${p.name} (${p.position}, ${p.rating})`, value: p.id })));
+      const inReply = await btn.reply({ content: `🔄 **${teamName}** substitution — choose who comes **ON**:`, components: [new ActionRowBuilder().addComponents(inSelect)], ephemeral: true, fetchReply: true }).catch(() => null);
+      if (!inReply) return;
+      const inPick = await inReply.awaitMessageComponent({ filter: (i) => i.user.id === btn.user.id, componentType: ComponentType.StringSelect, time: 25000 }).catch(() => null);
+      if (!inPick) { await btn.editReply({ content: '⏳ Substitution timed out — try again.', components: [] }).catch(() => {}); return; }
+      const inPlayer = bench.find((p) => p.id === inPick.values[0]);
+
+      // Step 2: pick who comes OFF
+      const outSelect = new StringSelectMenuBuilder().setCustomId(`subout_${matchToken}`).setPlaceholder('Who comes OFF?')
+        .addOptions(eligibleOut.slice(0, 25).map((p) => ({ label: `${p.name} (${p.position}, ${p.rating})`, value: p.name })));
+      await inPick.update({ content: `🔄 **${teamName}** — now choose who comes **OFF** for **${inPlayer.name}**:`, components: [new ActionRowBuilder().addComponents(outSelect)] }).catch(() => {});
+      const outPick = await inReply.awaitMessageComponent({ filter: (i) => i.user.id === btn.user.id, componentType: ComponentType.StringSelect, time: 25000 }).catch(() => null);
+      if (!outPick) { await btn.editReply({ content: '⏳ Substitution timed out — try again.', components: [] }).catch(() => {}); return; }
+      const outName = outPick.values[0];
+
       usedBenchIds[side].add(inPlayer.id);
-      subs[side].push({ inPlayer });
-      await btn.reply({ content: `🔄 Substitution ${subs[side].length}/${MAX_SUBS} queued for **${teamName}** — will be revealed at kickoff of the second half!`, ephemeral: true }).catch(() => {});
+      usedOutNames[side].add(outName);
+      subs[side].push({ outName, inPlayer });
+      await outPick.update({ content: `✅ Substitution ${subs[side].length}/${MAX_SUBS} queued for **${teamName}**: ${outName} ➡️ **${inPlayer.name}** — revealed at second-half kickoff!`, components: [] }).catch(() => {});
       return;
     }
 
@@ -1483,7 +1513,6 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
     }
     lastClick.set(btn.user.id, now);
     trainingCounts[side]++;
-    const teamName = side === 'A' ? teamA.name : teamB.name;
     await btn.reply({ content: `💪 Trained **${teamName}**! (${trainingCounts[side]} reps banked)`, ephemeral: true }).catch(() => {});
   });
 
@@ -1590,7 +1619,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   let addedSeconds = 10;
   let subs = { A: [], B: [] };
   try {
-    ({ trainingCounts, addedSeconds, subs } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB));
+    ({ trainingCounts, addedSeconds, subs } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB, squadA, squadB));
   } catch (err) {
     console.error('Half-time training failed, continuing without it:', err);
     await delay(HALF_TIME_BASE_MS);
@@ -1600,15 +1629,12 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   // player, and retroactively rename the subbed-off player in any already-
   // generated second-half moments so the sub actually shows up in commentary.
   function applySubs(squad, subList, sideLetter) {
-    const appliedIdx = new Set();
     const changes = [];
     for (const subInfo of subList) {
-      let idx = squad.findIndex((p, i) => p.position !== 'GK' && !appliedIdx.has(i));
-      if (idx === -1) idx = squad.findIndex((p) => p.position !== 'GK');
-      if (idx === -1) idx = 0;
+      const idx = squad.findIndex((p) => p.name === subInfo.outName);
+      if (idx === -1) continue; // shouldn't happen — chosen out-player already validated at pick time
       const outPlayer = squad[idx];
       squad[idx] = subInfo.inPlayer;
-      appliedIdx.add(idx);
       for (const ev of secondHalfEvents) { if (ev.side === sideLetter && ev.player === outPlayer.name) ev.player = subInfo.inPlayer.name; }
       changes.push({ out: outPlayer, in: subInfo.inPlayer });
     }
@@ -2248,8 +2274,8 @@ client.on('interactionCreate', async (interaction) => {
             team.squad.push(id);
           }
           squadNote = DEFAULT_SQUADS[country.code]
-            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI${bench.length ? ` plus ${bench.length} real bench players ready to substitute in` : ''}!`
-            : `\nYour squad has been auto-filled with a generated 11 (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
+            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI plus ${bench.length} real bench players ready to substitute in!`
+            : `\nYour squad has been auto-filled with a generated 11 plus ${bench.length} generated bench players (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
         } else if (isCountryChange) {
           squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
         }
