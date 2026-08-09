@@ -1505,17 +1505,33 @@ async function sendCareerLine(dmChannel, ev, scoreLine) {
 
 // Plays one full animated career match in the person's DMs. Returns the
 // number of goals the career player personally scored, and whether they won.
-async function playCareerMatch(dmChannel, career, opponentLabel, oppRatingBase) {
+async function playCareerMatch(dmChannel, career, opponentLabel, oppRatingBase, scripted) {
   const myTeamLabel = career.teamName || 'Trialists XI';
   const squadMine = generateCareerTeammates(career);
   const squadOpp = generateCareerOpponent(oppRatingBase);
-  const ratingMine = teamOverallRating(squadMine);
-  const ratingOpp = teamOverallRating(squadOpp);
-  const goalsMine = baseGoalCount(ratingMine, ratingOpp);
-  const goalsOpp = baseGoalCount(ratingOpp, ratingMine);
 
-  const goalEventsMine = generateGoalEvents(goalsMine, squadMine, myTeamLabel, 'A', squadOpp, opponentLabel);
-  const goalEventsOpp = generateGoalEvents(goalsOpp, squadOpp, opponentLabel, 'B', squadMine, myTeamLabel);
+  let goalEventsMine, goalEventsOpp;
+  if (scripted) {
+    // Scripted arc: you go 2-0 up, they claw it back to 2-2, then YOU score the late winner (3-2)
+    const teammates = squadMine.filter((p) => p.name !== career.name && p.position !== 'GK');
+    const pickTeammate = () => (teammates.length ? teammates[Math.floor(Math.random() * teammates.length)].name : myTeamLabel);
+    goalEventsMine = [
+      { minute: 15, side: 'A', type: 'goal', player: pickTeammate(), isPenalty: false },
+      { minute: 35, side: 'A', type: 'goal', player: pickTeammate(), isPenalty: false },
+      { minute: 85, side: 'A', type: 'goal', player: career.name, isPenalty: false },
+    ];
+    goalEventsOpp = [
+      { minute: 55, side: 'B', type: 'goal', player: pickScorer(squadOpp, opponentLabel), isPenalty: false },
+      { minute: 70, side: 'B', type: 'goal', player: pickScorer(squadOpp, opponentLabel), isPenalty: false },
+    ];
+  } else {
+    const ratingMine = teamOverallRating(squadMine);
+    const ratingOpp = teamOverallRating(squadOpp);
+    const goalsMine = baseGoalCount(ratingMine, ratingOpp);
+    const goalsOpp = baseGoalCount(ratingOpp, ratingMine);
+    goalEventsMine = generateGoalEvents(goalsMine, squadMine, myTeamLabel, 'A', squadOpp, opponentLabel);
+    goalEventsOpp = generateGoalEvents(goalsOpp, squadOpp, opponentLabel, 'B', squadMine, myTeamLabel);
+  }
   const flavorEvents = generateFlavorEvents(squadMine, squadOpp, myTeamLabel, opponentLabel);
   const allEvents = [...goalEventsMine, ...goalEventsOpp, ...flavorEvents].sort((a, b) => a.minute - b.minute);
   const firstHalf = allEvents.filter((e) => e.minute <= 45);
@@ -1552,6 +1568,33 @@ async function playCareerMatch(dmChannel, career, opponentLabel, oppRatingBase) 
   });
 
   return { myGoals, result };
+}
+
+// Lets the person pick which club/country signs them via DM buttons —
+// a random sample of 4 options, plus a "Surprise me" wildcard.
+async function promptTeamChoice(dm, userId) {
+  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const pool = [...CAREER_TEAM_NAMES];
+  const options = [];
+  while (options.length < 4 && pool.length) {
+    options.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  }
+  const row = new ActionRowBuilder().addComponents(
+    ...options.map((teamName, i) => new ButtonBuilder().setCustomId(`signteam_${i}_${token}`).setLabel(teamName).setStyle(ButtonStyle.Primary)),
+    new ButtonBuilder().setCustomId(`signteam_random_${token}`).setLabel('🎲 Surprise me').setStyle(ButtonStyle.Secondary),
+  );
+  const msg = await dm.send({
+    embeds: [new EmbedBuilder().setTitle('🎉 A scout was watching!').setDescription('Which team signs you?').setColor(0xffd700)],
+    components: [row],
+  });
+  const pick = await msg.awaitMessageComponent({ filter: (i) => i.user.id === userId, time: 60000 }).catch(() => null);
+  if (!pick) {
+    await msg.edit({ components: [] }).catch(() => {});
+    return options[Math.floor(Math.random() * options.length)];
+  }
+  const chosen = pick.customId.includes('_random_') ? options[Math.floor(Math.random() * options.length)] : options[parseInt(pick.customId.split('_')[1], 10)];
+  await pick.update({ content: `✅ Signed with **${chosen}**!`, embeds: [], components: [] }).catch(() => {});
+  return chosen;
 }
 
 function seedStarPlayers() {
@@ -1935,6 +1978,19 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const flagA = kind === 'country' ? flagEmoji(teamA.code) : '';
   const flagB = kind === 'country' ? flagEmoji(teamB.code) : '';
 
+  // Career-mode cameo: if anyone's personal career player is signed to
+  // either side (matching by team name), they join that squad for this
+  // match — so career players actually show up in World Cup / Champions
+  // League / Premier League / etc. matches once they're signed.
+  if (!isCity && guildId) {
+    for (const career of Object.values(getGuildCareers(guildId))) {
+      if (career.stage === 'retired' || !career.teamName) continue;
+      const cameoPlayer = { name: career.name, position: career.position, rating: career.rating };
+      if (career.teamName === teamA.name) squadA = [...squadA, cameoPlayer];
+      else if (career.teamName === teamB.name) squadB = [...squadB, cameoPlayer];
+    }
+  }
+
   // ---- Cooldown: 30s minimum gap between matches in this channel ----
   const lastEnd = matchCooldowns.get(channel.id) || 0;
   const waitLeft = MATCH_COOLDOWN_MS - (Date.now() - lastEnd);
@@ -2125,6 +2181,22 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   teamA.wins !== undefined && (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
   teamB.wins !== undefined && (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
   if (!isCity) addCoins(winnerId, 25); // city/league games are for fun only — no coin reward
+
+  // Credit any cameo-ing career players with the appearance/goals from this match
+  if (!isCity && guildId) {
+    for (const career of Object.values(getGuildCareers(guildId))) {
+      if (career.stage === 'retired' || !career.teamName) continue;
+      const onA = career.teamName === teamA.name, onB = career.teamName === teamB.name;
+      if (!onA && !onB) continue;
+      const myGoals = (onA ? goalEventsA : goalEventsB).filter((e) => e.type === 'goal' && e.player === career.name).length;
+      career.appearances++;
+      career.goals += myGoals;
+      const won = (onA && winnerId === teamAId) || (onB && winnerId === teamBId);
+      if (won) career.wins++; else if (goalsA === goalsB) career.draws++; else career.losses++;
+      career.rating = Math.min(99, career.rating + Math.min(3, myGoals) + (won ? 1 : 0));
+    }
+  }
+
   saveData(data);
   matchCooldowns.set(channel.id, Date.now());
 
@@ -2834,7 +2906,7 @@ client.on('interactionCreate', async (interaction) => {
 
         let matchResult;
         try {
-          matchResult = await playCareerMatch(dm, career, opponentLabel, oppRatingBase);
+          matchResult = await playCareerMatch(dm, career, opponentLabel, oppRatingBase, career.stage === 'trial');
         } catch (err) {
           console.error('Career match failed:', err);
           await interaction.followUp({ content: '❌ Something went wrong running your match — try again.', ephemeral: true });
@@ -2851,13 +2923,9 @@ client.on('interactionCreate', async (interaction) => {
 
         const followUpLines = [];
         if (career.stage === 'trial') {
-          if (matchResult.result === 'win' || matchResult.myGoals > 0) {
-            career.stage = 'signed';
-            career.teamName = randomCareerTeamName();
-            followUpLines.push(`🎉 A scout was watching — **${career.teamName}** have signed you to their academy squad!`);
-          } else {
-            followUpLines.push("😬 No offers this time — keep grinding and run `/career play` again to get another trial.");
-          }
+          career.stage = 'signed';
+          career.teamName = await promptTeamChoice(dm, interaction.user.id);
+          followUpLines.push(`🎉 **${career.teamName}** have signed you to their squad — good luck chasing World Cup and Champions League glory!`);
         } else if (career.stage === 'signed' && career.appearances >= 5 && career.goals >= 3) {
           career.stage = 'starting11';
           followUpLines.push(`⭐ Big step up — you've forced your way into **${career.teamName}**'s Starting XI!`);
