@@ -30,7 +30,7 @@ function randomGif(list) { return list[Math.floor(Math.random() * list.length)];
 // ============================================================
 const DERBIES = {
   'es|mx': 'Battle of the Latins 🇪🇸🇲🇽',
-  'fr|de': 'France vs Germany — wait hasnt this happened before 🇫🇷🇩🇪',
+  'fr|de': 'France vs Germany — European Rivalry 🇫🇷🇩🇪',
   'ar|br': 'Superclásico de las Américas 🇦🇷🇧🇷',
   'gb-eng|fr': 'Cross-Channel Clash 🏴󠁧󠁢󠁥󠁮󠁧󠁿🇫🇷',
   'de|nl': 'Der Klassiker 🇩🇪🇳🇱',
@@ -57,14 +57,16 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
-    return { teams: {}, cityTeams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {}, tournamentsCompleted: {} };
+    return { teams: {}, cityTeams: {}, clubs: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {}, tournamentsCompleted: {}, careers: {} };
   }
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
   p.tournaments ??= {};
   p.tournamentsCompleted ??= {};
   p.cityTeams ??= {};
+  p.clubs ??= {};
   p.playerGoals ??= {};
+  p.careers ??= {};
   p.starPlayersSeeded ??= false;
   return p;
 }
@@ -159,6 +161,254 @@ const COUNTRIES = [
   { name: 'Tuvalu', code: 'tv' }, { name: 'Vanuatu', code: 'vu' },
 ];
 
+// ============================================================
+// CLUBS — real club rosters for Champions League / Premier League / Bundesliga
+// (and enough La Liga/Serie A/Ligue 1 sides to fill out Champions League play)
+// ============================================================
+const CLUBS = [
+  { name: 'Arsenal', code: 'arsenal', league: 'Premier League' },
+  { name: 'Manchester City', code: 'mancity', league: 'Premier League' },
+  { name: 'Liverpool', code: 'liverpool', league: 'Premier League' },
+  { name: 'Manchester United', code: 'manutd', league: 'Premier League' },
+  { name: 'Chelsea', code: 'chelsea', league: 'Premier League' },
+  { name: 'Tottenham Hotspur', code: 'tottenham', league: 'Premier League' },
+  { name: 'Bayern Munich', code: 'bayern', league: 'Bundesliga' },
+  { name: 'Borussia Dortmund', code: 'dortmund', league: 'Bundesliga' },
+  { name: 'RB Leipzig', code: 'leipzig', league: 'Bundesliga' },
+  { name: 'Bayer Leverkusen', code: 'leverkusen', league: 'Bundesliga' },
+  { name: 'Real Madrid', code: 'realmadrid', league: 'La Liga' },
+  { name: 'Barcelona', code: 'barcelona', league: 'La Liga' },
+  { name: 'Atletico Madrid', code: 'atleticomadrid', league: 'La Liga' },
+  { name: 'Juventus', code: 'juventus', league: 'Serie A' },
+  { name: 'Inter Milan', code: 'intermilan', league: 'Serie A' },
+  { name: 'AC Milan', code: 'acmilan', league: 'Serie A' },
+  { name: 'Paris Saint-Germain', code: 'psg', league: 'Ligue 1' },
+];
+
+const DEFAULT_CLUB_SQUADS = {
+  arsenal: [
+    { name: 'David Raya', position: 'GK', rating: 83 },
+    { name: 'Ben White', position: 'DEF', rating: 82 },
+    { name: 'William Saliba', position: 'DEF', rating: 87 },
+    { name: 'Gabriel Magalhães', position: 'DEF', rating: 85 },
+    { name: 'Riccardo Calafiori', position: 'DEF', rating: 81 },
+    { name: 'Declan Rice', position: 'MID', rating: 88 },
+    { name: 'Martin Ødegaard', position: 'MID', rating: 88 },
+    { name: 'Mikel Merino', position: 'MID', rating: 81 },
+    { name: 'Bukayo Saka', position: 'FWD', rating: 88 },
+    { name: 'Kai Havertz', position: 'FWD', rating: 84 },
+    { name: 'Gabriel Martinelli', position: 'FWD', rating: 85 },
+  ],
+  mancity: [
+    { name: 'Ederson', position: 'GK', rating: 87 },
+    { name: 'Kyle Walker', position: 'DEF', rating: 82 },
+    { name: 'Rúben Dias', position: 'DEF', rating: 88 },
+    { name: 'John Stones', position: 'DEF', rating: 84 },
+    { name: 'Josko Gvardiol', position: 'DEF', rating: 86 },
+    { name: 'Rodri', position: 'MID', rating: 90 },
+    { name: 'İlkay Gündoğan', position: 'MID', rating: 83 },
+    { name: 'Kevin De Bruyne', position: 'MID', rating: 89 },
+    { name: 'Phil Foden', position: 'FWD', rating: 87 },
+    { name: 'Erling Haaland', position: 'FWD', rating: 92 },
+    { name: 'Jérémy Doku', position: 'FWD', rating: 84 },
+  ],
+  liverpool: [
+    { name: 'Alisson', position: 'GK', rating: 88 },
+    { name: 'Trent Alexander-Arnold', position: 'DEF', rating: 87 },
+    { name: 'Virgil van Dijk', position: 'DEF', rating: 89 },
+    { name: 'Ibrahima Konaté', position: 'DEF', rating: 84 },
+    { name: 'Andrew Robertson', position: 'DEF', rating: 84 },
+    { name: 'Alexis Mac Allister', position: 'MID', rating: 86 },
+    { name: 'Ryan Gravenberch', position: 'MID', rating: 81 },
+    { name: 'Dominik Szoboszlai', position: 'MID', rating: 83 },
+    { name: 'Mohamed Salah', position: 'FWD', rating: 89 },
+    { name: 'Darwin Núñez', position: 'FWD', rating: 82 },
+    { name: 'Luis Díaz', position: 'FWD', rating: 87 },
+  ],
+  manutd: [
+    { name: 'André Onana', position: 'GK', rating: 81 },
+    { name: 'Diogo Dalot', position: 'DEF', rating: 79 },
+    { name: 'Lisandro Martínez', position: 'DEF', rating: 83 },
+    { name: 'Matthijs de Ligt', position: 'DEF', rating: 83 },
+    { name: 'Noussair Mazraoui', position: 'DEF', rating: 79 },
+    { name: 'Casemiro', position: 'MID', rating: 82 },
+    { name: 'Bruno Fernandes', position: 'MID', rating: 87 },
+    { name: 'Kobbie Mainoo', position: 'MID', rating: 80 },
+    { name: 'Marcus Rashford', position: 'FWD', rating: 84 },
+    { name: 'Rasmus Højlund', position: 'FWD', rating: 79 },
+    { name: 'Alejandro Garnacho', position: 'FWD', rating: 80 },
+  ],
+  chelsea: [
+    { name: 'Robert Sánchez', position: 'GK', rating: 78 },
+    { name: 'Reece James', position: 'DEF', rating: 84 },
+    { name: 'Levi Colwill', position: 'DEF', rating: 80 },
+    { name: 'Wesley Fofana', position: 'DEF', rating: 79 },
+    { name: 'Marc Cucurella', position: 'DEF', rating: 80 },
+    { name: 'Moisés Caicedo', position: 'MID', rating: 85 },
+    { name: 'Enzo Fernández', position: 'MID', rating: 85 },
+    { name: 'Cole Palmer', position: 'MID', rating: 86 },
+    { name: 'Nicolas Jackson', position: 'FWD', rating: 79 },
+    { name: 'Christopher Nkunku', position: 'FWD', rating: 81 },
+    { name: 'Noni Madueke', position: 'FWD', rating: 78 },
+  ],
+  tottenham: [
+    { name: 'Guglielmo Vicario', position: 'GK', rating: 80 },
+    { name: 'Pedro Porro', position: 'DEF', rating: 80 },
+    { name: 'Cristian Romero', position: 'DEF', rating: 85 },
+    { name: 'Micky van de Ven', position: 'DEF', rating: 81 },
+    { name: 'Destiny Udogie', position: 'DEF', rating: 79 },
+    { name: 'Yves Bissouma', position: 'MID', rating: 79 },
+    { name: 'Rodrigo Bentancur', position: 'MID', rating: 80 },
+    { name: 'James Maddison', position: 'MID', rating: 82 },
+    { name: 'Son Heung-min', position: 'FWD', rating: 86 },
+    { name: 'Dominic Solanke', position: 'FWD', rating: 79 },
+    { name: 'Brennan Johnson', position: 'FWD', rating: 79 },
+  ],
+  bayern: [
+    { name: 'Manuel Neuer', position: 'GK', rating: 85 },
+    { name: 'Kim Min-jae', position: 'DEF', rating: 85 },
+    { name: 'Dayot Upamecano', position: 'DEF', rating: 85 },
+    { name: 'Alphonso Davies', position: 'DEF', rating: 85 },
+    { name: 'Josip Stanišić', position: 'DEF', rating: 78 },
+    { name: 'Joshua Kimmich', position: 'MID', rating: 87 },
+    { name: 'Leon Goretzka', position: 'MID', rating: 82 },
+    { name: 'Jamal Musiala', position: 'MID', rating: 89 },
+    { name: 'Serge Gnabry', position: 'FWD', rating: 82 },
+    { name: 'Harry Kane', position: 'FWD', rating: 89 },
+    { name: 'Michael Olise', position: 'FWD', rating: 85 },
+  ],
+  dortmund: [
+    { name: 'Gregor Kobel', position: 'GK', rating: 84 },
+    { name: 'Julian Ryerson', position: 'DEF', rating: 79 },
+    { name: 'Nico Schlotterbeck', position: 'DEF', rating: 82 },
+    { name: 'Waldemar Anton', position: 'DEF', rating: 78 },
+    { name: 'Ramy Bensebaini', position: 'DEF', rating: 80 },
+    { name: 'Emre Can', position: 'MID', rating: 79 },
+    { name: 'Pascal Groß', position: 'MID', rating: 79 },
+    { name: 'Julian Brandt', position: 'MID', rating: 81 },
+    { name: 'Karim Adeyemi', position: 'FWD', rating: 80 },
+    { name: 'Serhou Guirassy', position: 'FWD', rating: 82 },
+    { name: 'Donyell Malen', position: 'FWD', rating: 80 },
+  ],
+  leipzig: [
+    { name: 'Péter Gulácsi', position: 'GK', rating: 78 },
+    { name: 'Lutsharel Geertruida', position: 'DEF', rating: 78 },
+    { name: 'Willi Orbán', position: 'DEF', rating: 79 },
+    { name: 'Castello Lukeba', position: 'DEF', rating: 79 },
+    { name: 'David Raum', position: 'DEF', rating: 80 },
+    { name: 'Xavi Simons', position: 'MID', rating: 85 },
+    { name: 'Kevin Kampl', position: 'MID', rating: 75 },
+    { name: 'Xaver Schlager', position: 'MID', rating: 77 },
+    { name: 'Benjamin Šeško', position: 'FWD', rating: 81 },
+    { name: 'Loïs Openda', position: 'FWD', rating: 83 },
+    { name: 'Antonio Nusa', position: 'FWD', rating: 79 },
+  ],
+  leverkusen: [
+    { name: 'Lukáš Hrádecký', position: 'GK', rating: 79 },
+    { name: 'Jonathan Tah', position: 'DEF', rating: 82 },
+    { name: 'Edmond Tapsoba', position: 'DEF', rating: 80 },
+    { name: 'Piero Hincapié', position: 'DEF', rating: 83 },
+    { name: 'Alejandro Grimaldo', position: 'DEF', rating: 82 },
+    { name: 'Granit Xhaka', position: 'MID', rating: 85 },
+    { name: 'Exequiel Palacios', position: 'MID', rating: 79 },
+    { name: 'Florian Wirtz', position: 'MID', rating: 88 },
+    { name: 'Jeremie Frimpong', position: 'FWD', rating: 81 },
+    { name: 'Victor Boniface', position: 'FWD', rating: 80 },
+    { name: 'Amine Adli', position: 'FWD', rating: 77 },
+  ],
+  realmadrid: [
+    { name: 'Thibaut Courtois', position: 'GK', rating: 89 },
+    { name: 'Dani Carvajal', position: 'DEF', rating: 84 },
+    { name: 'Antonio Rüdiger', position: 'DEF', rating: 85 },
+    { name: 'Éder Militão', position: 'DEF', rating: 85 },
+    { name: 'Ferland Mendy', position: 'DEF', rating: 81 },
+    { name: 'Federico Valverde', position: 'MID', rating: 88 },
+    { name: 'Jude Bellingham', position: 'MID', rating: 90 },
+    { name: 'Aurélien Tchouaméni', position: 'MID', rating: 85 },
+    { name: 'Vinícius Júnior', position: 'FWD', rating: 91 },
+    { name: 'Kylian Mbappé', position: 'FWD', rating: 93 },
+    { name: 'Rodrygo', position: 'FWD', rating: 86 },
+  ],
+  barcelona: [
+    { name: 'Marc-André ter Stegen', position: 'GK', rating: 86 },
+    { name: 'Jules Koundé', position: 'DEF', rating: 85 },
+    { name: 'Ronald Araújo', position: 'DEF', rating: 85 },
+    { name: 'Pau Cubarsí', position: 'DEF', rating: 80 },
+    { name: 'Alejandro Balde', position: 'DEF', rating: 81 },
+    { name: 'Pedri', position: 'MID', rating: 87 },
+    { name: 'Frenkie de Jong', position: 'MID', rating: 86 },
+    { name: 'Gavi', position: 'MID', rating: 82 },
+    { name: 'Raphinha', position: 'FWD', rating: 88 },
+    { name: 'Robert Lewandowski', position: 'FWD', rating: 87 },
+    { name: 'Lamine Yamal', position: 'FWD', rating: 89 },
+  ],
+  atleticomadrid: [
+    { name: 'Jan Oblak', position: 'GK', rating: 87 },
+    { name: 'Nahuel Molina', position: 'DEF', rating: 82 },
+    { name: 'José María Giménez', position: 'DEF', rating: 83 },
+    { name: 'Clément Lenglet', position: 'DEF', rating: 78 },
+    { name: 'Reinildo Mandava', position: 'DEF', rating: 77 },
+    { name: 'Koke', position: 'MID', rating: 80 },
+    { name: 'Rodrigo De Paul', position: 'MID', rating: 85 },
+    { name: 'Pablo Barrios', position: 'MID', rating: 78 },
+    { name: 'Antoine Griezmann', position: 'FWD', rating: 87 },
+    { name: 'Julián Álvarez', position: 'FWD', rating: 87 },
+    { name: 'Ángel Correa', position: 'FWD', rating: 79 },
+  ],
+  juventus: [
+    { name: 'Michele Di Gregorio', position: 'GK', rating: 79 },
+    { name: 'Andrea Cambiaso', position: 'DEF', rating: 80 },
+    { name: 'Gleison Bremer', position: 'DEF', rating: 84 },
+    { name: 'Pierre Kalulu', position: 'DEF', rating: 78 },
+    { name: 'Juan Cabal', position: 'DEF', rating: 76 },
+    { name: 'Manuel Locatelli', position: 'MID', rating: 81 },
+    { name: 'Teun Koopmeiners', position: 'MID', rating: 82 },
+    { name: 'Weston McKennie', position: 'MID', rating: 78 },
+    { name: 'Kenan Yıldız', position: 'FWD', rating: 82 },
+    { name: 'Dušan Vlahović', position: 'FWD', rating: 85 },
+    { name: 'Francisco Conceição', position: 'FWD', rating: 78 },
+  ],
+  intermilan: [
+    { name: 'Yann Sommer', position: 'GK', rating: 82 },
+    { name: 'Benjamin Pavard', position: 'DEF', rating: 81 },
+    { name: 'Alessandro Bastoni', position: 'DEF', rating: 85 },
+    { name: 'Francesco Acerbi', position: 'DEF', rating: 80 },
+    { name: 'Federico Dimarco', position: 'DEF', rating: 83 },
+    { name: 'Nicolò Barella', position: 'MID', rating: 86 },
+    { name: 'Hakan Çalhanoğlu', position: 'MID', rating: 86 },
+    { name: 'Henrikh Mkhitaryan', position: 'MID', rating: 80 },
+    { name: 'Lautaro Martínez', position: 'FWD', rating: 87 },
+    { name: 'Marcus Thuram', position: 'FWD', rating: 85 },
+    { name: 'Denzel Dumfries', position: 'FWD', rating: 82 },
+  ],
+  acmilan: [
+    { name: 'Mike Maignan', position: 'GK', rating: 86 },
+    { name: 'Théo Hernández', position: 'DEF', rating: 84 },
+    { name: 'Fikayo Tomori', position: 'DEF', rating: 81 },
+    { name: 'Malick Thiaw', position: 'DEF', rating: 78 },
+    { name: 'Emerson Royal', position: 'DEF', rating: 77 },
+    { name: 'Tijjani Reijnders', position: 'MID', rating: 83 },
+    { name: 'Youssouf Fofana', position: 'MID', rating: 79 },
+    { name: 'Christian Pulisic', position: 'MID', rating: 84 },
+    { name: 'Rafael Leão', position: 'FWD', rating: 85 },
+    { name: 'Álvaro Morata', position: 'FWD', rating: 81 },
+    { name: 'Samuel Chukwueze', position: 'FWD', rating: 78 },
+  ],
+  psg: [
+    { name: 'Gianluigi Donnarumma', position: 'GK', rating: 88 },
+    { name: 'Achraf Hakimi', position: 'DEF', rating: 87 },
+    { name: 'Marquinhos', position: 'DEF', rating: 86 },
+    { name: 'Lucas Hernández', position: 'DEF', rating: 81 },
+    { name: 'Nuno Mendes', position: 'DEF', rating: 84 },
+    { name: 'Vitinha', position: 'MID', rating: 85 },
+    { name: 'João Neves', position: 'MID', rating: 82 },
+    { name: 'Fabián Ruiz', position: 'MID', rating: 82 },
+    { name: 'Ousmane Dembélé', position: 'FWD', rating: 87 },
+    { name: 'Bradley Barcola', position: 'FWD', rating: 80 },
+    { name: 'Désiré Doué', position: 'FWD', rating: 82 },
+  ],
+};
+
 // ---------- Team / player helpers ----------
 // National teams are scoped per Discord server: data.teams[guildId][userId]
 function getGuildTeams(guildId) { data.teams[guildId] = data.teams[guildId] || {}; return data.teams[guildId]; }
@@ -178,6 +428,22 @@ function getSquadPlayers(guildId, userId) {
 // First 11 signed players are the starting XI, anything beyond that is the bench (subs)
 function getStartingXI(guildId, userId) { return getSquadPlayers(guildId, userId).slice(0, 11); }
 function getBench(guildId, userId) { return getSquadPlayers(guildId, userId).slice(11); }
+
+// Club teams (Champions League / Premier League / Bundesliga etc.) — scoped per
+// server just like national teams, but stored separately so a person can hold
+// both a country and a club at once.
+function getGuildClubs(guildId) { data.clubs[guildId] = data.clubs[guildId] || {}; return data.clubs[guildId]; }
+function getClub(guildId, userId) { return getGuildClubs(guildId)[userId] || null; }
+function isClubTaken(guildId, code, excludeUserId) {
+  return Object.entries(getGuildClubs(guildId)).some(([uid, t]) => t.code === code && uid !== excludeUserId);
+}
+function getClubSquadPlayers(guildId, userId) {
+  const team = getClub(guildId, userId);
+  if (!team?.squad) return [];
+  return team.squad.map((id) => data.players[id]).filter(Boolean);
+}
+function getClubStartingXI(guildId, userId) { return getClubSquadPlayers(guildId, userId).slice(0, 11); }
+function getClubBench(guildId, userId) { return getClubSquadPlayers(guildId, userId).slice(11); }
 function makePlayerId(name) {
   return `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Math.floor(Math.random() * 10000)}`;
 }
@@ -1195,6 +1461,99 @@ function getDefaultBench(countryCode) {
   return DEFAULT_BENCH[countryCode] || generateGenericBench(); // real subs for the 53 verified rosters, random subs otherwise
 }
 
+// ============================================================
+// CAREER MODE — a personal player story, separate from real squads.
+// Trial → signed to a club/country (flavor only) → starting XI → retire,
+// whenever the person chooses. Matches play out fully animated via DM.
+// ============================================================
+function getGuildCareers(guildId) { data.careers[guildId] = data.careers[guildId] || {}; return data.careers[guildId]; }
+function getCareer(guildId, userId) { return getGuildCareers(guildId)[userId] || null; }
+
+const CAREER_TEAM_NAMES = [...CLUBS.map((c) => c.name), ...COUNTRIES.slice(0, 40).map((c) => c.name)];
+function randomCareerTeamName() { return CAREER_TEAM_NAMES[Math.floor(Math.random() * CAREER_TEAM_NAMES.length)]; }
+
+function generateCareerTeammates(career) {
+  const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
+  const myIdx = positions.indexOf(career.position);
+  return positions.map((position, i) => {
+    if (i === myIdx) return { name: career.name, position: career.position, rating: career.rating };
+    return {
+      name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
+      position,
+      rating: Math.max(50, Math.min(90, career.rating + Math.floor(Math.random() * 11) - 6)),
+    };
+  });
+}
+function generateCareerOpponent(baseRating) {
+  const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
+  return positions.map((position) => ({
+    name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
+    position,
+    rating: Math.max(45, Math.min(95, baseRating + Math.floor(Math.random() * 11) - 5)),
+  }));
+}
+async function sendCareerLine(dmChannel, ev, scoreLine) {
+  const text = commentaryLine(ev, null) + (scoreLine ? `\n${scoreLine}` : '');
+  if (ev.type === 'goal') {
+    await dmChannel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
+  } else if (ev.type === 'save') {
+    await dmChannel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
+  } else {
+    await dmChannel.send(text);
+  }
+}
+
+// Plays one full animated career match in the person's DMs. Returns the
+// number of goals the career player personally scored, and whether they won.
+async function playCareerMatch(dmChannel, career, opponentLabel, oppRatingBase) {
+  const myTeamLabel = career.teamName || 'Trialists XI';
+  const squadMine = generateCareerTeammates(career);
+  const squadOpp = generateCareerOpponent(oppRatingBase);
+  const ratingMine = teamOverallRating(squadMine);
+  const ratingOpp = teamOverallRating(squadOpp);
+  const goalsMine = baseGoalCount(ratingMine, ratingOpp);
+  const goalsOpp = baseGoalCount(ratingOpp, ratingMine);
+
+  const goalEventsMine = generateGoalEvents(goalsMine, squadMine, myTeamLabel, 'A', squadOpp, opponentLabel);
+  const goalEventsOpp = generateGoalEvents(goalsOpp, squadOpp, opponentLabel, 'B', squadMine, myTeamLabel);
+  const flavorEvents = generateFlavorEvents(squadMine, squadOpp, myTeamLabel, opponentLabel);
+  const allEvents = [...goalEventsMine, ...goalEventsOpp, ...flavorEvents].sort((a, b) => a.minute - b.minute);
+  const firstHalf = allEvents.filter((e) => e.minute <= 45);
+  const secondHalf = allEvents.filter((e) => e.minute > 45);
+
+  await dmChannel.send({ embeds: [new EmbedBuilder().setTitle(`⚽ ${myTeamLabel} vs ${opponentLabel}: Kickoff!`).setColor(0x2ecc71)] });
+
+  let runningA = 0, runningB = 0;
+  for (const ev of firstHalf) {
+    await delay(3000);
+    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
+    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
+    await sendCareerLine(dmChannel, ev, scoreLine);
+  }
+
+  await dmChannel.send({ embeds: [new EmbedBuilder().setTitle('🟡 Half-Time').setDescription(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**`).setColor(0xf1c40f)] });
+  await delay(10000);
+  await dmChannel.send({ embeds: [new EmbedBuilder().setTitle('🟢 Second Half — Kickoff!').setColor(0x2ecc71)] });
+
+  for (const ev of secondHalf) {
+    await delay(3000);
+    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
+    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
+    await sendCareerLine(dmChannel, ev, scoreLine);
+  }
+
+  const myGoals = goalEventsMine.filter((e) => e.type === 'goal' && e.player === career.name).length;
+  const result = runningA > runningB ? 'win' : runningA < runningB ? 'loss' : 'draw';
+  const resultEmoji = result === 'win' ? '🏆' : result === 'draw' ? '🤝' : '📉';
+  await dmChannel.send({
+    embeds: [new EmbedBuilder().setTitle(`${resultEmoji} Full-Time`)
+      .setDescription(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**\n\n${myGoals > 0 ? `⚽ You scored ${myGoals} goal${myGoals > 1 ? 's' : ''}!` : 'No goals for you today — there\'s always next match.'}`)
+      .setColor(result === 'win' ? 0xffd700 : result === 'draw' ? 0x95a5a6 : 0xe74c3c)],
+  });
+
+  return { myGoals, result };
+}
+
 function seedStarPlayers() {
   if (data.starPlayersSeeded) return;
   for (const p of STAR_PLAYERS) {
@@ -1564,16 +1923,17 @@ async function runPrediction(channel, teamA, teamB) {
 
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   if (!channel) { console.error('playMatch called with no channel — aborting match.'); return null; }
-  const isCity = options.isCity || false;
+  const kind = options.kind || (options.isCity ? 'city' : 'country'); // 'country' | 'club' | 'city'
+  const isCity = kind === 'city';
   const guildId = channel.guild?.id || channel.guildId;
-  const teamA = isCity ? getCityTeam(teamAId) : getTeam(guildId, teamAId);
-  const teamB = isCity ? getCityTeam(teamBId) : getTeam(guildId, teamBId);
-  let squadA = isCity ? [] : getStartingXI(guildId, teamAId);
-  let squadB = isCity ? [] : getStartingXI(guildId, teamBId);
-  const benchA = isCity ? [] : getBench(guildId, teamAId);
-  const benchB = isCity ? [] : getBench(guildId, teamBId);
-  const flagA = isCity ? '' : flagEmoji(teamA.code);
-  const flagB = isCity ? '' : flagEmoji(teamB.code);
+  const teamA = kind === 'city' ? getCityTeam(teamAId) : kind === 'club' ? getClub(guildId, teamAId) : getTeam(guildId, teamAId);
+  const teamB = kind === 'city' ? getCityTeam(teamBId) : kind === 'club' ? getClub(guildId, teamBId) : getTeam(guildId, teamBId);
+  let squadA = kind === 'city' ? [] : kind === 'club' ? getClubStartingXI(guildId, teamAId) : getStartingXI(guildId, teamAId);
+  let squadB = kind === 'city' ? [] : kind === 'club' ? getClubStartingXI(guildId, teamBId) : getStartingXI(guildId, teamBId);
+  const benchA = kind === 'city' ? [] : kind === 'club' ? getClubBench(guildId, teamAId) : getBench(guildId, teamAId);
+  const benchB = kind === 'city' ? [] : kind === 'club' ? getClubBench(guildId, teamBId) : getBench(guildId, teamBId);
+  const flagA = kind === 'country' ? flagEmoji(teamA.code) : '';
+  const flagB = kind === 'country' ? flagEmoji(teamB.code) : '';
 
   // ---- Cooldown: 30s minimum gap between matches in this channel ----
   const lastEnd = matchCooldowns.get(channel.id) || 0;
@@ -1602,7 +1962,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const secondHalfEvents = allEvents.filter((e) => e.minute > 45);
 
   const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${teamA.name}** vs **${teamB.name}**`).setColor(0x2ecc71);
-  if (!isCity) kickoffEmbed.setThumbnail(cdnFlag(teamA.code));
+  if (kind === 'country') kickoffEmbed.setThumbnail(cdnFlag(teamA.code));
   await channel.send({ embeds: [kickoffEmbed] });
 
   let runningA = 0, runningB = 0;
@@ -1758,7 +2118,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
       { name: `${teamB.name} Scorers`, value: formatScorerList(goalEventsB, flagB), inline: true },
     )
     .setColor(0x2ecc71);
-  if (!isCity) { resultEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) }); resultEmbed.setThumbnail(cdnFlag(teamB.code)); }
+  if (kind === 'country') { resultEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) }); resultEmbed.setThumbnail(cdnFlag(teamB.code)); }
   await channel.send({ embeds: [resultEmbed] });
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
@@ -1780,9 +2140,9 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 // INSTANT (unanimated) MATCH — used for group-stage fixtures, so a
 // full group phase doesn't take forever to play through
 // ============================================================
-function simulateMatchInstant(guildId, teamAId, teamBId) {
-  const ratingA = teamOverallRating(getStartingXI(guildId, teamAId));
-  const ratingB = teamOverallRating(getStartingXI(guildId, teamBId));
+function simulateMatchInstant(guildId, teamAId, teamBId, kind) {
+  const ratingA = teamOverallRating(kind === 'club' ? getClubStartingXI(guildId, teamAId) : getStartingXI(guildId, teamAId));
+  const ratingB = teamOverallRating(kind === 'club' ? getClubStartingXI(guildId, teamBId) : getStartingXI(guildId, teamBId));
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount(ratingA, ratingB));
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount(ratingB, ratingA));
   goalsA = applyOpponentReduction(teamBId, goalsA);
@@ -1819,6 +2179,8 @@ function tournamentDisplayName(t) {
   if (t.type === 'copaamerica') return 'Copa América';
   if (t.type === 'euros') return 'UEFA European Championship';
   if (t.type === 'afcon') return 'Africa Cup of Nations';
+  if (t.type === 'premierleague') return 'Premier League';
+  if (t.type === 'bundesliga') return 'Bundesliga';
   return t.name;
 }
 function getTournament(guildId) { return data.tournaments[guildId] || null; }
@@ -1890,10 +2252,10 @@ async function startNextKnockoutMatch(guild) {
       const channel = await getTournamentChannel(guild);
       if (channel) {
         await channel.send({ embeds: [new EmbedBuilder().setTitle('🥉 Third Place Playoff').setColor(0xcd7f32)] });
-        const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff');
+        const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff', { kind: t.kind });
         recordTournamentMatchStats(t, thirdResult);
         addCoins(thirdResult.winnerId, 5000000);
-        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(guild.id, thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
+        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getCompetitionTeam(t, guild.id, thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
       }
     }
 
@@ -1908,7 +2270,7 @@ async function startNextKnockoutMatch(guild) {
   const match = round[idx];
   const channel = await getTournamentChannel(guild);
   if (!channel) return;
-  const result = await playMatch(channel, match.p1, match.p2, roundNameForSize(round.length * 2));
+  const result = await playMatch(channel, match.p1, match.p2, roundNameForSize(round.length * 2), { kind: t.kind });
   recordTournamentMatchStats(t, result);
   match.winner = result.winnerId;
   match.result = result;
@@ -1944,7 +2306,7 @@ async function announceTournamentAwards(guild, t) {
   if (concedeEntries.length) {
     const [bestTeamId, conceded] = concedeEntries[0];
     const keeperName = (t.keeperByTeam || {})[bestTeamId] || 'Unknown';
-    const teamName = getTeam(guildId, bestTeamId)?.name || 'Unknown';
+    const teamName = getCompetitionTeam(t, guildId, bestTeamId)?.name || 'Unknown';
     gloveLine = `**${keeperName}** (${teamName}) — only ${conceded} conceded all tournament`;
   }
 
@@ -1955,7 +2317,7 @@ async function announceTournamentAwards(guild, t) {
     let r = Math.random() * weighted.reduce((s, e) => s + e.weight, 0);
     let picked = weighted[0];
     for (const e of weighted) { r -= e.weight; if (r <= 0) { picked = e; break; } }
-    const teamName = getTeam(guildId, picked.teamId)?.name || '';
+    const teamName = getCompetitionTeam(t, guildId, picked.teamId)?.name || '';
     gotLine = `**${picked.player}** (${teamName}) — ${picked.et ? `${picked.minute}' (ET)` : formatMinute(picked.minute)}${picked.isPenalty ? ' from the spot' : ''}`;
   }
 
@@ -1976,7 +2338,7 @@ async function crownChampion(guild, championId) {
   const t = getTournament(guild.id);
   t.status = 'completed';
   t.champion = championId;
-  const champTeam = getTeam(guild.id, championId);
+  const champTeam = getCompetitionTeam(t, guild.id, championId);
   champTeam.trophies += 1;
   const CHAMPION_PRIZE_COINS = 53000000;
   addCoins(championId, CHAMPION_PRIZE_COINS);
@@ -2013,7 +2375,7 @@ async function crownGroupWinners(guild, t) {
   const CHAMPION_PRIZE_COINS = winners.length > 1 ? 20000000 : 53000000;
   const lines = [];
   for (const winnerId of winners) {
-    const team = getTeam(guild.id, winnerId);
+    const team = getCompetitionTeam(t, guild.id, winnerId);
     if (!team) continue;
     team.trophies += 1;
     addCoins(winnerId, CHAMPION_PRIZE_COINS);
@@ -2044,8 +2406,13 @@ const typeChoices = [
   { name: 'FIFA World Cup', value: 'worldcup' }, { name: 'Champions League', value: 'championsleague' },
   { name: 'Europa League', value: 'europaleague' }, { name: 'Copa América', value: 'copaamerica' },
   { name: 'UEFA Euros', value: 'euros' }, { name: 'Africa Cup of Nations', value: 'afcon' },
+  { name: 'Premier League', value: 'premierleague' }, { name: 'Bundesliga', value: 'bundesliga' },
   { name: 'Custom', value: 'custom' },
 ];
+// Club-based competitions use /club teams for participants; everything else uses /team (national)
+const CLUB_TOURNAMENT_TYPES = new Set(['championsleague', 'europaleague', 'premierleague', 'bundesliga']);
+function tournamentKindForType(type) { return CLUB_TOURNAMENT_TYPES.has(type) ? 'club' : 'country'; }
+function getCompetitionTeam(t, guildId, userId) { return t.kind === 'club' ? getClub(guildId, userId) : getTeam(guildId, userId); }
 const positionChoices = [
   { name: 'Goalkeeper (GK)', value: 'GK' }, { name: 'Defender (DEF)', value: 'DEF' },
   { name: 'Midfielder (MID)', value: 'MID' }, { name: 'Forward (FWD)', value: 'FWD' },
@@ -2066,6 +2433,23 @@ const slashCommands = [
       .addStringOption((o) => o.setName('country').setDescription('Country name').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('profile').setDescription("View a team's profile.")
       .addUserOption((o) => o.setName('user').setDescription('Whose profile').setRequired(false))),
+
+  new SlashCommandBuilder().setName('club').setDescription('Manage your club team (Champions League / Premier League / Bundesliga etc).')
+    .addSubcommand((s) => s.setName('set').setDescription('Choose the club you represent.')
+      .addStringOption((o) => o.setName('club').setDescription('Club name').setRequired(true).setAutocomplete(true)))
+    .addSubcommand((s) => s.setName('profile').setDescription("View a club team's profile.")
+      .addUserOption((o) => o.setName('user').setDescription('Whose profile').setRequired(false))),
+
+  new SlashCommandBuilder().setName('clubmatch').setDescription('Play a full animated friendly between two club teams.')
+    .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
+
+  new SlashCommandBuilder().setName('career').setDescription('Your personal player career — trial to retirement, played out via DM.')
+    .addSubcommand((s) => s.setName('start').setDescription('Start a new career as a trial player.')
+      .addStringOption((o) => o.setName('name').setDescription('Your player name').setRequired(true))
+      .addStringOption((o) => o.setName('position').setDescription('Your position').setRequired(true).addChoices(...positionChoices)))
+    .addSubcommand((s) => s.setName('play').setDescription('Play your next career match — sent to your DMs.'))
+    .addSubcommand((s) => s.setName('status').setDescription('View your career so far.'))
+    .addSubcommand((s) => s.setName('retire').setDescription('Retire from your career for good (until you /career start again).')),
 
   new SlashCommandBuilder().setName('createplayer').setDescription('Create a custom player. Admin only.')
     .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true))
@@ -2171,6 +2555,11 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.respond(COUNTRIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 25).map((c) => ({ name: c.name, value: c.code })));
         return;
       }
+      if (interaction.commandName === 'club' && focused.name === 'club') {
+        const q = focused.value.toLowerCase();
+        await interaction.respond(CLUBS.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 25).map((c) => ({ name: `${c.name} (${c.league})`, value: c.code })));
+        return;
+      }
       if (interaction.commandName === 'player' && focused.name === 'name') {
         const q = focused.value.toLowerCase();
         const sub = interaction.options.getSubcommand();
@@ -2203,6 +2592,8 @@ client.on('interactionCreate', async (interaction) => {
           '/tournament create/join/leave/creategroups/playgroups/\n' +
           '            standings/advancegroups/start/bracket/status/end\n' +
           '/creategroups (quick group-stage setup, no /tournament create needed)\n' +
+          '/club set, /club profile, /clubmatch\n' +
+          '/career start/play/status/retire\n' +
           '```',
       });
       return;
@@ -2294,6 +2685,185 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Squad Size', value: `${(team.squad || []).length}/16 (11 starters + subs)`, inline: true },
           ).setColor(0x3498db);
         await interaction.reply({ embeds: [embed] });
+        return;
+      }
+    }
+
+    if (name === 'club') {
+      if (sub === 'set') {
+        const code = interaction.options.getString('club');
+        const club = CLUBS.find((c) => c.code === code);
+        if (!club) { await interaction.reply({ content: 'Pick a club from the list.', ephemeral: true }); return; }
+        if (isClubTaken(interaction.guild.id, code, interaction.user.id)) {
+          await interaction.reply({ content: `🚫 **${club.name}** is already taken by another player in this server. Pick a different club.`, ephemeral: true });
+          return;
+        }
+        const guildClubs = getGuildClubs(interaction.guild.id);
+        const existing = guildClubs[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
+        const isClubChange = existing.code && existing.code !== club.code;
+
+        if (isClubChange && existing.squad?.length) {
+          for (const playerId of existing.squad) delete data.players[playerId];
+          existing.squad = [];
+        }
+
+        guildClubs[interaction.user.id] = { ...existing, code: club.code, name: club.name, league: club.league };
+        const team = guildClubs[interaction.user.id];
+
+        let squadNote = '';
+        if (!team.squad || team.squad.length === 0) {
+          team.squad = [];
+          const roster = DEFAULT_CLUB_SQUADS[club.code] || generateGenericSquad();
+          for (const p of roster) {
+            const id = makePlayerId(p.name);
+            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
+            team.squad.push(id);
+          }
+          const bench = generateGenericBench();
+          for (const p of bench) {
+            const id = makePlayerId(p.name);
+            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
+            team.squad.push(id);
+          }
+          squadNote = DEFAULT_CLUB_SQUADS[club.code]
+            ? `\nYour squad has been auto-filled with ${club.name}'s starting XI plus ${bench.length} bench players!`
+            : `\nYour squad has been auto-filled with a generated 11 plus ${bench.length} generated bench players.`;
+        } else if (isClubChange) {
+          squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
+        }
+        saveData(data);
+        await interaction.reply({ content: `✅ You now represent **${club.name}** (${club.league}) in this server!${squadNote}`, embeds: [new EmbedBuilder().setColor(0x2ecc71)] });
+        return;
+      }
+      if (sub === 'profile') {
+        const target = interaction.options.getUser('user') || interaction.user;
+        const team = getClub(interaction.guild.id, target.id);
+        if (!team) { await interaction.reply(`${target.username} hasn't picked a club in this server yet — use /club set.`); return; }
+        const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setDescription(team.league || '')
+          .addFields(
+            { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
+            { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
+            { name: 'Squad Size', value: `${(team.squad || []).length}/16 (11 starters + subs)`, inline: true },
+          ).setColor(0x3498db);
+        await interaction.reply({ embeds: [embed] });
+        return;
+      }
+    }
+
+    if (name === 'clubmatch') {
+      const opponent = interaction.options.getUser('opponent');
+      if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
+      const myClub = getClub(interaction.guild.id, interaction.user.id);
+      const oppClub = getClub(interaction.guild.id, opponent.id);
+      if (!myClub || !oppClub) { await interaction.reply({ content: 'Both players need a club set (/club set) first.', ephemeral: true }); return; }
+      await interaction.reply('⚽ Kicking off...');
+      const matchChannel = await resolveChannel(interaction);
+      if (!matchChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
+      await playMatch(matchChannel, interaction.user.id, opponent.id, `${myClub.name} vs ${oppClub.name}`, { kind: 'club' });
+      return;
+    }
+
+    if (name === 'career') {
+      const guildId = interaction.guild.id;
+      const careers = getGuildCareers(guildId);
+
+      if (sub === 'start') {
+        const existing = careers[interaction.user.id];
+        if (existing && existing.stage !== 'retired') { await interaction.reply({ content: `You already have an active career as **${existing.name}** — /career status to check in, or /career retire to end it first.`, ephemeral: true }); return; }
+        const pName = interaction.options.getString('name').slice(0, 40);
+        const position = interaction.options.getString('position');
+        careers[interaction.user.id] = {
+          name: pName, position, rating: 58, stage: 'trial', teamName: null,
+          appearances: 0, goals: 0, wins: 0, losses: 0, draws: 0,
+        };
+        saveData(data);
+        await interaction.reply({
+          embeds: [new EmbedBuilder().setTitle(`🌱 Welcome, ${pName}!`)
+            .setDescription(`Position: **${position}**\nYou're a trial player hoping to catch a scout's eye. Run \`/career play\` for your first **U18 academy trial match** — it'll play out fully animated in your DMs.`)
+            .setColor(0x2ecc71)],
+        });
+        return;
+      }
+
+      const career = careers[interaction.user.id];
+      if (!career || career.stage === 'retired') { await interaction.reply({ content: 'No active career — start one with `/career start`.', ephemeral: true }); return; }
+
+      if (sub === 'status') {
+        const stageLabel = { trial: '🌱 Trial Player', signed: `✍️ Signed — ${career.teamName}`, starting11: `⭐ Starting XI — ${career.teamName}` }[career.stage] || career.stage;
+        await interaction.reply({
+          embeds: [new EmbedBuilder().setTitle(`${career.name} — Career Status`)
+            .addFields(
+              { name: 'Stage', value: stageLabel, inline: true },
+              { name: 'Position', value: career.position, inline: true },
+              { name: 'Rating', value: `${career.rating}`, inline: true },
+              { name: 'Appearances', value: `${career.appearances}`, inline: true },
+              { name: 'Goals', value: `${career.goals}`, inline: true },
+              { name: 'Record', value: `${career.wins}W-${career.draws}D-${career.losses}L`, inline: true },
+            ).setColor(0x3498db)],
+        });
+        return;
+      }
+
+      if (sub === 'retire') {
+        const summary = `**${career.name}** hangs up the boots after ${career.appearances} appearance${career.appearances === 1 ? '' : 's'}, ${career.goals} goal${career.goals === 1 ? '' : 's'}, finishing as ${career.stage === 'starting11' ? `a starting XI regular for **${career.teamName}**` : career.stage === 'signed' ? `a squad player for **${career.teamName}**` : 'a trialist who never quite broke through'} — rated **${career.rating}** at the end. Thank you for the memories! 👏`;
+        career.stage = 'retired';
+        saveData(data);
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏟️ ${career.name} Retires`).setDescription(summary).setColor(0xf1c40f)] });
+        return;
+      }
+
+      if (sub === 'play') {
+        await interaction.reply({ content: '📬 Check your DMs — your match is starting!', ephemeral: true });
+        let dm;
+        try {
+          dm = await interaction.user.createDM();
+        } catch {
+          await interaction.followUp({ content: "❌ I can't DM you — check your privacy settings allow DMs from server members.", ephemeral: true });
+          return;
+        }
+
+        let opponentLabel;
+        let oppRatingBase;
+        if (career.stage === 'trial') {
+          opponentLabel = 'Rival Academy U18s';
+          oppRatingBase = 58;
+        } else {
+          opponentLabel = randomCareerTeamName();
+          oppRatingBase = career.stage === 'starting11' ? career.rating + 5 : career.rating - 3;
+        }
+
+        let matchResult;
+        try {
+          matchResult = await playCareerMatch(dm, career, opponentLabel, oppRatingBase);
+        } catch (err) {
+          console.error('Career match failed:', err);
+          await interaction.followUp({ content: '❌ Something went wrong running your match — try again.', ephemeral: true });
+          return;
+        }
+
+        career.appearances++;
+        career.goals += matchResult.myGoals;
+        if (matchResult.result === 'win') career.wins++;
+        else if (matchResult.result === 'draw') career.draws++;
+        else career.losses++;
+        let ratingGain = Math.min(3, matchResult.myGoals) + (matchResult.result === 'win' ? 1 : 0);
+        career.rating = Math.min(99, career.rating + ratingGain);
+
+        const followUpLines = [];
+        if (career.stage === 'trial') {
+          if (matchResult.result === 'win' || matchResult.myGoals > 0) {
+            career.stage = 'signed';
+            career.teamName = randomCareerTeamName();
+            followUpLines.push(`🎉 A scout was watching — **${career.teamName}** have signed you to their academy squad!`);
+          } else {
+            followUpLines.push("😬 No offers this time — keep grinding and run `/career play` again to get another trial.");
+          }
+        } else if (career.stage === 'signed' && career.appearances >= 5 && career.goals >= 3) {
+          career.stage = 'starting11';
+          followUpLines.push(`⭐ Big step up — you've forced your way into **${career.teamName}**'s Starting XI!`);
+        }
+        saveData(data);
+        if (followUpLines.length) await dm.send({ embeds: [new EmbedBuilder().setDescription(followUpLines.join('\n')).setColor(0xffd700)] });
         return;
       }
     }
@@ -2519,18 +3089,20 @@ client.on('interactionCreate', async (interaction) => {
       const format = interaction.options.getString('format');
       const size = parseInt(interaction.options.getString('size') || '0', 10) || null;
       const customName = interaction.options.getString('name') || 'Custom Cup';
+      const kind = tournamentKindForType(type);
+      const setCmd = kind === 'club' ? '/club set' : '/team set';
 
-      // Auto-register everyone in this server who already has a national team set —
+      // Auto-register everyone in this server who already has the right kind of team set —
       // no separate /tournament create + /tournament join dance needed.
-      const participants = Object.keys(getGuildTeams(guildId));
-      if (participants.length < 2) { await interaction.reply({ content: 'Need at least 2 people with a team set (`/team set`) in this server before creating groups.', ephemeral: true }); return; }
+      const participants = Object.keys(kind === 'club' ? getGuildClubs(guildId) : getGuildTeams(guildId));
+      if (participants.length < 2) { await interaction.reply({ content: `Need at least 2 people with a ${kind} set (\`${setCmd}\`) in this server before creating groups.`, ephemeral: true }); return; }
       if (participants.length < numGroups * 2) {
-        await interaction.reply({ content: `Only ${participants.length} teams have \`/team set\` in this server — not enough for ${numGroups} groups. Lower the group count or get more people to set a team.`, ephemeral: true });
+        await interaction.reply({ content: `Only ${participants.length} people have \`${setCmd}\` in this server — not enough for ${numGroups} groups. Lower the group count or get more people to set a ${kind}.`, ephemeral: true });
         return;
       }
 
       const t = {
-        type, name: customName, prize, prizeRoleId: null, size, format,
+        type, name: customName, prize, prizeRoleId: null, size, format, kind,
         status: 'registration', participants, groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
       };
       data.tournaments[guildId] = t;
@@ -2545,7 +3117,7 @@ client.on('interactionCreate', async (interaction) => {
       saveData(data);
 
       const letters = 'ABCDEFGH';
-      const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(guildId, id).name).join(', ')}`);
+      const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getCompetitionTeam(t, guildId, id).name).join(', ')}`);
       const nextStep = format === 'groups_only'
         ? 'Run `/tournament playgroups` to simulate the matches — group winners get crowned automatically, no knockout needed.'
         : 'Run `/tournament playgroups` to simulate the matches, then `/tournament advancegroups` to move into the knockout bracket (Round of 32/16, Quarterfinals, Semifinals, Final — with a Third Place Playoff included).';
@@ -2570,15 +3142,17 @@ client.on('interactionCreate', async (interaction) => {
         const prizeRole = interaction.options.getRole('prize_role');
         data.tournaments[guildId] = {
           type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format: 'groups_knockout',
+          kind: tournamentKindForType(type),
           status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
         };
         data.playerGoals[guildId] = {}; // fresh Golden Boot race for this tournament
         saveData(data);
         const t = data.tournaments[guildId];
         const displayName = tournamentDisplayName(t);
+        const setCmd = t.kind === 'club' ? '/club set' : '/team set';
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle(`🏆 ${displayName}`)
-            .setDescription(`Registration open! Need **${size}** teams for the knockout stage (or more if you want a group stage first).\nPrize: ${prize}\nJoin with \`/tournament join\` (set a team with \`/team set\` first).`)
+            .setDescription(`Registration open! Need **${size}** teams for the knockout stage (or more if you want a group stage first).\nPrize: ${prize}\nJoin with \`/tournament join\` (set a ${t.kind} first with \`${setCmd}\`).`)
             .setColor(0x3498db)],
         });
         return;
@@ -2586,11 +3160,12 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'join') {
         const t = getTournament(guildId);
         if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament open for registration.', ephemeral: true }); return; }
-        if (!getTeam(guildId, interaction.user.id)) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
+        const setCmd = t.kind === 'club' ? '/club set' : '/team set';
+        if (!getCompetitionTeam(t, guildId, interaction.user.id)) { await interaction.reply({ content: `Set a ${t.kind} first with ${setCmd}.`, ephemeral: true }); return; }
         if (t.participants.includes(interaction.user.id)) { await interaction.reply({ content: "You're already in.", ephemeral: true }); return; }
         t.participants.push(interaction.user.id);
         saveData(data);
-        await interaction.reply(`✅ ${getTeam(guildId, interaction.user.id).name} joined! (${t.participants.length} teams so far)`);
+        await interaction.reply(`✅ ${getCompetitionTeam(t, guildId, interaction.user.id).name} joined! (${t.participants.length} teams so far)`);
         return;
       }
       if (sub === 'leave') {
@@ -2615,7 +3190,7 @@ client.on('interactionCreate', async (interaction) => {
         t.status = 'groups';
         saveData(data);
         const letters = 'ABCDEFGH';
-        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(guildId, id).name).join(', ')}`);
+        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getCompetitionTeam(t, guildId, id).name).join(', ')}`);
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — Group Stage`).setDescription(lines.join('\n')).setColor(0x3498db)] });
         return;
       }
@@ -2627,7 +3202,7 @@ client.on('interactionCreate', async (interaction) => {
         for (const groupMatches of t.groupMatches) {
           for (const m of groupMatches) {
             if (m.played) continue;
-            const result = simulateMatchInstant(guildId, m.p1, m.p2);
+            const result = simulateMatchInstant(guildId, m.p1, m.p2, t.kind);
             m.goalsA = result.goalsA; m.goalsB = result.goalsB; m.played = true;
           }
         }
@@ -2647,7 +3222,7 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder().setTitle(`📊 ${tournamentDisplayName(t)} — Standings`).setColor(0x3498db);
         t.groups.forEach((g, i) => {
           const table = groupStandings(g, t.groupMatches[i]);
-          const lines = table.map((row, pos) => `${pos + 1}. ${getTeam(guildId, row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
+          const lines = table.map((row, pos) => `${pos + 1}. ${getCompetitionTeam(t, guildId, row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
           embed.addFields({ name: `Group ${letters[i]}`, value: lines.join('\n') });
         });
         await interaction.reply({ embeds: [embed] });
@@ -2695,18 +3270,18 @@ client.on('interactionCreate', async (interaction) => {
         if (t.status === 'registration') { await interaction.reply(`**${tournamentDisplayName(t)}** — Registration: ${t.participants.length} teams joined.`); return; }
         if (t.status === 'groups') { await interaction.reply('Group stage in progress — use `/tournament standings`.'); return; }
         if (t.status === 'completed' && t.champions) {
-          const names = t.champions.map((id) => getTeam(guildId, id)?.name || 'Unknown').join(', ');
+          const names = t.champions.map((id) => getCompetitionTeam(t, guildId, id)?.name || 'Unknown').join(', ');
           await interaction.reply(`**${tournamentDisplayName(t)}** — Completed! Group winners: ${names}`);
           return;
         }
         const currentRound = t.rounds[t.rounds.length - 1];
         const lines = currentRound.map((m) => {
-          const p1Name = getTeam(guildId, m.p1)?.name || '???';
-          const p2Name = getTeam(guildId, m.p2)?.name || '???';
-          return m.winner ? `~~${p1Name} vs ${p2Name}~~ → **${getTeam(guildId, m.winner).name}**` : `${p1Name} vs ${p2Name}`;
+          const p1Name = getCompetitionTeam(t, guildId, m.p1)?.name || '???';
+          const p2Name = getCompetitionTeam(t, guildId, m.p2)?.name || '???';
+          return m.winner ? `~~${p1Name} vs ${p2Name}~~ → **${getCompetitionTeam(t, guildId, m.winner).name}**` : `${p1Name} vs ${p2Name}`;
         });
         const embed = new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(currentRound.length * 2)}`).setDescription(lines.join('\n')).setColor(0x3498db);
-        if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getTeam(guildId, t.champion)?.name || 'Unknown'}` });
+        if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getCompetitionTeam(t, guildId, t.champion)?.name || 'Unknown'}` });
         await interaction.reply({ embeds: [embed] });
         return;
       }
