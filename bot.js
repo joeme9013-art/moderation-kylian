@@ -1597,6 +1597,89 @@ async function promptTeamChoice(dm, userId) {
   return chosen;
 }
 
+function careerRetireSummary(career) {
+  const roleDesc = career.stage === 'starting11' ? `a starting XI regular for **${career.teamName}**`
+    : career.stage === 'signed' ? `a squad player for **${career.teamName}**` : 'a trialist who never quite broke through';
+  return `**${career.name}** hangs up the boots after ${career.appearances} appearance${career.appearances === 1 ? '' : 's'}, ${career.goals} goal${career.goals === 1 ? '' : 's'}, finishing as ${roleDesc} — rated **${career.rating}** at the end. Thank you for the memories! 👏`;
+}
+
+// Plays one match, applies stage progression, then offers Continue/Status/Retire
+// buttons right under the result so the whole journey can run entirely in DMs.
+async function runCareerTurn(dm, guildId, userId, career) {
+  let opponentLabel, oppRatingBase;
+  if (career.stage === 'trial') {
+    opponentLabel = 'Rival Academy U18s';
+    oppRatingBase = 58;
+  } else {
+    opponentLabel = randomCareerTeamName();
+    oppRatingBase = career.stage === 'starting11' ? career.rating + 5 : career.rating - 3;
+  }
+
+  const matchResult = await playCareerMatch(dm, career, opponentLabel, oppRatingBase, career.stage === 'trial');
+
+  career.appearances++;
+  career.goals += matchResult.myGoals;
+  if (matchResult.result === 'win') career.wins++;
+  else if (matchResult.result === 'draw') career.draws++;
+  else career.losses++;
+  career.rating = Math.min(99, career.rating + Math.min(3, matchResult.myGoals) + (matchResult.result === 'win' ? 1 : 0));
+
+  const followUpLines = [];
+  if (career.stage === 'trial') {
+    career.stage = 'signed';
+    career.teamName = await promptTeamChoice(dm, userId);
+    followUpLines.push(`🎉 **${career.teamName}** have signed you to their squad — good luck chasing World Cup and Champions League glory!`);
+  } else if (career.stage === 'signed' && career.appearances >= 5 && career.goals >= 3) {
+    career.stage = 'starting11';
+    followUpLines.push(`⭐ Big step up — you've forced your way into **${career.teamName}**'s Starting XI!`);
+  }
+  saveData(data);
+  if (followUpLines.length) await dm.send({ embeds: [new EmbedBuilder().setDescription(followUpLines.join('\n')).setColor(0xffd700)] });
+
+  // ---- Continue / Status / Retire, right under the result ----
+  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`career_continue_${token}`).setLabel('▶️ Continue Journey').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`career_status_${token}`).setLabel('📊 Status').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`career_retire_${token}`).setLabel('🛑 Retire').setStyle(ButtonStyle.Danger),
+  );
+  const promptMsg = await dm.send({ content: 'What next?', components: [row] });
+  const collector = promptMsg.createMessageComponentCollector({ componentType: ComponentType.Button, filter: (i) => i.user.id === userId, time: 10 * 60 * 1000 });
+
+  collector.on('collect', async (btn) => {
+    if (btn.customId.startsWith('career_status_')) {
+      const stageLabel = { trial: '🌱 Trial Player', signed: `✍️ Signed — ${career.teamName}`, starting11: `⭐ Starting XI — ${career.teamName}` }[career.stage] || career.stage;
+      await btn.reply({
+        embeds: [new EmbedBuilder().setTitle(`${career.name} — Career Status`)
+          .addFields(
+            { name: 'Stage', value: stageLabel, inline: true },
+            { name: 'Position', value: career.position, inline: true },
+            { name: 'Rating', value: `${career.rating}`, inline: true },
+            { name: 'Appearances', value: `${career.appearances}`, inline: true },
+            { name: 'Goals', value: `${career.goals}`, inline: true },
+            { name: 'Record', value: `${career.wins}W-${career.draws}D-${career.losses}L`, inline: true },
+          ).setColor(0x3498db)],
+        ephemeral: true,
+      }).catch(() => {});
+      return;
+    }
+    collector.stop();
+    await promptMsg.edit({ components: [] }).catch(() => {});
+    if (btn.customId.startsWith('career_retire_')) {
+      career.stage = 'retired';
+      saveData(data);
+      await btn.update({ content: null, embeds: [new EmbedBuilder().setTitle(`🏟️ ${career.name} Retires`).setDescription(careerRetireSummary(career)).setColor(0xf1c40f)], components: [] }).catch(() => {});
+      return;
+    }
+    // Continue
+    await btn.update({ content: '⚽ Next match incoming...', components: [] }).catch(() => {});
+    await runCareerTurn(dm, guildId, userId, career).catch((err) => console.error('Career turn failed:', err));
+  });
+  collector.on('end', async (collected) => {
+    if (collected.size === 0) await promptMsg.edit({ content: 'No response — run `/career play` whenever you want to continue.', components: [] }).catch(() => {});
+  });
+}
+
 function seedStarPlayers() {
   if (data.starPlayersSeeded) return;
   for (const p of STAR_PLAYERS) {
@@ -2877,10 +2960,9 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (sub === 'retire') {
-        const summary = `**${career.name}** hangs up the boots after ${career.appearances} appearance${career.appearances === 1 ? '' : 's'}, ${career.goals} goal${career.goals === 1 ? '' : 's'}, finishing as ${career.stage === 'starting11' ? `a starting XI regular for **${career.teamName}**` : career.stage === 'signed' ? `a squad player for **${career.teamName}**` : 'a trialist who never quite broke through'} — rated **${career.rating}** at the end. Thank you for the memories! 👏`;
         career.stage = 'retired';
         saveData(data);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏟️ ${career.name} Retires`).setDescription(summary).setColor(0xf1c40f)] });
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏟️ ${career.name} Retires`).setDescription(careerRetireSummary(career)).setColor(0xf1c40f)] });
         return;
       }
 
@@ -2893,45 +2975,12 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.followUp({ content: "❌ I can't DM you — check your privacy settings allow DMs from server members.", ephemeral: true });
           return;
         }
-
-        let opponentLabel;
-        let oppRatingBase;
-        if (career.stage === 'trial') {
-          opponentLabel = 'Rival Academy U18s';
-          oppRatingBase = 58;
-        } else {
-          opponentLabel = randomCareerTeamName();
-          oppRatingBase = career.stage === 'starting11' ? career.rating + 5 : career.rating - 3;
-        }
-
-        let matchResult;
         try {
-          matchResult = await playCareerMatch(dm, career, opponentLabel, oppRatingBase, career.stage === 'trial');
+          await runCareerTurn(dm, guildId, interaction.user.id, career);
         } catch (err) {
           console.error('Career match failed:', err);
           await interaction.followUp({ content: '❌ Something went wrong running your match — try again.', ephemeral: true });
-          return;
         }
-
-        career.appearances++;
-        career.goals += matchResult.myGoals;
-        if (matchResult.result === 'win') career.wins++;
-        else if (matchResult.result === 'draw') career.draws++;
-        else career.losses++;
-        let ratingGain = Math.min(3, matchResult.myGoals) + (matchResult.result === 'win' ? 1 : 0);
-        career.rating = Math.min(99, career.rating + ratingGain);
-
-        const followUpLines = [];
-        if (career.stage === 'trial') {
-          career.stage = 'signed';
-          career.teamName = await promptTeamChoice(dm, interaction.user.id);
-          followUpLines.push(`🎉 **${career.teamName}** have signed you to their squad — good luck chasing World Cup and Champions League glory!`);
-        } else if (career.stage === 'signed' && career.appearances >= 5 && career.goals >= 3) {
-          career.stage = 'starting11';
-          followUpLines.push(`⭐ Big step up — you've forced your way into **${career.teamName}**'s Starting XI!`);
-        }
-        saveData(data);
-        if (followUpLines.length) await dm.send({ embeds: [new EmbedBuilder().setDescription(followUpLines.join('\n')).setColor(0xffd700)] });
         return;
       }
     }
