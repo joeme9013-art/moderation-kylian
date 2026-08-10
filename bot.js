@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder, InteractionContextType,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -1680,6 +1680,172 @@ async function runCareerTurn(dm, guildId, userId, career) {
   });
 }
 
+// A live decision moment: the ball breaks to the career player — shoot
+// themselves (higher variance, personal glory) or pass to a teammate
+// (steadier, but someone else gets the goal).
+async function presentPassOrShoot(dm, userId, career, squadMine, myTeamLabel, myRating, oppRatingBase) {
+  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`bigchance_shoot_${token}`).setLabel('⚽ Shoot').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`bigchance_pass_${token}`).setLabel('🔁 Pass').setStyle(ButtonStyle.Primary),
+  );
+  const msg = await dm.send({
+    embeds: [new EmbedBuilder().setTitle('🔥 Big Chance!').setDescription(`The ball breaks to **${career.name}** in the box! Shoot yourself, or pass it off to a teammate?`).setColor(0xe67e22)],
+    components: [row],
+  });
+  const pick = await msg.awaitMessageComponent({ filter: (i) => i.user.id === userId, time: 20000 }).catch(() => null);
+  const choice = pick ? (pick.customId.includes('_shoot_') ? 'shoot' : 'pass') : 'shoot';
+  if (pick) await pick.update({ components: [] }).catch(() => {});
+  else await msg.edit({ components: [] }).catch(() => {});
+
+  if (choice === 'shoot') {
+    const chance = Math.min(0.75, Math.max(0.25, 0.45 + (myRating - oppRatingBase) / 150));
+    if (Math.random() < chance) {
+      await dm.send(`⚽ **${career.name}** SHOOTS... and SCORES! What a finish!`);
+      return { scored: true, scorer: career.name };
+    }
+    await dm.send(`❌ **${career.name}** shoots... but it's off target! So close!`);
+    return { scored: false, scorer: null };
+  }
+  const teammates = squadMine.filter((p) => p.name !== career.name);
+  const teammate = teammates.length ? teammates[Math.floor(Math.random() * teammates.length)].name : myTeamLabel;
+  if (Math.random() < 0.5) {
+    await dm.send(`🔁 **${career.name}** squares it across... **${teammate}** slots it home!`);
+    return { scored: true, scorer: teammate };
+  }
+  await dm.send(`🔁 **${career.name}** lays it off to **${teammate}**... but the effort is blocked!`);
+  return { scored: false, scorer: null };
+}
+
+// One World Cup match: normal simulation plus one guaranteed live
+// Pass-or-Shoot decision moment mid-second-half.
+async function playWorldCupMatch(dm, userId, career, opponentLabel, oppRatingBase, roundLabel) {
+  const myTeamLabel = career.teamName;
+  const squadMine = generateCareerTeammates(career);
+  const squadOpp = generateCareerOpponent(oppRatingBase);
+  const ratingMine = teamOverallRating(squadMine);
+  const ratingOpp = teamOverallRating(squadOpp);
+  const goalsMine = baseGoalCount(ratingMine, ratingOpp);
+  const goalsOpp = baseGoalCount(ratingOpp, ratingMine);
+  const goalEventsMine = generateGoalEvents(goalsMine, squadMine, myTeamLabel, 'A', squadOpp, opponentLabel);
+  const goalEventsOpp = generateGoalEvents(goalsOpp, squadOpp, opponentLabel, 'B', squadMine, myTeamLabel);
+  const flavorEvents = generateFlavorEvents(squadMine, squadOpp, myTeamLabel, opponentLabel);
+  const allEvents = [...goalEventsMine, ...goalEventsOpp, ...flavorEvents].sort((a, b) => a.minute - b.minute);
+  const bigChanceMinute = 50 + Math.floor(Math.random() * 26); // 50'-75'
+  const beforeChance = allEvents.filter((e) => e.minute < bigChanceMinute);
+  const afterChance = allEvents.filter((e) => e.minute >= bigChanceMinute);
+
+  await dm.send({ embeds: [new EmbedBuilder().setTitle(`⚽ ${roundLabel}: ${myTeamLabel} vs ${opponentLabel}`).setColor(0x2ecc71)] });
+
+  let runningA = 0, runningB = 0;
+  for (const ev of beforeChance) {
+    await delay(3000);
+    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
+    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
+    await sendCareerLine(dm, ev, scoreLine);
+  }
+
+  await delay(2000);
+  const chanceResult = await presentPassOrShoot(dm, userId, career, squadMine, myTeamLabel, career.rating, oppRatingBase);
+  let bigChanceScorer = null;
+  if (chanceResult.scored) {
+    runningA++;
+    bigChanceScorer = chanceResult.scorer;
+    await dm.send(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**`);
+  }
+
+  for (const ev of afterChance) {
+    await delay(3000);
+    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
+    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
+    await sendCareerLine(dm, ev, scoreLine);
+  }
+
+  let myGoals = goalEventsMine.filter((e) => e.type === 'goal' && e.player === career.name).length;
+  if (bigChanceScorer === career.name) myGoals++;
+  const result = runningA > runningB ? 'win' : runningA < runningB ? 'loss' : 'draw';
+  const resultEmoji = result === 'win' ? '🏆' : result === 'draw' ? '🤝' : '📉';
+  await dm.send({
+    embeds: [new EmbedBuilder().setTitle(`${resultEmoji} Full-Time — ${roundLabel}`)
+      .setDescription(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**\n\n${myGoals > 0 ? `⚽ You scored ${myGoals} goal${myGoals > 1 ? 's' : ''}!` : "No goals for you personally today."}`)
+      .setColor(result === 'win' ? 0xffd700 : result === 'draw' ? 0x95a5a6 : 0xe74c3c)],
+  });
+
+  return { myGoals, result, goalsFor: runningA, goalsAgainst: runningB };
+}
+
+async function careerPenaltyShootout(dm, myTeamLabel, opponentLabel) {
+  let mine = 0, theirs = 0;
+  for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) mine++; if (Math.random() < 0.75) theirs++; }
+  while (mine === theirs) { if (Math.random() < 0.5) mine++; else theirs++; }
+  await dm.send({ embeds: [new EmbedBuilder().setTitle('🥅 Penalty Shootout').setDescription(`**${myTeamLabel}** ${mine} - ${theirs} **${opponentLabel}**`).setColor(0xf1c40f)] });
+  return mine > theirs;
+}
+
+// Full World Cup run: group stage, then knockout from Round of 32 to the Final.
+async function runCareerWorldCup(dm, guildId, userId, career) {
+  const groupOpponents = shuffle(COUNTRIES.map((c) => c.name)).slice(0, 3);
+  await dm.send({
+    embeds: [new EmbedBuilder().setTitle('🏆 World Cup Draw')
+      .setDescription(`**${career.teamName}** has been drawn into a group with:\n${groupOpponents.map((n) => `• ${n}`).join('\n')}\n\nThree group matches, then the knockout stage begins!`)
+      .setColor(0x3498db)],
+  });
+
+  let points = 0, goalsFor = 0, goalsAgainst = 0;
+  for (const opp of groupOpponents) {
+    await delay(2000);
+    const oppRatingBase = career.rating + Math.floor(Math.random() * 11) - 5;
+    const res = await playWorldCupMatch(dm, userId, career, opp, oppRatingBase, 'Group Stage');
+    career.appearances++; career.goals += res.myGoals;
+    goalsFor += res.goalsFor; goalsAgainst += res.goalsAgainst;
+    if (res.result === 'win') { career.wins++; points += 3; }
+    else if (res.result === 'draw') { career.draws++; points += 1; }
+    else career.losses++;
+    career.rating = Math.min(99, career.rating + Math.min(3, res.myGoals) + (res.result === 'win' ? 1 : 0));
+    saveData(data);
+  }
+
+  const qualified = points >= 4;
+  await dm.send({
+    embeds: [new EmbedBuilder().setTitle('📊 Group Stage Complete')
+      .setDescription(`**${career.teamName}**: ${points}pts, GF ${goalsFor} GA ${goalsAgainst}\n\n${qualified ? '✅ You qualify for the knockout stage!' : '❌ Eliminated at the group stage — better luck next World Cup!'}`)
+      .setColor(qualified ? 0x2ecc71 : 0xe74c3c)],
+  });
+  if (!qualified) return;
+
+  let roundSize = 32;
+  while (roundSize >= 2) {
+    const roundLabel = roundNameForSize(roundSize);
+    await delay(2000);
+    const oppRatingBase = career.rating + Math.floor(Math.random() * 9) - 2 + (32 - roundSize) / 4;
+    const opponentLabel = shuffle(COUNTRIES.map((c) => c.name))[0];
+    const res = await playWorldCupMatch(dm, userId, career, opponentLabel, oppRatingBase, roundLabel);
+    career.appearances++; career.goals += res.myGoals;
+    career.rating = Math.min(99, career.rating + Math.min(3, res.myGoals) + (res.result === 'win' ? 1 : 0));
+
+    let advances = res.result === 'win';
+    if (res.result === 'draw') advances = await careerPenaltyShootout(dm, career.teamName, opponentLabel);
+    if (res.result === 'win' || (res.result === 'draw' && advances)) career.wins++;
+    else if (res.result === 'draw') career.draws++;
+    else career.losses++;
+    saveData(data);
+
+    if (!advances) {
+      await dm.send({ embeds: [new EmbedBuilder().setTitle('📉 World Cup Over').setDescription(`Eliminated in the **${roundLabel}**. Heartbreaking, but what a run!`).setColor(0xe74c3c)] });
+      return;
+    }
+    roundSize /= 2;
+  }
+
+  career.worldCupsWon = (career.worldCupsWon || 0) + 1;
+  saveData(data);
+  await dm.send({
+    embeds: [new EmbedBuilder().setTitle('🏆🎉 WORLD CUP CHAMPION!')
+      .setDescription(`**${career.name}** and **${career.teamName}** have won the World Cup! An unforgettable tournament. 🐐`)
+      .setColor(0xffd700)],
+  });
+}
+
 function seedStarPlayers() {
   if (data.starPlayersSeeded) return;
   for (const p of STAR_PLAYERS) {
@@ -2599,12 +2765,14 @@ const slashCommands = [
     .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
 
   new SlashCommandBuilder().setName('career').setDescription('Your personal player career — trial to retirement, played out via DM.')
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel)
     .addSubcommand((s) => s.setName('start').setDescription('Start a new career as a trial player.')
       .addStringOption((o) => o.setName('name').setDescription('Your player name').setRequired(true))
       .addStringOption((o) => o.setName('position').setDescription('Your position').setRequired(true).addChoices(...positionChoices)))
     .addSubcommand((s) => s.setName('play').setDescription('Play your next career match — sent to your DMs.'))
     .addSubcommand((s) => s.setName('status').setDescription('View your career so far.'))
-    .addSubcommand((s) => s.setName('retire').setDescription('Retire from your career for good (until you /career start again).')),
+    .addSubcommand((s) => s.setName('retire').setDescription('Retire from your career for good (until you /career start again).'))
+    .addSubcommand((s) => s.setName('worldcup').setDescription('Enter a World Cup run with your career player — groups through to the Final, live in DMs.')),
 
   new SlashCommandBuilder().setName('createplayer').setDescription('Create a custom player. Admin only.')
     .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true))
@@ -2680,8 +2848,11 @@ const slashCommands = [
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: slashCommands });
-  console.log(`Registered ${slashCommands.length} guild slash commands.`);
+  const globalCommands = slashCommands.filter((c) => c.name === 'career');
+  const guildCommands = slashCommands.filter((c) => c.name !== 'career');
+  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: guildCommands });
+  await rest.put(Routes.applicationCommands(client.user.id), { body: globalCommands });
+  console.log(`Registered ${guildCommands.length} guild slash commands + ${globalCommands.length} global command(s) (DM-capable). Note: global command updates can take up to ~1 hour to propagate on Discord's side.`);
 }
 client.once('ready', async () => { console.log(`Logged in as ${client.user.tag}`); await registerCommands(); seedStarPlayers(); });
 
@@ -2729,7 +2900,8 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    if (!interaction.isChatInputCommand() || !interaction.guild) return;
+    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.guild && interaction.commandName !== 'career') return; // only /career works outside a server
     const name = interaction.commandName;
     const sub = interaction.options.getSubcommand(false);
 
@@ -2919,7 +3091,21 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (name === 'career') {
-      const guildId = interaction.guild.id;
+      let guildId;
+      if (interaction.guild) {
+        guildId = interaction.guild.id;
+      } else if (sub === 'start') {
+        await interaction.reply({ content: 'Run `/career start` inside a server first — careers are tied to the server you started them in. Once started, `/career play`, `/career status`, `/career worldcup`, and `/career retire` all work fine from DMs.', ephemeral: true });
+        return;
+      } else {
+        const matches = Object.entries(data.careers).filter(([, careersInGuild]) => {
+          const c = careersInGuild[interaction.user.id];
+          return c && c.stage !== 'retired';
+        });
+        if (matches.length === 0) { await interaction.reply({ content: 'No active career found — start one with `/career start` inside a server.', ephemeral: true }); return; }
+        if (matches.length > 1) { await interaction.reply({ content: "You've got active careers in more than one server — run this command from inside the right server instead.", ephemeral: true }); return; }
+        guildId = matches[0][0];
+      }
       const careers = getGuildCareers(guildId);
 
       if (sub === 'start') {
@@ -2980,6 +3166,25 @@ client.on('interactionCreate', async (interaction) => {
         } catch (err) {
           console.error('Career match failed:', err);
           await interaction.followUp({ content: '❌ Something went wrong running your match — try again.', ephemeral: true });
+        }
+        return;
+      }
+
+      if (sub === 'worldcup') {
+        if (career.stage === 'trial') { await interaction.reply({ content: 'Get signed to a team first — run `/career play` to finish your academy trial.', ephemeral: true }); return; }
+        await interaction.reply({ content: '📬 Check your DMs — the World Cup draw is happening now!', ephemeral: true });
+        let dm;
+        try {
+          dm = await interaction.user.createDM();
+        } catch {
+          await interaction.followUp({ content: "❌ I can't DM you — check your privacy settings allow DMs from server members.", ephemeral: true });
+          return;
+        }
+        try {
+          await runCareerWorldCup(dm, guildId, interaction.user.id, career);
+        } catch (err) {
+          console.error('Career World Cup failed:', err);
+          await interaction.followUp({ content: '❌ Something went wrong running the World Cup — try again.', ephemeral: true });
         }
         return;
       }
