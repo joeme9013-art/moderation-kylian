@@ -82,6 +82,37 @@ function flagEmoji(code) {
   if (code.length !== 2) return '';
   return code.toUpperCase().replace(/./g, (c) => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65));
 }
+// The captain is whoever has the highest rating in the starting XI — mirrors
+// how squads are usually captained by their standout senior player.
+function pickCaptain(squad) {
+  if (!squad.length) return null;
+  return [...squad].sort((a, b) => b.rating - a.rating)[0];
+}
+function formationString(squad) {
+  const def = squad.filter((p) => p.position === 'DEF').length;
+  const mid = squad.filter((p) => p.position === 'MID').length;
+  const fwd = squad.filter((p) => p.position === 'FWD').length;
+  return [def, mid, fwd].filter((n) => n > 0).join('-') || '4-3-3';
+}
+function buildLineupEmbed(teamA, teamB, squadA, squadB, flagA, flagB, kind) {
+  const posOrder = { GK: 0, DEF: 1, MID: 2, FWD: 3 };
+  const listFor = (squad, captain) => [...squad]
+    .sort((a, b) => posOrder[a.position] - posOrder[b.position])
+    .map((p) => `${p.position} — ${p.name}${captain && p.name === captain.name ? ' **(C)**' : ''}`)
+    .join('\n') || '—';
+  const capA = pickCaptain(squadA);
+  const capB = pickCaptain(squadB);
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Starting Lineups')
+    .addFields(
+      { name: `${flagA} ${teamA.name} (${formationString(squadA)})`, value: listFor(squadA, capA), inline: true },
+      { name: `${flagB} ${teamB.name} (${formationString(squadB)})`, value: listFor(squadB, capB), inline: true },
+    )
+    .setFooter({ text: `Captains: ${capA ? capA.name : '—'} (${teamA.name}) & ${capB ? capB.name : '—'} (${teamB.name})` })
+    .setColor(0x2c3e50);
+  if (kind === 'country') embed.setThumbnail(cdnFlag(teamA.code));
+  return embed;
+}
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 // interaction.channel can be null if the channel isn't cached — fall back to a fetch
 async function resolveChannel(interaction) {
@@ -2266,8 +2297,17 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const firstHalfEvents = allEvents.filter((e) => e.minute <= 45);
   const secondHalfEvents = allEvents.filter((e) => e.minute > 45);
 
-  const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${teamA.name}** vs **${teamB.name}**`).setColor(0x2ecc71);
-  if (kind === 'country') kickoffEmbed.setThumbnail(cdnFlag(teamA.code));
+  const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${flagA} ${teamA.name}** vs **${flagB} ${teamB.name}**`).setColor(0x2ecc71);
+  if (kind === 'country') {
+    kickoffEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) });
+    kickoffEmbed.setThumbnail(cdnFlag(teamB.code));
+  }
+  if (!isCity) await channel.send({ embeds: [buildLineupEmbed(teamA, teamB, squadA, squadB, flagA, flagB, kind)] });
+  if (kind === 'country') await channel.send(`🎵 The national anthems ring out around the stadium as ${flagA} **${teamA.name}** face ${flagB} **${teamB.name}**...`);
+  await delay(2000);
+  const tossWinner = Math.random() < 0.5 ? teamA.name : teamB.name;
+  await channel.send(`🪙 Coin toss: **${tossWinner}** win the toss and get us underway.`);
+  await delay(1500);
   await channel.send({ embeds: [kickoffEmbed] });
 
   let runningA = 0, runningB = 0;
@@ -2425,6 +2465,15 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     .setColor(0x2ecc71);
   if (kind === 'country') { resultEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) }); resultEmbed.setThumbnail(cdnFlag(teamB.code)); }
   await channel.send({ embeds: [resultEmbed] });
+
+  // ---- Man of the Match: top scorer of the game, tiebreak toward the winning side ----
+  const allGoalEvents = [...goalEventsA.filter((e) => e.type === 'goal'), ...goalEventsB.filter((e) => e.type === 'goal')];
+  if (allGoalEvents.length) {
+    const tally = {};
+    for (const ev of allGoalEvents) tally[ev.player] = (tally[ev.player] || 0) + (ev.side === (winnerId === teamAId ? 'A' : 'B') ? 1.01 : 1);
+    const motm = Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0];
+    await channel.send({ embeds: [new EmbedBuilder().setDescription(`🌟 **Man of the Match: ${motm}**`).setColor(0xf1c40f)] });
+  }
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
   teamA.wins !== undefined && (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
@@ -3246,7 +3295,8 @@ client.on('interactionCreate', async (interaction) => {
         const target = interaction.options.getUser('user') || interaction.user;
         const players = getSquadPlayers(interaction.guild.id, target.id);
         if (players.length === 0) { await interaction.reply(`${target.username} has no squad players yet.`); return; }
-        const lines = players.map((p) => `${p.position} — ${p.name} (${p.rating})`);
+        const captain = pickCaptain(players.slice(0, 11));
+        const lines = players.map((p, i) => `${p.position} — ${p.name} (${p.rating})${captain && p.name === captain.name ? ' **(C)**' : ''}${i >= 11 ? ' 🪑' : ''}`);
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${getTeam(interaction.guild.id, target.id)?.name || target.username}'s Squad`).setDescription(lines.join('\n')).setColor(0x3498db)] });
         return;
       }
