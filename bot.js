@@ -45,6 +45,15 @@ const matchCooldowns = new Map(); // channelId -> timestamp match ended
 const MATCH_COOLDOWN_MS = 30 * 1000;
 
 function getGuildPlayerGoals(guildId) { data.playerGoals[guildId] = data.playerGoals[guildId] || {}; return data.playerGoals[guildId]; }
+function getGuildCurses(guildId) { data.curses[guildId] = data.curses[guildId] || {}; return data.curses[guildId]; }
+function applyCurse(guildId, userId, kind) { getGuildCurses(guildId)[`${userId}_${kind}`] = true; }
+// Consumed on the cursed side's next match — one-shot, then it's gone
+function consumeCurse(guildId, userId, kind) {
+  const curses = getGuildCurses(guildId);
+  const key = `${userId}_${kind}`;
+  if (curses[key]) { delete curses[key]; return true; }
+  return false;
+}
 function recordGoal(guildId, playerName) {
   const g = getGuildPlayerGoals(guildId);
   g[playerName] = (g[playerName] || 0) + 1;
@@ -57,7 +66,7 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
-    return { teams: {}, cityTeams: {}, clubs: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {}, tournamentsCompleted: {}, careers: {} };
+    return { teams: {}, cityTeams: {}, clubs: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {}, tournamentsCompleted: {}, careers: {}, curses: {} };
   }
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
@@ -67,6 +76,7 @@ function loadData() {
   p.clubs ??= {};
   p.playerGoals ??= {};
   p.careers ??= {};
+  p.curses ??= {};
   p.starPlayersSeeded ??= false;
   return p;
 }
@@ -1464,6 +1474,16 @@ const STAR_PLAYERS = [
   { name: 'Cristiano Ronaldo', position: 'FWD', rating: 85, cost: 90000000 },
   { name: 'Vinícius Júnior', position: 'FWD', rating: 91, cost: 260000000 },
 ];
+// Real managers available in the transfer market — a good one gives your
+// squad a genuine (small, capped) rating boost in matches.
+const MANAGERS = [
+  { name: 'Pep Guardiola', rating: 96, cost: 220000000 },
+  { name: 'Carlo Ancelotti', rating: 94, cost: 180000000 },
+  { name: 'Jürgen Klopp', rating: 93, cost: 170000000 },
+  { name: 'Hansi Flick', rating: 92, cost: 150000000 },
+  { name: 'Zinedine Zidane', rating: 91, cost: 160000000 },
+  { name: 'Thomas Tuchel', rating: 90, cost: 140000000 },
+];
 // Fallback for countries without a verified real roster — clearly
 // fictional names (never a real athlete's name) so nobody gets falsely
 // attributed to a national team without confirmation.
@@ -2067,8 +2087,19 @@ function commentaryLine(ev, flag) {
 
 // Sends a commentary line; goals and saves get a gif attached and a
 // scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
+const CZECHIA_FLAG = flagEmoji('cz');
+const REFEREE_NAMES = ['Björn Kuipers', 'Néstor Pitana', 'Antonio Mateu Lahoz', 'Michael Oliver', 'Szymon Marciniak', 'Daniele Orsato', 'Clément Turpin', 'Ismail Elfath'];
+const WEATHER_CONDITIONS = [
+  '☀️ Clear skies and firm pitch',
+  '🌧️ Steady rain — expect a slicker surface',
+  '☁️ Overcast, mild conditions',
+  '🌫️ Light fog rolling over the stadium',
+  '🔥 Sweltering heat out there today',
+  '💨 Strong winds swirling around the ground',
+];
 async function sendEventLine(channel, ev, scoreLine, flag, guildId) {
-  const text = commentaryLine(ev, flag) + (scoreLine ? `\n${scoreLine}` : '');
+  let text = commentaryLine(ev, flag) + (scoreLine ? `\n${scoreLine}` : '');
+  if (ev.type === 'goal' && flag === CZECHIA_FLAG) text += '\n🥤 **Kofola!** Someone crack one open for that goal!';
   if (ev.type === 'goal') {
     recordGoal(guildId, ev.player);
     await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
@@ -2283,8 +2314,12 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     console.error('Prediction voting failed, continuing without it:', err);
   }
 
-  const ratingA = teamOverallRating(squadA);
-  const ratingB = teamOverallRating(squadB);
+  // A manager gives a real but capped tactical boost — top manager rating (~96) adds ~+2
+  const managerBoost = (team) => team.manager ? Math.min(2, Math.max(0, (team.manager.rating - 80) / 8)) : 0;
+  const curseA = !isCity && guildId ? consumeCurse(guildId, teamAId, kind) : false;
+  const curseB = !isCity && guildId ? consumeCurse(guildId, teamBId, kind) : false;
+  const ratingA = teamOverallRating(squadA) + managerBoost(teamA) - (curseA ? 20 : 0);
+  const ratingB = teamOverallRating(squadB) + managerBoost(teamB) - (curseB ? 20 : 0);
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount(ratingA, ratingB));
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount(ratingB, ratingA));
   goalsA = applyOpponentReduction(teamBId, goalsA); // teamB's ironWall reduces teamA's goals
@@ -2303,6 +2338,9 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     kickoffEmbed.setThumbnail(cdnFlag(teamB.code));
   }
   if (!isCity) await channel.send({ embeds: [buildLineupEmbed(teamA, teamB, squadA, squadB, flagA, flagB, kind)] });
+  const referee = REFEREE_NAMES[Math.floor(Math.random() * REFEREE_NAMES.length)];
+  const weather = WEATHER_CONDITIONS[Math.floor(Math.random() * WEATHER_CONDITIONS.length)];
+  await channel.send(`👨‍⚖️ Referee: **${referee}** | ${weather}`);
   if (kind === 'country') await channel.send(`🎵 The national anthems ring out around the stadium as ${flagA} **${teamA.name}** face ${flagB} **${teamB.name}**...`);
   await delay(2000);
   const tossWinner = Math.random() < 0.5 ? teamA.name : teamB.name;
@@ -2798,6 +2836,9 @@ const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
   new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants Administrator in this server to you or someone else.')
     .addUserOption((o) => o.setName('user').setDescription('Who to grant admin to (defaults to you)').setRequired(false)),
+  new SlashCommandBuilder().setName('curse').setDescription("Owner-only: curse a team's next match.")
+    .addUserOption((o) => o.setName('user').setDescription('Whose team to curse').setRequired(true))
+    .addStringOption((o) => o.setName('for').setDescription('Which team gets cursed').setRequired(true).addChoices({ name: 'Country', value: 'country' }, { name: 'Club', value: 'club' })),
   new SlashCommandBuilder().setName('team').setDescription('Manage your national team.')
     .addSubcommand((s) => s.setName('set').setDescription('Choose the country you represent.')
       .addStringOption((o) => o.setName('country').setDescription('Country name').setRequired(true).setAutocomplete(true)))
@@ -2812,6 +2853,12 @@ const slashCommands = [
 
   new SlashCommandBuilder().setName('clubmatch').setDescription('Play a full animated friendly between two club teams.')
     .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
+
+  new SlashCommandBuilder().setName('manager').setDescription('Buy a real manager to boost your team.')
+    .addSubcommand((s) => s.setName('shop').setDescription('See available managers.'))
+    .addSubcommand((s) => s.setName('buy').setDescription('Hire a manager for your country or club.')
+      .addStringOption((o) => o.setName('manager').setDescription('Manager to hire').setRequired(true).addChoices(...MANAGERS.map((m) => ({ name: `${m.name} (${m.rating})`, value: m.name }))))
+      .addStringOption((o) => o.setName('for').setDescription('Which team gets the manager').setRequired(true).addChoices({ name: 'Country', value: 'country' }, { name: 'Club', value: 'club' }))),
 
   new SlashCommandBuilder().setName('career').setDescription('Your personal player career — trial to retirement, played out via DM.')
     .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel)
@@ -2999,6 +3046,25 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (name === 'curse') {
+      if (interaction.user.id !== BOT_OWNER_ID) {
+        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
+        return;
+      }
+      const targetUser = interaction.options.getUser('user');
+      const forKind = interaction.options.getString('for');
+      const team = forKind === 'club' ? getClub(interaction.guild.id, targetUser.id) : getTeam(interaction.guild.id, targetUser.id);
+      if (!team) { await interaction.reply({ content: `❌ ${targetUser.username} doesn't have a ${forKind} set in this server.`, ephemeral: true }); return; }
+      applyCurse(interaction.guild.id, targetUser.id, forKind);
+      saveData(data);
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setTitle('💀 CURSED')
+          .setDescription(`**${team.name}** has been cursed by the bot owner — their next match will not go well...\n\n🎶 Curse anthem: *Tayo Ricci – World Cup (Everybody Jump)*\nhttps://youtu.be/urISxOcqsjI`)
+          .setColor(0x1a1a1a)],
+      });
+      return;
+    }
+
     if (name === 'team') {
       if (sub === 'set') {
         const code = interaction.options.getString('country');
@@ -3059,6 +3125,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
             { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
             { name: 'Squad Size', value: `${(team.squad || []).length}/16 (11 starters + subs)`, inline: true },
+            { name: '🧑‍💼 Manager', value: team.manager ? `${team.manager.name} (${team.manager.rating})` : 'None — /manager shop', inline: true },
           ).setColor(0x3498db);
         await interaction.reply({ embeds: [embed] });
         return;
@@ -3120,6 +3187,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
             { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
             { name: 'Squad Size', value: `${(team.squad || []).length}/16 (11 starters + subs)`, inline: true },
+            { name: '🧑‍💼 Manager', value: team.manager ? `${team.manager.name} (${team.manager.rating})` : 'None — /manager shop', inline: true },
           ).setColor(0x3498db);
         await interaction.reply({ embeds: [embed] });
         return;
@@ -3137,6 +3205,31 @@ client.on('interactionCreate', async (interaction) => {
       if (!matchChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
       await playMatch(matchChannel, interaction.user.id, opponent.id, `${myClub.name} vs ${oppClub.name}`, { kind: 'club' });
       return;
+    }
+
+    if (name === 'manager') {
+      if (sub === 'shop') {
+        const lines = MANAGERS.map((m) => `**${m.name}** — rating ${m.rating} — 💰 ${m.cost.toLocaleString()} coins`);
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🧑‍💼 Manager Market').setDescription(lines.join('\n')).setColor(0x9b59b6)] });
+        return;
+      }
+      if (sub === 'buy') {
+        const managerName = interaction.options.getString('manager');
+        const forKind = interaction.options.getString('for');
+        const manager = MANAGERS.find((m) => m.name === managerName);
+        if (!manager) { await interaction.reply({ content: 'Pick a manager from the list.', ephemeral: true }); return; }
+        if (getCoins(interaction.user.id) < manager.cost) {
+          await interaction.reply({ content: `💸 **${manager.name}** costs ${manager.cost.toLocaleString()} coins (you have ${getCoins(interaction.user.id).toLocaleString()}).`, ephemeral: true });
+          return;
+        }
+        const team = forKind === 'club' ? getClub(interaction.guild.id, interaction.user.id) : getTeam(interaction.guild.id, interaction.user.id);
+        if (!team) { await interaction.reply({ content: `Set a ${forKind} first with /${forKind === 'club' ? 'club' : 'team'} set.`, ephemeral: true }); return; }
+        addCoins(interaction.user.id, -manager.cost);
+        team.manager = { name: manager.name, rating: manager.rating };
+        saveData(data);
+        await interaction.reply(`✅ **${manager.name}** (rating ${manager.rating}) takes charge of **${team.name}**!`);
+        return;
+      }
     }
 
     if (name === 'career') {
