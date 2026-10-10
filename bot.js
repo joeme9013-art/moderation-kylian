@@ -7,6 +7,20 @@ const fs = require('fs');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Render (and most free host tiers) expect a web service to bind to a port
+// and answer HTTP requests — otherwise it's treated as a failed deploy and
+// gets restarted in a loop. This bot doesn't need to serve anything, so
+// this is just a tiny "I'm alive" endpoint to satisfy that check. It also
+// means Render can ping this URL on a schedule (e.g. with a free uptime
+// monitor like UptimeRobot) to stop the free tier spinning the service
+// down after 15 minutes of no traffic.
+require('http').createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is running.');
+}).listen(process.env.PORT || 3000, () => {
+  console.log(`HTTP keep-alive server listening on port ${process.env.PORT || 3000}`);
+});
+
 // ============================================================
 // GOAL / SAVE GIFS — shown on the commentary embed for that event
 // ============================================================
