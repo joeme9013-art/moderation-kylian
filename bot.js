@@ -1,12 +1,11 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, StringSelectMenuBuilder, InteractionContextType,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
 } = require('discord.js');
 const fs = require('fs');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const BOT_OWNER_ID = '1198527966972477505';
 
 // ============================================================
 // GOAL / SAVE GIFS — shown on the commentary embed for that event
@@ -44,90 +43,38 @@ function getDerbyName(codeA, codeB) {
 const matchCooldowns = new Map(); // channelId -> timestamp match ended
 const MATCH_COOLDOWN_MS = 30 * 1000;
 
-function getGuildPlayerGoals(guildId) { data.playerGoals[guildId] = data.playerGoals[guildId] || {}; return data.playerGoals[guildId]; }
-function getGuildCurses(guildId) { data.curses[guildId] = data.curses[guildId] || {}; return data.curses[guildId]; }
-function applyCurse(guildId, userId, kind) { getGuildCurses(guildId)[`${userId}_${kind}`] = true; }
-// Consumed on the cursed side's next match — one-shot, then it's gone
-function consumeCurse(guildId, userId, kind) {
-  const curses = getGuildCurses(guildId);
-  const key = `${userId}_${kind}`;
-  if (curses[key]) { delete curses[key]; return true; }
-  return false;
-}
-function recordGoal(guildId, playerName) {
-  const g = getGuildPlayerGoals(guildId);
-  g[playerName] = (g[playerName] || 0) + 1;
+function recordGoal(playerName) {
+  data.playerGoals[playerName] = (data.playerGoals[playerName] || 0) + 1;
 }
 
-const GUILD_ID = '1324059331406069872';
 const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/data.json`
   : './data.json';
 
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
-    return { teams: {}, cityTeams: {}, clubs: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {}, tournamentsCompleted: {}, careers: {}, curses: {} };
+    return { teams: {}, cityTeams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {} };
   }
   const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
-  p.tournaments ??= {};
-  p.tournamentsCompleted ??= {};
   p.cityTeams ??= {};
-  p.clubs ??= {};
   p.playerGoals ??= {};
-  p.careers ??= {};
-  p.curses ??= {};
   p.starPlayersSeeded ??= false;
+  // Tournaments are now per-server (data.tournaments[guildId]) instead of one
+  // global tournament, so the bot works the same way across every server
+  // it's in. Any old single global tournament is dropped on first load.
+  p.tournaments ??= {};
+  if (p.tournament !== undefined) delete p.tournament;
   return p;
 }
 function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
 let data = loadData();
-console.log(`[data] Using file: ${DATA_FILE} | RAILWAY_VOLUME_MOUNT_PATH=${process.env.RAILWAY_VOLUME_MOUNT_PATH || '(not set)'}`);
+
+function getTournament(guildId) { return data.tournaments[guildId] || null; }
+function setTournament(guildId, t) { if (t === null) delete data.tournaments[guildId]; else data.tournaments[guildId] = t; }
 
 function cdnFlag(code) { return `https://flagcdn.com/w320/${code}.png`; }
-const SPECIAL_FLAG_EMOJI = { 'gb-eng': '🏴󠁧󠁢󠁥󠁮󠁧󠁿', 'gb-sct': '🏴󠁧󠁢󠁳󠁣󠁴󠁿', 'gb-wls': '🏴󠁧󠁢󠁷󠁬󠁳󠁿' };
-function flagEmoji(code) {
-  if (!code) return '';
-  if (SPECIAL_FLAG_EMOJI[code]) return SPECIAL_FLAG_EMOJI[code];
-  if (code.length !== 2) return '';
-  return code.toUpperCase().replace(/./g, (c) => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65));
-}
-// The captain is whoever has the highest rating in the starting XI — mirrors
-// how squads are usually captained by their standout senior player.
-function pickCaptain(squad) {
-  if (!squad.length) return null;
-  return [...squad].sort((a, b) => b.rating - a.rating)[0];
-}
-function formationString(squad) {
-  const def = squad.filter((p) => p.position === 'DEF').length;
-  const mid = squad.filter((p) => p.position === 'MID').length;
-  const fwd = squad.filter((p) => p.position === 'FWD').length;
-  return [def, mid, fwd].filter((n) => n > 0).join('-') || '4-3-3';
-}
-function buildLineupEmbed(teamA, teamB, squadA, squadB, flagA, flagB, kind) {
-  const posOrder = { GK: 0, DEF: 1, MID: 2, FWD: 3 };
-  const listFor = (squad, captain) => [...squad]
-    .sort((a, b) => posOrder[a.position] - posOrder[b.position])
-    .map((p) => `${p.position} — ${p.name}${captain && p.name === captain.name ? ' **(C)**' : ''}`)
-    .join('\n') || '—';
-  const capA = pickCaptain(squadA);
-  const capB = pickCaptain(squadB);
-  const embed = new EmbedBuilder()
-    .setTitle('📋 Starting Lineups')
-    .addFields(
-      { name: `${flagA} ${teamA.name} (${formationString(squadA)})`, value: listFor(squadA, capA), inline: true },
-      { name: `${flagB} ${teamB.name} (${formationString(squadB)})`, value: listFor(squadB, capB), inline: true },
-    )
-    .setFooter({ text: `Captains: ${capA ? capA.name : '—'} (${teamA.name}) & ${capB ? capB.name : '—'} (${teamB.name})` })
-    .setColor(0x2c3e50);
-  if (kind === 'country') embed.setThumbnail(cdnFlag(teamA.code));
-  return embed;
-}
 function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
-// interaction.channel can be null if the channel isn't cached — fall back to a fetch
-async function resolveChannel(interaction) {
-  return interaction.channel || await interaction.guild.channels.fetch(interaction.channelId).catch(() => null);
-}
 
 // ============================================================
 // COUNTRIES (every UN member + Vatican + Palestine + home nations)
@@ -203,288 +150,167 @@ const COUNTRIES = [
 ];
 
 // ============================================================
-// CLUBS — real club rosters for Champions League / Premier League / Bundesliga
-// (and enough La Liga/Serie A/Ligue 1 sides to fill out Champions League play)
+// CLUBS — the top 5 European leagues plus a couple of smaller ones, so
+// /team set isn't limited to national teams. Club codes are always
+// prefixed "c-" so they can never collide with a country code, and clubs
+// don't have a default real-roster squad — they get an auto-generated XI
+// the same way an unlisted country does (see getDefaultSquad).
 // ============================================================
 const CLUBS = [
-  { name: 'Arsenal', code: 'arsenal', league: 'Premier League' },
-  { name: 'Manchester City', code: 'mancity', league: 'Premier League' },
-  { name: 'Liverpool', code: 'liverpool', league: 'Premier League' },
-  { name: 'Manchester United', code: 'manutd', league: 'Premier League' },
-  { name: 'Chelsea', code: 'chelsea', league: 'Premier League' },
-  { name: 'Tottenham Hotspur', code: 'tottenham', league: 'Premier League' },
-  { name: 'Bayern Munich', code: 'bayern', league: 'Bundesliga' },
-  { name: 'Borussia Dortmund', code: 'dortmund', league: 'Bundesliga' },
-  { name: 'RB Leipzig', code: 'leipzig', league: 'Bundesliga' },
-  { name: 'Bayer Leverkusen', code: 'leverkusen', league: 'Bundesliga' },
-  { name: 'Real Madrid', code: 'realmadrid', league: 'La Liga' },
-  { name: 'Barcelona', code: 'barcelona', league: 'La Liga' },
-  { name: 'Atletico Madrid', code: 'atleticomadrid', league: 'La Liga' },
-  { name: 'Juventus', code: 'juventus', league: 'Serie A' },
-  { name: 'Inter Milan', code: 'intermilan', league: 'Serie A' },
-  { name: 'AC Milan', code: 'acmilan', league: 'Serie A' },
-  { name: 'Paris Saint-Germain', code: 'psg', league: 'Ligue 1' },
+  { name: "Arsenal", code: "c-arsenal", league: "Premier League" },
+  { name: "Aston Villa", code: "c-aston-villa", league: "Premier League" },
+  { name: "Bournemouth", code: "c-bournemouth", league: "Premier League" },
+  { name: "Brentford", code: "c-brentford", league: "Premier League" },
+  { name: "Brighton", code: "c-brighton", league: "Premier League" },
+  { name: "Chelsea", code: "c-chelsea", league: "Premier League" },
+  { name: "Crystal Palace", code: "c-crystal-palace", league: "Premier League" },
+  { name: "Everton", code: "c-everton", league: "Premier League" },
+  { name: "Fulham", code: "c-fulham", league: "Premier League" },
+  { name: "Ipswich Town", code: "c-ipswich-town", league: "Premier League" },
+  { name: "Leicester City", code: "c-leicester-city", league: "Premier League" },
+  { name: "Liverpool", code: "c-liverpool", league: "Premier League" },
+  { name: "Manchester City", code: "c-manchester-city", league: "Premier League" },
+  { name: "Manchester United", code: "c-manchester-united", league: "Premier League" },
+  { name: "Newcastle United", code: "c-newcastle-united", league: "Premier League" },
+  { name: "Nottingham Forest", code: "c-nottingham-forest", league: "Premier League" },
+  { name: "Southampton", code: "c-southampton", league: "Premier League" },
+  { name: "Tottenham Hotspur", code: "c-tottenham-hotspur", league: "Premier League" },
+  { name: "West Ham United", code: "c-west-ham-united", league: "Premier League" },
+  { name: "Wolverhampton Wanderers", code: "c-wolverhampton-wanderers", league: "Premier League" },
+  { name: "Real Madrid", code: "c-real-madrid", league: "La Liga" },
+  { name: "Barcelona", code: "c-barcelona", league: "La Liga" },
+  { name: "Atletico Madrid", code: "c-atletico-madrid", league: "La Liga" },
+  { name: "Athletic Bilbao", code: "c-athletic-bilbao", league: "La Liga" },
+  { name: "Real Sociedad", code: "c-real-sociedad", league: "La Liga" },
+  { name: "Real Betis", code: "c-real-betis", league: "La Liga" },
+  { name: "Villarreal", code: "c-villarreal", league: "La Liga" },
+  { name: "Valencia", code: "c-valencia", league: "La Liga" },
+  { name: "Sevilla", code: "c-sevilla", league: "La Liga" },
+  { name: "Girona", code: "c-girona", league: "La Liga" },
+  { name: "Celta Vigo", code: "c-celta-vigo", league: "La Liga" },
+  { name: "Osasuna", code: "c-osasuna", league: "La Liga" },
+  { name: "Getafe", code: "c-getafe", league: "La Liga" },
+  { name: "Mallorca", code: "c-mallorca", league: "La Liga" },
+  { name: "Rayo Vallecano", code: "c-rayo-vallecano", league: "La Liga" },
+  { name: "Las Palmas", code: "c-las-palmas", league: "La Liga" },
+  { name: "Alaves", code: "c-alaves", league: "La Liga" },
+  { name: "Espanyol", code: "c-espanyol", league: "La Liga" },
+  { name: "Leganes", code: "c-leganes", league: "La Liga" },
+  { name: "Valladolid", code: "c-valladolid", league: "La Liga" },
+  { name: "Juventus", code: "c-juventus", league: "Serie A" },
+  { name: "Inter Milan", code: "c-inter-milan", league: "Serie A" },
+  { name: "AC Milan", code: "c-ac-milan", league: "Serie A" },
+  { name: "Napoli", code: "c-napoli", league: "Serie A" },
+  { name: "Roma", code: "c-roma", league: "Serie A" },
+  { name: "Lazio", code: "c-lazio", league: "Serie A" },
+  { name: "Atalanta", code: "c-atalanta", league: "Serie A" },
+  { name: "Fiorentina", code: "c-fiorentina", league: "Serie A" },
+  { name: "Bologna", code: "c-bologna", league: "Serie A" },
+  { name: "Torino", code: "c-torino", league: "Serie A" },
+  { name: "Udinese", code: "c-udinese", league: "Serie A" },
+  { name: "Genoa", code: "c-genoa", league: "Serie A" },
+  { name: "Cagliari", code: "c-cagliari", league: "Serie A" },
+  { name: "Verona", code: "c-verona", league: "Serie A" },
+  { name: "Lecce", code: "c-lecce", league: "Serie A" },
+  { name: "Parma", code: "c-parma", league: "Serie A" },
+  { name: "Como", code: "c-como", league: "Serie A" },
+  { name: "Venezia", code: "c-venezia", league: "Serie A" },
+  { name: "Empoli", code: "c-empoli", league: "Serie A" },
+  { name: "Monza", code: "c-monza", league: "Serie A" },
+  { name: "Bayern Munich", code: "c-bayern-munich", league: "Bundesliga" },
+  { name: "Borussia Dortmund", code: "c-borussia-dortmund", league: "Bundesliga" },
+  { name: "RB Leipzig", code: "c-rb-leipzig", league: "Bundesliga" },
+  { name: "Bayer Leverkusen", code: "c-bayer-leverkusen", league: "Bundesliga" },
+  { name: "Eintracht Frankfurt", code: "c-eintracht-frankfurt", league: "Bundesliga" },
+  { name: "VfB Stuttgart", code: "c-vfb-stuttgart", league: "Bundesliga" },
+  { name: "Borussia Monchengladbach", code: "c-borussia-monchengladbach", league: "Bundesliga" },
+  { name: "Wolfsburg", code: "c-wolfsburg", league: "Bundesliga" },
+  { name: "Freiburg", code: "c-freiburg", league: "Bundesliga" },
+  { name: "Union Berlin", code: "c-union-berlin", league: "Bundesliga" },
+  { name: "Mainz", code: "c-mainz", league: "Bundesliga" },
+  { name: "Werder Bremen", code: "c-werder-bremen", league: "Bundesliga" },
+  { name: "Augsburg", code: "c-augsburg", league: "Bundesliga" },
+  { name: "Hoffenheim", code: "c-hoffenheim", league: "Bundesliga" },
+  { name: "Heidenheim", code: "c-heidenheim", league: "Bundesliga" },
+  { name: "Holstein Kiel", code: "c-holstein-kiel", league: "Bundesliga" },
+  { name: "St. Pauli", code: "c-st-pauli", league: "Bundesliga" },
+  { name: "Bochum", code: "c-bochum", league: "Bundesliga" },
+  { name: "Paris Saint-Germain", code: "c-paris-saint-germain", league: "Ligue 1" },
+  { name: "Marseille", code: "c-marseille", league: "Ligue 1" },
+  { name: "Monaco", code: "c-monaco", league: "Ligue 1" },
+  { name: "Lille", code: "c-lille", league: "Ligue 1" },
+  { name: "Lyon", code: "c-lyon", league: "Ligue 1" },
+  { name: "Nice", code: "c-nice", league: "Ligue 1" },
+  { name: "Lens", code: "c-lens", league: "Ligue 1" },
+  { name: "Rennes", code: "c-rennes", league: "Ligue 1" },
+  { name: "Reims", code: "c-reims", league: "Ligue 1" },
+  { name: "Toulouse", code: "c-toulouse", league: "Ligue 1" },
+  { name: "Nantes", code: "c-nantes", league: "Ligue 1" },
+  { name: "Strasbourg", code: "c-strasbourg", league: "Ligue 1" },
+  { name: "Montpellier", code: "c-montpellier", league: "Ligue 1" },
+  { name: "Brest", code: "c-brest", league: "Ligue 1" },
+  { name: "Le Havre", code: "c-le-havre", league: "Ligue 1" },
+  { name: "Angers", code: "c-angers", league: "Ligue 1" },
+  { name: "Auxerre", code: "c-auxerre", league: "Ligue 1" },
+  { name: "Saint-Etienne", code: "c-saint-etienne", league: "Ligue 1" },
+  { name: "FC Santa Coloma", code: "c-fc-santa-coloma", league: "Andorran Primera Divisio" },
+  { name: "Inter Club d'Escaldes", code: "c-inter-club-d-escaldes", league: "Andorran Primera Divisio" },
+  { name: "UE Santa Coloma", code: "c-ue-santa-coloma", league: "Andorran Primera Divisio" },
+  { name: "Atletic Club d'Escaldes", code: "c-atletic-club-d-escaldes", league: "Andorran Primera Divisio" },
+  { name: "Penya Encarnada d'Andorra", code: "c-penya-encarnada-d-andorra", league: "Andorran Primera Divisio" },
+  { name: "UE Engordany", code: "c-ue-engordany", league: "Andorran Primera Divisio" },
+  { name: "CE Principat", code: "c-ce-principat", league: "Andorran Primera Divisio" },
+  { name: "FC Lusitans", code: "c-fc-lusitans", league: "Andorran Primera Divisio" },
+  { name: "FCSB", code: "c-fcsb", league: "Romanian Liga I" },
+  { name: "CFR Cluj", code: "c-cfr-cluj", league: "Romanian Liga I" },
+  { name: "Universitatea Craiova", code: "c-universitatea-craiova", league: "Romanian Liga I" },
+  { name: "Rapid Bucuresti", code: "c-rapid-bucuresti", league: "Romanian Liga I" },
+  { name: "Farul Constanta", code: "c-farul-constanta", league: "Romanian Liga I" },
+  { name: "Sepsi OSK", code: "c-sepsi-osk", league: "Romanian Liga I" },
+  { name: "UTA Arad", code: "c-uta-arad", league: "Romanian Liga I" },
+  { name: "Petrolul Ploiesti", code: "c-petrolul-ploiesti", league: "Romanian Liga I" },
+  { name: "Dinamo Bucuresti", code: "c-dinamo-bucuresti", league: "Romanian Liga I" },
+  { name: "Botosani", code: "c-botosani", league: "Romanian Liga I" },
+  { name: "Hermannstadt", code: "c-hermannstadt", league: "Romanian Liga I" },
+  { name: "Unirea Slobozia", code: "c-unirea-slobozia", league: "Romanian Liga I" },
+  { name: "Gloria Buzau", code: "c-gloria-buzau", league: "Romanian Liga I" },
+  { name: "Politehnica Iasi", code: "c-politehnica-iasi", league: "Romanian Liga I" },
+  { name: "Universitatea Cluj", code: "c-universitatea-cluj", league: "Romanian Liga I" },
+  { name: "Otelul Galati", code: "c-otelul-galati", league: "Romanian Liga I" },
 ];
-
-const DEFAULT_CLUB_SQUADS = {
-  arsenal: [
-    { name: 'David Raya', position: 'GK', rating: 83 },
-    { name: 'Ben White', position: 'DEF', rating: 82 },
-    { name: 'William Saliba', position: 'DEF', rating: 87 },
-    { name: 'Gabriel Magalhães', position: 'DEF', rating: 85 },
-    { name: 'Riccardo Calafiori', position: 'DEF', rating: 81 },
-    { name: 'Declan Rice', position: 'MID', rating: 88 },
-    { name: 'Martin Ødegaard', position: 'MID', rating: 88 },
-    { name: 'Mikel Merino', position: 'MID', rating: 81 },
-    { name: 'Bukayo Saka', position: 'FWD', rating: 88 },
-    { name: 'Kai Havertz', position: 'FWD', rating: 84 },
-    { name: 'Gabriel Martinelli', position: 'FWD', rating: 85 },
-  ],
-  mancity: [
-    { name: 'Ederson', position: 'GK', rating: 87 },
-    { name: 'Kyle Walker', position: 'DEF', rating: 82 },
-    { name: 'Rúben Dias', position: 'DEF', rating: 88 },
-    { name: 'John Stones', position: 'DEF', rating: 84 },
-    { name: 'Josko Gvardiol', position: 'DEF', rating: 86 },
-    { name: 'Rodri', position: 'MID', rating: 90 },
-    { name: 'İlkay Gündoğan', position: 'MID', rating: 83 },
-    { name: 'Kevin De Bruyne', position: 'MID', rating: 89 },
-    { name: 'Phil Foden', position: 'FWD', rating: 87 },
-    { name: 'Erling Haaland', position: 'FWD', rating: 92 },
-    { name: 'Jérémy Doku', position: 'FWD', rating: 84 },
-  ],
-  liverpool: [
-    { name: 'Alisson', position: 'GK', rating: 88 },
-    { name: 'Trent Alexander-Arnold', position: 'DEF', rating: 87 },
-    { name: 'Virgil van Dijk', position: 'DEF', rating: 89 },
-    { name: 'Ibrahima Konaté', position: 'DEF', rating: 84 },
-    { name: 'Andrew Robertson', position: 'DEF', rating: 84 },
-    { name: 'Alexis Mac Allister', position: 'MID', rating: 86 },
-    { name: 'Ryan Gravenberch', position: 'MID', rating: 81 },
-    { name: 'Dominik Szoboszlai', position: 'MID', rating: 83 },
-    { name: 'Mohamed Salah', position: 'FWD', rating: 89 },
-    { name: 'Darwin Núñez', position: 'FWD', rating: 82 },
-    { name: 'Luis Díaz', position: 'FWD', rating: 87 },
-  ],
-  manutd: [
-    { name: 'André Onana', position: 'GK', rating: 81 },
-    { name: 'Diogo Dalot', position: 'DEF', rating: 79 },
-    { name: 'Lisandro Martínez', position: 'DEF', rating: 83 },
-    { name: 'Matthijs de Ligt', position: 'DEF', rating: 83 },
-    { name: 'Noussair Mazraoui', position: 'DEF', rating: 79 },
-    { name: 'Casemiro', position: 'MID', rating: 82 },
-    { name: 'Bruno Fernandes', position: 'MID', rating: 87 },
-    { name: 'Kobbie Mainoo', position: 'MID', rating: 80 },
-    { name: 'Marcus Rashford', position: 'FWD', rating: 84 },
-    { name: 'Rasmus Højlund', position: 'FWD', rating: 79 },
-    { name: 'Alejandro Garnacho', position: 'FWD', rating: 80 },
-  ],
-  chelsea: [
-    { name: 'Robert Sánchez', position: 'GK', rating: 78 },
-    { name: 'Reece James', position: 'DEF', rating: 84 },
-    { name: 'Levi Colwill', position: 'DEF', rating: 80 },
-    { name: 'Wesley Fofana', position: 'DEF', rating: 79 },
-    { name: 'Marc Cucurella', position: 'DEF', rating: 80 },
-    { name: 'Moisés Caicedo', position: 'MID', rating: 85 },
-    { name: 'Enzo Fernández', position: 'MID', rating: 85 },
-    { name: 'Cole Palmer', position: 'MID', rating: 86 },
-    { name: 'Nicolas Jackson', position: 'FWD', rating: 79 },
-    { name: 'Christopher Nkunku', position: 'FWD', rating: 81 },
-    { name: 'Noni Madueke', position: 'FWD', rating: 78 },
-  ],
-  tottenham: [
-    { name: 'Guglielmo Vicario', position: 'GK', rating: 80 },
-    { name: 'Pedro Porro', position: 'DEF', rating: 80 },
-    { name: 'Cristian Romero', position: 'DEF', rating: 85 },
-    { name: 'Micky van de Ven', position: 'DEF', rating: 81 },
-    { name: 'Destiny Udogie', position: 'DEF', rating: 79 },
-    { name: 'Yves Bissouma', position: 'MID', rating: 79 },
-    { name: 'Rodrigo Bentancur', position: 'MID', rating: 80 },
-    { name: 'James Maddison', position: 'MID', rating: 82 },
-    { name: 'Son Heung-min', position: 'FWD', rating: 86 },
-    { name: 'Dominic Solanke', position: 'FWD', rating: 79 },
-    { name: 'Brennan Johnson', position: 'FWD', rating: 79 },
-  ],
-  bayern: [
-    { name: 'Manuel Neuer', position: 'GK', rating: 85 },
-    { name: 'Kim Min-jae', position: 'DEF', rating: 85 },
-    { name: 'Dayot Upamecano', position: 'DEF', rating: 85 },
-    { name: 'Alphonso Davies', position: 'DEF', rating: 85 },
-    { name: 'Josip Stanišić', position: 'DEF', rating: 78 },
-    { name: 'Joshua Kimmich', position: 'MID', rating: 87 },
-    { name: 'Leon Goretzka', position: 'MID', rating: 82 },
-    { name: 'Jamal Musiala', position: 'MID', rating: 89 },
-    { name: 'Serge Gnabry', position: 'FWD', rating: 82 },
-    { name: 'Harry Kane', position: 'FWD', rating: 89 },
-    { name: 'Michael Olise', position: 'FWD', rating: 85 },
-  ],
-  dortmund: [
-    { name: 'Gregor Kobel', position: 'GK', rating: 84 },
-    { name: 'Julian Ryerson', position: 'DEF', rating: 79 },
-    { name: 'Nico Schlotterbeck', position: 'DEF', rating: 82 },
-    { name: 'Waldemar Anton', position: 'DEF', rating: 78 },
-    { name: 'Ramy Bensebaini', position: 'DEF', rating: 80 },
-    { name: 'Emre Can', position: 'MID', rating: 79 },
-    { name: 'Pascal Groß', position: 'MID', rating: 79 },
-    { name: 'Julian Brandt', position: 'MID', rating: 81 },
-    { name: 'Karim Adeyemi', position: 'FWD', rating: 80 },
-    { name: 'Serhou Guirassy', position: 'FWD', rating: 82 },
-    { name: 'Donyell Malen', position: 'FWD', rating: 80 },
-  ],
-  leipzig: [
-    { name: 'Péter Gulácsi', position: 'GK', rating: 78 },
-    { name: 'Lutsharel Geertruida', position: 'DEF', rating: 78 },
-    { name: 'Willi Orbán', position: 'DEF', rating: 79 },
-    { name: 'Castello Lukeba', position: 'DEF', rating: 79 },
-    { name: 'David Raum', position: 'DEF', rating: 80 },
-    { name: 'Xavi Simons', position: 'MID', rating: 85 },
-    { name: 'Kevin Kampl', position: 'MID', rating: 75 },
-    { name: 'Xaver Schlager', position: 'MID', rating: 77 },
-    { name: 'Benjamin Šeško', position: 'FWD', rating: 81 },
-    { name: 'Loïs Openda', position: 'FWD', rating: 83 },
-    { name: 'Antonio Nusa', position: 'FWD', rating: 79 },
-  ],
-  leverkusen: [
-    { name: 'Lukáš Hrádecký', position: 'GK', rating: 79 },
-    { name: 'Jonathan Tah', position: 'DEF', rating: 82 },
-    { name: 'Edmond Tapsoba', position: 'DEF', rating: 80 },
-    { name: 'Piero Hincapié', position: 'DEF', rating: 83 },
-    { name: 'Alejandro Grimaldo', position: 'DEF', rating: 82 },
-    { name: 'Granit Xhaka', position: 'MID', rating: 85 },
-    { name: 'Exequiel Palacios', position: 'MID', rating: 79 },
-    { name: 'Florian Wirtz', position: 'MID', rating: 88 },
-    { name: 'Jeremie Frimpong', position: 'FWD', rating: 81 },
-    { name: 'Victor Boniface', position: 'FWD', rating: 80 },
-    { name: 'Amine Adli', position: 'FWD', rating: 77 },
-  ],
-  realmadrid: [
-    { name: 'Thibaut Courtois', position: 'GK', rating: 89 },
-    { name: 'Dani Carvajal', position: 'DEF', rating: 84 },
-    { name: 'Antonio Rüdiger', position: 'DEF', rating: 85 },
-    { name: 'Éder Militão', position: 'DEF', rating: 85 },
-    { name: 'Ferland Mendy', position: 'DEF', rating: 81 },
-    { name: 'Federico Valverde', position: 'MID', rating: 88 },
-    { name: 'Jude Bellingham', position: 'MID', rating: 90 },
-    { name: 'Aurélien Tchouaméni', position: 'MID', rating: 85 },
-    { name: 'Vinícius Júnior', position: 'FWD', rating: 91 },
-    { name: 'Kylian Mbappé', position: 'FWD', rating: 93 },
-    { name: 'Rodrygo', position: 'FWD', rating: 86 },
-  ],
-  barcelona: [
-    { name: 'Marc-André ter Stegen', position: 'GK', rating: 86 },
-    { name: 'Jules Koundé', position: 'DEF', rating: 85 },
-    { name: 'Ronald Araújo', position: 'DEF', rating: 85 },
-    { name: 'Pau Cubarsí', position: 'DEF', rating: 80 },
-    { name: 'Alejandro Balde', position: 'DEF', rating: 81 },
-    { name: 'Pedri', position: 'MID', rating: 87 },
-    { name: 'Frenkie de Jong', position: 'MID', rating: 86 },
-    { name: 'Gavi', position: 'MID', rating: 82 },
-    { name: 'Raphinha', position: 'FWD', rating: 88 },
-    { name: 'Robert Lewandowski', position: 'FWD', rating: 87 },
-    { name: 'Lamine Yamal', position: 'FWD', rating: 89 },
-  ],
-  atleticomadrid: [
-    { name: 'Jan Oblak', position: 'GK', rating: 87 },
-    { name: 'Nahuel Molina', position: 'DEF', rating: 82 },
-    { name: 'José María Giménez', position: 'DEF', rating: 83 },
-    { name: 'Clément Lenglet', position: 'DEF', rating: 78 },
-    { name: 'Reinildo Mandava', position: 'DEF', rating: 77 },
-    { name: 'Koke', position: 'MID', rating: 80 },
-    { name: 'Rodrigo De Paul', position: 'MID', rating: 85 },
-    { name: 'Pablo Barrios', position: 'MID', rating: 78 },
-    { name: 'Antoine Griezmann', position: 'FWD', rating: 87 },
-    { name: 'Julián Álvarez', position: 'FWD', rating: 87 },
-    { name: 'Ángel Correa', position: 'FWD', rating: 79 },
-  ],
-  juventus: [
-    { name: 'Michele Di Gregorio', position: 'GK', rating: 79 },
-    { name: 'Andrea Cambiaso', position: 'DEF', rating: 80 },
-    { name: 'Gleison Bremer', position: 'DEF', rating: 84 },
-    { name: 'Pierre Kalulu', position: 'DEF', rating: 78 },
-    { name: 'Juan Cabal', position: 'DEF', rating: 76 },
-    { name: 'Manuel Locatelli', position: 'MID', rating: 81 },
-    { name: 'Teun Koopmeiners', position: 'MID', rating: 82 },
-    { name: 'Weston McKennie', position: 'MID', rating: 78 },
-    { name: 'Kenan Yıldız', position: 'FWD', rating: 82 },
-    { name: 'Dušan Vlahović', position: 'FWD', rating: 85 },
-    { name: 'Francisco Conceição', position: 'FWD', rating: 78 },
-  ],
-  intermilan: [
-    { name: 'Yann Sommer', position: 'GK', rating: 82 },
-    { name: 'Benjamin Pavard', position: 'DEF', rating: 81 },
-    { name: 'Alessandro Bastoni', position: 'DEF', rating: 85 },
-    { name: 'Francesco Acerbi', position: 'DEF', rating: 80 },
-    { name: 'Federico Dimarco', position: 'DEF', rating: 83 },
-    { name: 'Nicolò Barella', position: 'MID', rating: 86 },
-    { name: 'Hakan Çalhanoğlu', position: 'MID', rating: 86 },
-    { name: 'Henrikh Mkhitaryan', position: 'MID', rating: 80 },
-    { name: 'Lautaro Martínez', position: 'FWD', rating: 87 },
-    { name: 'Marcus Thuram', position: 'FWD', rating: 85 },
-    { name: 'Denzel Dumfries', position: 'FWD', rating: 82 },
-  ],
-  acmilan: [
-    { name: 'Mike Maignan', position: 'GK', rating: 86 },
-    { name: 'Théo Hernández', position: 'DEF', rating: 84 },
-    { name: 'Fikayo Tomori', position: 'DEF', rating: 81 },
-    { name: 'Malick Thiaw', position: 'DEF', rating: 78 },
-    { name: 'Emerson Royal', position: 'DEF', rating: 77 },
-    { name: 'Tijjani Reijnders', position: 'MID', rating: 83 },
-    { name: 'Youssouf Fofana', position: 'MID', rating: 79 },
-    { name: 'Christian Pulisic', position: 'MID', rating: 84 },
-    { name: 'Rafael Leão', position: 'FWD', rating: 85 },
-    { name: 'Álvaro Morata', position: 'FWD', rating: 81 },
-    { name: 'Samuel Chukwueze', position: 'FWD', rating: 78 },
-  ],
-  psg: [
-    { name: 'Gianluigi Donnarumma', position: 'GK', rating: 88 },
-    { name: 'Achraf Hakimi', position: 'DEF', rating: 87 },
-    { name: 'Marquinhos', position: 'DEF', rating: 86 },
-    { name: 'Lucas Hernández', position: 'DEF', rating: 81 },
-    { name: 'Nuno Mendes', position: 'DEF', rating: 84 },
-    { name: 'Vitinha', position: 'MID', rating: 85 },
-    { name: 'João Neves', position: 'MID', rating: 82 },
-    { name: 'Fabián Ruiz', position: 'MID', rating: 82 },
-    { name: 'Ousmane Dembélé', position: 'FWD', rating: 87 },
-    { name: 'Bradley Barcola', position: 'FWD', rating: 80 },
-    { name: 'Désiré Doué', position: 'FWD', rating: 82 },
-  ],
-};
+const ALL_TEAMS = [...COUNTRIES, ...CLUBS];
+const CLUB_CREST_ICON = 'https://twemoji.maxcdn.com/v/latest/72x72/1f6e1.png';
+function getTeamThumbnail(team) {
+  if (!team?.code) return null;
+  return team.code.startsWith('c-') ? CLUB_CREST_ICON : cdnFlag(team.code);
+}
 
 // ---------- Team / player helpers ----------
-// National teams are scoped per Discord server: data.teams[guildId][userId]
-function getGuildTeams(guildId) { data.teams[guildId] = data.teams[guildId] || {}; return data.teams[guildId]; }
-function getTeam(guildId, userId) { return getGuildTeams(guildId)[userId] || null; }
+function getTeam(userId) { return data.teams[userId] || null; }
 function getCityTeam(userId) { return data.cityTeams[userId] || null; }
-function isCountryTaken(guildId, code, excludeUserId) {
-  return Object.entries(getGuildTeams(guildId)).some(([uid, t]) => t.code === code && uid !== excludeUserId);
+// A country (or club) is only "taken" within the server where it's being
+// claimed — the same code can be picked by different people in different
+// servers. Your own team itself is still the same team everywhere (coins,
+// squad, trophies, etc. all stay global), so this just checks whether
+// anyone else CURRENTLY IN THIS GUILD already has that code.
+async function isCountryTaken(code, guild, excludeUserId) {
+  const holders = Object.entries(data.teams).filter(([uid, t]) => t.code === code && uid !== excludeUserId);
+  if (holders.length === 0) return false;
+  if (!guild) return holders.length > 0;
+  for (const [uid] of holders) {
+    const member = await guild.members.fetch(uid).catch(() => null);
+    if (member) return true;
+  }
+  return false;
 }
 function getCoins(userId) { return data.coins[userId] || 0; }
 function addCoins(userId, amount) { data.coins[userId] = Math.max(0, (data.coins[userId] || 0) + amount); }
 function getBoosts(userId) { data.boosts[userId] = data.boosts[userId] || {}; return data.boosts[userId]; }
-function getSquadPlayers(guildId, userId) {
-  const team = getTeam(guildId, userId);
+function getSquadPlayers(userId) {
+  const team = getTeam(userId);
   if (!team?.squad) return [];
   return team.squad.map((id) => data.players[id]).filter(Boolean);
 }
-// First 11 signed players are the starting XI, anything beyond that is the bench (subs)
-function getStartingXI(guildId, userId) { return getSquadPlayers(guildId, userId).slice(0, 11); }
-function getBench(guildId, userId) { return getSquadPlayers(guildId, userId).slice(11); }
-
-// Club teams (Champions League / Premier League / Bundesliga etc.) — scoped per
-// server just like national teams, but stored separately so a person can hold
-// both a country and a club at once.
-function getGuildClubs(guildId) { data.clubs[guildId] = data.clubs[guildId] || {}; return data.clubs[guildId]; }
-function getClub(guildId, userId) { return getGuildClubs(guildId)[userId] || null; }
-function isClubTaken(guildId, code, excludeUserId) {
-  return Object.entries(getGuildClubs(guildId)).some(([uid, t]) => t.code === code && uid !== excludeUserId);
-}
-function getClubSquadPlayers(guildId, userId) {
-  const team = getClub(guildId, userId);
-  if (!team?.squad) return [];
-  return team.squad.map((id) => data.players[id]).filter(Boolean);
-}
-function getClubStartingXI(guildId, userId) { return getClubSquadPlayers(guildId, userId).slice(0, 11); }
-function getClubBench(guildId, userId) { return getClubSquadPlayers(guildId, userId).slice(11); }
 function makePlayerId(name) {
   return `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Math.floor(Math.random() * 10000)}`;
 }
@@ -1186,278 +1012,6 @@ const DEFAULT_SQUADS = {
 };
 
 // ============================================================
-// DEFAULT BENCH — real reserve players seeded alongside each starting XI
-// so national squads come with subs ready to go, not just an empty bench.
-// ============================================================
-const DEFAULT_BENCH = {
-  br: [
-    { name: 'Ederson', position: 'GK', rating: 87 },
-    { name: 'Éder Militão', position: 'DEF', rating: 85 },
-    { name: 'Rodrygo', position: 'FWD', rating: 86 },
-  ],
-  'gb-eng': [
-    { name: 'Aaron Ramsdale', position: 'GK', rating: 80 },
-    { name: 'Levi Colwill', position: 'DEF', rating: 79 },
-    { name: 'Ollie Watkins', position: 'FWD', rating: 82 },
-  ],
-  ma: [
-    { name: 'Munir', position: 'GK', rating: 78 },
-    { name: 'Nayef Aguerd', position: 'DEF', rating: 81 },
-    { name: 'Zakaria Aboukhlal', position: 'FWD', rating: 78 },
-  ],
-  no: [
-    { name: 'Kristoffer Klaesson', position: 'GK', rating: 74 },
-    { name: 'David Møller Wolfe', position: 'DEF', rating: 76 },
-    { name: 'Erik Botheim', position: 'FWD', rating: 77 },
-  ],
-  fr: [
-    { name: 'Brice Samba', position: 'GK', rating: 80 },
-    { name: 'Ibrahima Konaté', position: 'DEF', rating: 84 },
-    { name: 'Randal Kolo Muani', position: 'FWD', rating: 83 },
-  ],
-  ar: [
-    { name: 'Gerónimo Rulli', position: 'GK', rating: 79 },
-    { name: 'Germán Pezzella', position: 'DEF', rating: 78 },
-    { name: 'Ángel Correa', position: 'FWD', rating: 79 },
-  ],
-  es: [
-    { name: 'David Raya', position: 'GK', rating: 82 },
-    { name: 'Íñigo Martínez', position: 'DEF', rating: 81 },
-    { name: 'Mikel Oyarzabal', position: 'FWD', rating: 82 },
-  ],
-  pt: [
-    { name: 'José Sá', position: 'GK', rating: 80 },
-    { name: 'António Silva', position: 'DEF', rating: 82 },
-    { name: 'João Félix', position: 'FWD', rating: 80 },
-  ],
-  de: [
-    { name: 'Oliver Baumann', position: 'GK', rating: 78 },
-    { name: 'Waldemar Anton', position: 'DEF', rating: 78 },
-    { name: 'Niclas Füllkrug', position: 'FWD', rating: 80 },
-  ],
-  nl: [
-    { name: 'Justin Bijlow', position: 'GK', rating: 78 },
-    { name: 'Micky van de Ven', position: 'DEF', rating: 81 },
-    { name: 'Wout Weghorst', position: 'FWD', rating: 78 },
-  ],
-  us: [
-    { name: 'Ethan Horvath', position: 'GK', rating: 74 },
-    { name: 'Miles Robinson', position: 'DEF', rating: 76 },
-    { name: 'Ricardo Pepi', position: 'FWD', rating: 77 },
-  ],
-  be: [
-    { name: 'Matz Sels', position: 'GK', rating: 79 },
-    { name: 'Thomas Meunier', position: 'DEF', rating: 78 },
-    { name: 'Charles De Ketelaere', position: 'FWD', rating: 79 },
-  ],
-  uy: [
-    { name: 'Franco Israel', position: 'GK', rating: 76 },
-    { name: 'Mathías Olivera', position: 'DEF', rating: 78 },
-    { name: 'Facundo Torres', position: 'FWD', rating: 78 },
-  ],
-  hr: [
-    { name: 'Ivica Ivušić', position: 'GK', rating: 76 },
-    { name: 'Domagoj Bradarić', position: 'DEF', rating: 76 },
-    { name: 'Bruno Petković', position: 'FWD', rating: 77 },
-  ],
-  mx: [
-    { name: 'Carlos Acevedo', position: 'GK', rating: 74 },
-    { name: 'Julián Araujo', position: 'DEF', rating: 77 },
-    { name: 'Alexis Vega', position: 'FWD', rating: 79 },
-  ],
-  kr: [
-    { name: 'Song Bum-keun', position: 'GK', rating: 75 },
-    { name: 'Kim Moon-hwan', position: 'DEF', rating: 75 },
-    { name: 'Oh Hyeon-gyu', position: 'FWD', rating: 76 },
-  ],
-  cz: [
-    { name: 'Matěj Kovář', position: 'GK', rating: 75 },
-    { name: 'Filip Panák', position: 'DEF', rating: 75 },
-    { name: 'Matěj Vydra', position: 'FWD', rating: 75 },
-  ],
-  ca: [
-    { name: 'James Pantemis', position: 'GK', rating: 74 },
-    { name: 'Derek Cornelius', position: 'DEF', rating: 75 },
-    { name: 'Liam Millar', position: 'FWD', rating: 76 },
-  ],
-  ch: [
-    { name: 'Yann Sommer', position: 'GK', rating: 82 },
-    { name: 'Fabian Schär', position: 'DEF', rating: 79 },
-    { name: 'Ruben Vargas', position: 'FWD', rating: 78 },
-  ],
-  'gb-sct': [
-    { name: 'Angus Gunn', position: 'GK', rating: 75 },
-    { name: 'Jack Hendry', position: 'DEF', rating: 75 },
-    { name: 'Kevin Nisbet', position: 'FWD', rating: 74 },
-  ],
-  py: [
-    { name: 'Alfredo Aguilar', position: 'GK', rating: 73 },
-    { name: 'Junior Alonso', position: 'DEF', rating: 76 },
-    { name: 'Adam Bareiro', position: 'FWD', rating: 75 },
-  ],
-  au: [
-    { name: 'Danny Vukovic', position: 'GK', rating: 74 },
-    { name: 'Bailey Wright', position: 'DEF', rating: 75 },
-    { name: 'Marco Tilio', position: 'FWD', rating: 75 },
-  ],
-  tr: [
-    { name: 'Altay Bayındır', position: 'GK', rating: 78 },
-    { name: 'Çağlar Söyüncü', position: 'DEF', rating: 78 },
-    { name: 'Yunus Akgün', position: 'FWD', rating: 76 },
-  ],
-  ec: [
-    { name: 'Alexander Domínguez', position: 'GK', rating: 76 },
-    { name: 'Félix Torres', position: 'DEF', rating: 78 },
-    { name: 'Michael Estrada', position: 'FWD', rating: 76 },
-  ],
-  ci: [
-    { name: 'Fabrice Ondoa', position: 'GK', rating: 75 },
-    { name: 'Odilon Kossounou', position: 'DEF', rating: 80 },
-    { name: 'Christian Kouamé', position: 'FWD', rating: 77 },
-  ],
-  jp: [
-    { name: 'Keisuke Osako', position: 'GK', rating: 75 },
-    { name: 'Yuto Nagatomo', position: 'DEF', rating: 74 },
-    { name: 'Ayase Ueda', position: 'FWD', rating: 78 },
-  ],
-  se: [
-    { name: 'Kristoffer Nordfeldt', position: 'GK', rating: 75 },
-    { name: 'Victor Nilsson Lindelöf', position: 'DEF', rating: 79 },
-    { name: 'Robin Quaison', position: 'FWD', rating: 76 },
-  ],
-  tn: [
-    { name: 'Mouez Hassen', position: 'GK', rating: 75 },
-    { name: 'Dylan Bronn', position: 'DEF', rating: 77 },
-    { name: 'Naim Sliti', position: 'FWD', rating: 76 },
-  ],
-  eg: [
-    { name: 'Mohamed Sobhi', position: 'GK', rating: 75 },
-    { name: 'Mahmoud Hamdy', position: 'DEF', rating: 75 },
-    { name: 'Ahmed Refaat', position: 'FWD', rating: 74 },
-  ],
-  ir: [
-    { name: 'Hossein Hosseini', position: 'GK', rating: 76 },
-    { name: 'Majid Hosseini', position: 'DEF', rating: 77 },
-    { name: 'Karim Ansarifard', position: 'FWD', rating: 75 },
-  ],
-  sn: [
-    { name: 'Alfred Gomis', position: 'GK', rating: 77 },
-    { name: 'Formose Mendy', position: 'DEF', rating: 76 },
-    { name: 'Iliman Ndiaye', position: 'FWD', rating: 80 },
-  ],
-  dz: [
-    { name: "Rais M'Bolhi", position: 'GK', rating: 74 },
-    { name: 'Mohamed Amine Tougai', position: 'DEF', rating: 74 },
-    { name: 'Andy Delort', position: 'FWD', rating: 77 },
-  ],
-  at: [
-    { name: 'Heinz Lindner', position: 'GK', rating: 74 },
-    { name: 'Maximilian Wöber', position: 'DEF', rating: 78 },
-    { name: 'Junior Adamu', position: 'FWD', rating: 76 },
-  ],
-  co: [
-    { name: 'David Ospina', position: 'GK', rating: 77 },
-    { name: 'William Tesillo', position: 'DEF', rating: 75 },
-    { name: 'Rafael Santos Borré', position: 'FWD', rating: 79 },
-  ],
-  gh: [
-    { name: 'Joe Wollacott', position: 'GK', rating: 75 },
-    { name: 'Alexander Djiku', position: 'DEF', rating: 78 },
-    { name: 'Fatawu Issahaku', position: 'FWD', rating: 79 },
-  ],
-  sa: [
-    { name: 'Mohammed Al-Owais', position: 'GK', rating: 76 },
-    { name: 'Hassan Tambakti', position: 'DEF', rating: 75 },
-    { name: 'Saleh Al-Shehri', position: 'FWD', rating: 76 },
-  ],
-  za: [
-    { name: 'Veli Mothwa', position: 'GK', rating: 74 },
-    { name: 'Njabulo Ngcobo', position: 'DEF', rating: 74 },
-    { name: 'Iqraam Rayners', position: 'FWD', rating: 74 },
-  ],
-  pl: [
-    { name: 'Łukasz Skorupski', position: 'GK', rating: 78 },
-    { name: 'Bartosz Salamon', position: 'DEF', rating: 74 },
-    { name: 'Karol Świderski', position: 'FWD', rating: 76 },
-  ],
-  dk: [
-    { name: 'Frederik Rønnow', position: 'GK', rating: 77 },
-    { name: 'Victor Kristiansen', position: 'DEF', rating: 77 },
-    { name: 'Mathias Jensen', position: 'MID', rating: 77 },
-  ],
-  'gb-wls': [
-    { name: 'Danny Ward', position: 'GK', rating: 76 },
-    { name: 'James Lawrence', position: 'DEF', rating: 75 },
-    { name: 'Brennan Johnson', position: 'FWD', rating: 79 },
-  ],
-  cr: [
-    { name: 'Patrick Sequeira', position: 'GK', rating: 74 },
-    { name: 'Waylon Francis', position: 'DEF', rating: 74 },
-    { name: 'Alonso Martínez', position: 'FWD', rating: 76 },
-  ],
-  rs: [
-    { name: 'Predrag Rajković', position: 'GK', rating: 79 },
-    { name: 'Miloš Veljković', position: 'DEF', rating: 77 },
-    { name: 'Luka Jović', position: 'FWD', rating: 79 },
-  ],
-  cm: [
-    { name: 'Devis Epassy', position: 'GK', rating: 75 },
-    { name: 'Enzo Ebosse', position: 'DEF', rating: 76 },
-    { name: 'Georges-Kevin Nkoudou', position: 'FWD', rating: 76 },
-  ],
-  qa: [
-    { name: 'Yousef Hassan', position: 'GK', rating: 74 },
-    { name: 'Musaab Khidir', position: 'DEF', rating: 74 },
-    { name: 'Mohammed Muntari', position: 'FWD', rating: 75 },
-  ],
-  nz: [
-    { name: 'Max Crocombe', position: 'GK', rating: 73 },
-    { name: 'Storm Roux', position: 'DEF', rating: 73 },
-    { name: 'Kosta Barbarouses', position: 'FWD', rating: 75 },
-  ],
-  cd: [
-    { name: 'Timothy Fayulu', position: 'GK', rating: 74 },
-    { name: 'Marcel Tisserand', position: 'DEF', rating: 76 },
-    { name: 'Fiston Mayele', position: 'FWD', rating: 76 },
-  ],
-  uz: [
-    { name: 'Bekhruz Norchaev', position: 'GK', rating: 73 },
-    { name: 'Farrukh Sayfiev', position: 'DEF', rating: 74 },
-    { name: 'Jaloliddin Masharipov', position: 'FWD', rating: 76 },
-  ],
-  jo: [
-    { name: 'Amer Shafi', position: 'GK', rating: 74 },
-    { name: 'Yazan Al-Arab', position: 'DEF', rating: 74 },
-    { name: 'Mahmoud Al-Mardi', position: 'FWD', rating: 74 },
-  ],
-  iq: [
-    { name: 'Jalal Hassan', position: 'GK', rating: 75 },
-    { name: 'Ali Faez', position: 'DEF', rating: 74 },
-    { name: 'Amjad Attwan', position: 'FWD', rating: 74 },
-  ],
-  pa: [
-    { name: 'Luis Mejía', position: 'GK', rating: 75 },
-    { name: 'José Córdoba', position: 'DEF', rating: 74 },
-    { name: 'Freddy Góndola', position: 'FWD', rating: 74 },
-  ],
-  ht: [
-    { name: 'Johny Placide', position: 'GK', rating: 73 },
-    { name: 'Wilde Donald Guerrier', position: 'DEF', rating: 73 },
-    { name: 'Emmanuel Antoine', position: 'FWD', rating: 73 },
-  ],
-  ba: [
-    { name: 'Ibrahim Šehić', position: 'GK', rating: 76 },
-    { name: 'Adnan Kovačević', position: 'DEF', rating: 75 },
-    { name: 'Rifet Kapić', position: 'FWD', rating: 74 },
-  ],
-  cw: [
-    { name: 'Shendrick Berkel', position: 'GK', rating: 73 },
-    { name: 'Michael Maria', position: 'DEF', rating: 74 },
-    { name: 'Roly Bonevacia', position: 'FWD', rating: 76 },
-  ],
-};
-
-// ============================================================
 // TRANSFER MARKET — real star players, big price tags. Seeded once
 // as free agents with a "cost" field; /player sign deducts coins for
 // these instead of being free like custom-made players.
@@ -1474,16 +1028,6 @@ const STAR_PLAYERS = [
   { name: 'Cristiano Ronaldo', position: 'FWD', rating: 85, cost: 90000000 },
   { name: 'Vinícius Júnior', position: 'FWD', rating: 91, cost: 260000000 },
 ];
-// Real managers available in the transfer market — a good one gives your
-// squad a genuine (small, capped) rating boost in matches.
-const MANAGERS = [
-  { name: 'Pep Guardiola', rating: 96, cost: 220000000 },
-  { name: 'Carlo Ancelotti', rating: 94, cost: 180000000 },
-  { name: 'Jürgen Klopp', rating: 93, cost: 170000000 },
-  { name: 'Hansi Flick', rating: 92, cost: 150000000 },
-  { name: 'Zinedine Zidane', rating: 91, cost: 160000000 },
-  { name: 'Thomas Tuchel', rating: 90, cost: 140000000 },
-];
 // Fallback for countries without a verified real roster — clearly
 // fictional names (never a real athlete's name) so nobody gets falsely
 // attributed to a national team without confirmation.
@@ -1497,404 +1041,8 @@ function generateGenericSquad() {
     rating: 60 + Math.floor(Math.random() * 26),
   }));
 }
-function generateGenericBench() {
-  const positions = ['GK', 'DEF', 'MID', 'FWD'];
-  return positions.map((position) => ({
-    name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
-    position,
-    rating: 58 + Math.floor(Math.random() * 24),
-  }));
-}
 function getDefaultSquad(countryCode) {
   return DEFAULT_SQUADS[countryCode] || generateGenericSquad();
-}
-function getDefaultBench(countryCode) {
-  return DEFAULT_BENCH[countryCode] || generateGenericBench(); // real subs for the 53 verified rosters, random subs otherwise
-}
-
-// ============================================================
-// CAREER MODE — a personal player story, separate from real squads.
-// Trial → signed to a club/country (flavor only) → starting XI → retire,
-// whenever the person chooses. Matches play out fully animated via DM.
-// ============================================================
-function getGuildCareers(guildId) { data.careers[guildId] = data.careers[guildId] || {}; return data.careers[guildId]; }
-function getCareer(guildId, userId) { return getGuildCareers(guildId)[userId] || null; }
-
-const CAREER_TEAM_NAMES = [...CLUBS.map((c) => c.name), ...COUNTRIES.slice(0, 40).map((c) => c.name)];
-function randomCareerTeamName() { return CAREER_TEAM_NAMES[Math.floor(Math.random() * CAREER_TEAM_NAMES.length)]; }
-
-function generateCareerTeammates(career) {
-  const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
-  const myIdx = positions.indexOf(career.position);
-  return positions.map((position, i) => {
-    if (i === myIdx) return { name: career.name, position: career.position, rating: career.rating };
-    return {
-      name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
-      position,
-      rating: Math.max(50, Math.min(90, career.rating + Math.floor(Math.random() * 11) - 6)),
-    };
-  });
-}
-function generateCareerOpponent(baseRating) {
-  const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
-  return positions.map((position) => ({
-    name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
-    position,
-    rating: Math.max(45, Math.min(95, baseRating + Math.floor(Math.random() * 11) - 5)),
-  }));
-}
-async function sendCareerLine(dmChannel, ev, scoreLine) {
-  const text = commentaryLine(ev, null) + (scoreLine ? `\n${scoreLine}` : '');
-  if (ev.type === 'goal') {
-    await dmChannel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
-  } else if (ev.type === 'save') {
-    await dmChannel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
-  } else {
-    await dmChannel.send(text);
-  }
-}
-
-// Plays one full animated career match in the person's DMs. Returns the
-// number of goals the career player personally scored, and whether they won.
-async function playCareerMatch(dmChannel, career, opponentLabel, oppRatingBase, scripted) {
-  const myTeamLabel = career.teamName || 'Trialists XI';
-  const squadMine = generateCareerTeammates(career);
-  const squadOpp = generateCareerOpponent(oppRatingBase);
-
-  let goalEventsMine, goalEventsOpp;
-  if (scripted) {
-    // Scripted arc: you go 2-0 up, they claw it back to 2-2, then YOU score the late winner (3-2)
-    const teammates = squadMine.filter((p) => p.name !== career.name && p.position !== 'GK');
-    const pickTeammate = () => (teammates.length ? teammates[Math.floor(Math.random() * teammates.length)].name : myTeamLabel);
-    goalEventsMine = [
-      { minute: 15, side: 'A', type: 'goal', player: pickTeammate(), isPenalty: false },
-      { minute: 35, side: 'A', type: 'goal', player: pickTeammate(), isPenalty: false },
-      { minute: 85, side: 'A', type: 'goal', player: career.name, isPenalty: false },
-    ];
-    goalEventsOpp = [
-      { minute: 55, side: 'B', type: 'goal', player: pickScorer(squadOpp, opponentLabel), isPenalty: false },
-      { minute: 70, side: 'B', type: 'goal', player: pickScorer(squadOpp, opponentLabel), isPenalty: false },
-    ];
-  } else {
-    const ratingMine = teamOverallRating(squadMine);
-    const ratingOpp = teamOverallRating(squadOpp);
-    const goalsMine = baseGoalCount(ratingMine, ratingOpp);
-    const goalsOpp = baseGoalCount(ratingOpp, ratingMine);
-    goalEventsMine = generateGoalEvents(goalsMine, squadMine, myTeamLabel, 'A', squadOpp, opponentLabel);
-    goalEventsOpp = generateGoalEvents(goalsOpp, squadOpp, opponentLabel, 'B', squadMine, myTeamLabel);
-  }
-  const flavorEvents = generateFlavorEvents(squadMine, squadOpp, myTeamLabel, opponentLabel);
-  const allEvents = [...goalEventsMine, ...goalEventsOpp, ...flavorEvents].sort((a, b) => a.minute - b.minute);
-  const firstHalf = allEvents.filter((e) => e.minute <= 45);
-  const secondHalf = allEvents.filter((e) => e.minute > 45);
-
-  await dmChannel.send({ embeds: [new EmbedBuilder().setTitle(`⚽ ${myTeamLabel} vs ${opponentLabel}: Kickoff!`).setColor(0x2ecc71)] });
-
-  let runningA = 0, runningB = 0;
-  for (const ev of firstHalf) {
-    await delay(3000);
-    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
-    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
-    await sendCareerLine(dmChannel, ev, scoreLine);
-  }
-
-  await dmChannel.send({ embeds: [new EmbedBuilder().setTitle('🟡 Half-Time').setDescription(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**`).setColor(0xf1c40f)] });
-  await delay(10000);
-  await dmChannel.send({ embeds: [new EmbedBuilder().setTitle('🟢 Second Half — Kickoff!').setColor(0x2ecc71)] });
-
-  for (const ev of secondHalf) {
-    await delay(3000);
-    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
-    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
-    await sendCareerLine(dmChannel, ev, scoreLine);
-  }
-
-  const myGoals = goalEventsMine.filter((e) => e.type === 'goal' && e.player === career.name).length;
-  const result = runningA > runningB ? 'win' : runningA < runningB ? 'loss' : 'draw';
-  const resultEmoji = result === 'win' ? '🏆' : result === 'draw' ? '🤝' : '📉';
-  await dmChannel.send({
-    embeds: [new EmbedBuilder().setTitle(`${resultEmoji} Full-Time`)
-      .setDescription(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**\n\n${myGoals > 0 ? `⚽ You scored ${myGoals} goal${myGoals > 1 ? 's' : ''}!` : 'No goals for you today — there\'s always next match.'}`)
-      .setColor(result === 'win' ? 0xffd700 : result === 'draw' ? 0x95a5a6 : 0xe74c3c)],
-  });
-
-  return { myGoals, result };
-}
-
-// Lets the person pick which club/country signs them via DM buttons —
-// a random sample of 4 options, plus a "Surprise me" wildcard.
-async function promptTeamChoice(dm, userId) {
-  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
-  const pool = [...CAREER_TEAM_NAMES];
-  const options = [];
-  while (options.length < 4 && pool.length) {
-    options.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
-  }
-  const row = new ActionRowBuilder().addComponents(
-    ...options.map((teamName, i) => new ButtonBuilder().setCustomId(`signteam_${i}_${token}`).setLabel(teamName).setStyle(ButtonStyle.Primary)),
-    new ButtonBuilder().setCustomId(`signteam_random_${token}`).setLabel('🎲 Surprise me').setStyle(ButtonStyle.Secondary),
-  );
-  const msg = await dm.send({
-    embeds: [new EmbedBuilder().setTitle('🎉 A scout was watching!').setDescription('Which team signs you?').setColor(0xffd700)],
-    components: [row],
-  });
-  const pick = await msg.awaitMessageComponent({ filter: (i) => i.user.id === userId, time: 60000 }).catch(() => null);
-  if (!pick) {
-    await msg.edit({ components: [] }).catch(() => {});
-    return options[Math.floor(Math.random() * options.length)];
-  }
-  const chosen = pick.customId.includes('_random_') ? options[Math.floor(Math.random() * options.length)] : options[parseInt(pick.customId.split('_')[1], 10)];
-  await pick.update({ content: `✅ Signed with **${chosen}**!`, embeds: [], components: [] }).catch(() => {});
-  return chosen;
-}
-
-function careerRetireSummary(career) {
-  const roleDesc = career.stage === 'starting11' ? `a starting XI regular for **${career.teamName}**`
-    : career.stage === 'signed' ? `a squad player for **${career.teamName}**` : 'a trialist who never quite broke through';
-  return `**${career.name}** hangs up the boots after ${career.appearances} appearance${career.appearances === 1 ? '' : 's'}, ${career.goals} goal${career.goals === 1 ? '' : 's'}, finishing as ${roleDesc} — rated **${career.rating}** at the end. Thank you for the memories! 👏`;
-}
-
-// Plays one match, applies stage progression, then offers Continue/Status/Retire
-// buttons right under the result so the whole journey can run entirely in DMs.
-async function runCareerTurn(dm, guildId, userId, career) {
-  let opponentLabel, oppRatingBase;
-  if (career.stage === 'trial') {
-    opponentLabel = 'Rival Academy U18s';
-    oppRatingBase = 58;
-  } else {
-    opponentLabel = randomCareerTeamName();
-    oppRatingBase = career.stage === 'starting11' ? career.rating + 5 : career.rating - 3;
-  }
-
-  const matchResult = await playCareerMatch(dm, career, opponentLabel, oppRatingBase, career.stage === 'trial');
-
-  career.appearances++;
-  career.goals += matchResult.myGoals;
-  if (matchResult.result === 'win') career.wins++;
-  else if (matchResult.result === 'draw') career.draws++;
-  else career.losses++;
-  career.rating = Math.min(99, career.rating + Math.min(3, matchResult.myGoals) + (matchResult.result === 'win' ? 1 : 0));
-
-  const followUpLines = [];
-  if (career.stage === 'trial') {
-    career.stage = 'signed';
-    career.teamName = await promptTeamChoice(dm, userId);
-    followUpLines.push(`🎉 **${career.teamName}** have signed you to their squad — good luck chasing World Cup and Champions League glory!`);
-  } else if (career.stage === 'signed' && career.appearances >= 5 && career.goals >= 3) {
-    career.stage = 'starting11';
-    followUpLines.push(`⭐ Big step up — you've forced your way into **${career.teamName}**'s Starting XI!`);
-  }
-  saveData(data);
-  if (followUpLines.length) await dm.send({ embeds: [new EmbedBuilder().setDescription(followUpLines.join('\n')).setColor(0xffd700)] });
-
-  // ---- Continue / Status / Retire, right under the result ----
-  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`career_continue_${token}`).setLabel('▶️ Continue Journey').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`career_status_${token}`).setLabel('📊 Status').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`career_retire_${token}`).setLabel('🛑 Retire').setStyle(ButtonStyle.Danger),
-  );
-  const promptMsg = await dm.send({ content: 'What next?', components: [row] });
-  const collector = promptMsg.createMessageComponentCollector({ componentType: ComponentType.Button, filter: (i) => i.user.id === userId, time: 10 * 60 * 1000 });
-
-  collector.on('collect', async (btn) => {
-    if (btn.customId.startsWith('career_status_')) {
-      const stageLabel = { trial: '🌱 Trial Player', signed: `✍️ Signed — ${career.teamName}`, starting11: `⭐ Starting XI — ${career.teamName}` }[career.stage] || career.stage;
-      await btn.reply({
-        embeds: [new EmbedBuilder().setTitle(`${career.name} — Career Status`)
-          .addFields(
-            { name: 'Stage', value: stageLabel, inline: true },
-            { name: 'Position', value: career.position, inline: true },
-            { name: 'Rating', value: `${career.rating}`, inline: true },
-            { name: 'Appearances', value: `${career.appearances}`, inline: true },
-            { name: 'Goals', value: `${career.goals}`, inline: true },
-            { name: 'Record', value: `${career.wins}W-${career.draws}D-${career.losses}L`, inline: true },
-          ).setColor(0x3498db)],
-        ephemeral: true,
-      }).catch(() => {});
-      return;
-    }
-    collector.stop();
-    await promptMsg.edit({ components: [] }).catch(() => {});
-    if (btn.customId.startsWith('career_retire_')) {
-      career.stage = 'retired';
-      saveData(data);
-      await btn.update({ content: null, embeds: [new EmbedBuilder().setTitle(`🏟️ ${career.name} Retires`).setDescription(careerRetireSummary(career)).setColor(0xf1c40f)], components: [] }).catch(() => {});
-      return;
-    }
-    // Continue
-    await btn.update({ content: '⚽ Next match incoming...', components: [] }).catch(() => {});
-    await runCareerTurn(dm, guildId, userId, career).catch((err) => console.error('Career turn failed:', err));
-  });
-  collector.on('end', async (collected) => {
-    if (collected.size === 0) await promptMsg.edit({ content: 'No response — run `/career play` whenever you want to continue.', components: [] }).catch(() => {});
-  });
-}
-
-// A live decision moment: the ball breaks to the career player — shoot
-// themselves (higher variance, personal glory) or pass to a teammate
-// (steadier, but someone else gets the goal).
-async function presentPassOrShoot(dm, userId, career, squadMine, myTeamLabel, myRating, oppRatingBase) {
-  const token = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`bigchance_shoot_${token}`).setLabel('⚽ Shoot').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`bigchance_pass_${token}`).setLabel('🔁 Pass').setStyle(ButtonStyle.Primary),
-  );
-  const msg = await dm.send({
-    embeds: [new EmbedBuilder().setTitle('🔥 Big Chance!').setDescription(`The ball breaks to **${career.name}** in the box! Shoot yourself, or pass it off to a teammate?`).setColor(0xe67e22)],
-    components: [row],
-  });
-  const pick = await msg.awaitMessageComponent({ filter: (i) => i.user.id === userId, time: 20000 }).catch(() => null);
-  const choice = pick ? (pick.customId.includes('_shoot_') ? 'shoot' : 'pass') : 'shoot';
-  if (pick) await pick.update({ components: [] }).catch(() => {});
-  else await msg.edit({ components: [] }).catch(() => {});
-
-  if (choice === 'shoot') {
-    const chance = Math.min(0.75, Math.max(0.25, 0.45 + (myRating - oppRatingBase) / 150));
-    if (Math.random() < chance) {
-      await dm.send(`⚽ **${career.name}** SHOOTS... and SCORES! What a finish!`);
-      return { scored: true, scorer: career.name };
-    }
-    await dm.send(`❌ **${career.name}** shoots... but it's off target! So close!`);
-    return { scored: false, scorer: null };
-  }
-  const teammates = squadMine.filter((p) => p.name !== career.name);
-  const teammate = teammates.length ? teammates[Math.floor(Math.random() * teammates.length)].name : myTeamLabel;
-  if (Math.random() < 0.5) {
-    await dm.send(`🔁 **${career.name}** squares it across... **${teammate}** slots it home!`);
-    return { scored: true, scorer: teammate };
-  }
-  await dm.send(`🔁 **${career.name}** lays it off to **${teammate}**... but the effort is blocked!`);
-  return { scored: false, scorer: null };
-}
-
-// One World Cup match: normal simulation plus one guaranteed live
-// Pass-or-Shoot decision moment mid-second-half.
-async function playWorldCupMatch(dm, userId, career, opponentLabel, oppRatingBase, roundLabel) {
-  const myTeamLabel = career.teamName;
-  const squadMine = generateCareerTeammates(career);
-  const squadOpp = generateCareerOpponent(oppRatingBase);
-  const ratingMine = teamOverallRating(squadMine);
-  const ratingOpp = teamOverallRating(squadOpp);
-  const goalsMine = baseGoalCount(ratingMine, ratingOpp);
-  const goalsOpp = baseGoalCount(ratingOpp, ratingMine);
-  const goalEventsMine = generateGoalEvents(goalsMine, squadMine, myTeamLabel, 'A', squadOpp, opponentLabel);
-  const goalEventsOpp = generateGoalEvents(goalsOpp, squadOpp, opponentLabel, 'B', squadMine, myTeamLabel);
-  const flavorEvents = generateFlavorEvents(squadMine, squadOpp, myTeamLabel, opponentLabel);
-  const allEvents = [...goalEventsMine, ...goalEventsOpp, ...flavorEvents].sort((a, b) => a.minute - b.minute);
-  const bigChanceMinute = 50 + Math.floor(Math.random() * 26); // 50'-75'
-  const beforeChance = allEvents.filter((e) => e.minute < bigChanceMinute);
-  const afterChance = allEvents.filter((e) => e.minute >= bigChanceMinute);
-
-  await dm.send({ embeds: [new EmbedBuilder().setTitle(`⚽ ${roundLabel}: ${myTeamLabel} vs ${opponentLabel}`).setColor(0x2ecc71)] });
-
-  let runningA = 0, runningB = 0;
-  for (const ev of beforeChance) {
-    await delay(3000);
-    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
-    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
-    await sendCareerLine(dm, ev, scoreLine);
-  }
-
-  await delay(2000);
-  const chanceResult = await presentPassOrShoot(dm, userId, career, squadMine, myTeamLabel, career.rating, oppRatingBase);
-  let bigChanceScorer = null;
-  if (chanceResult.scored) {
-    runningA++;
-    bigChanceScorer = chanceResult.scorer;
-    await dm.send(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**`);
-  }
-
-  for (const ev of afterChance) {
-    await delay(3000);
-    if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
-    const scoreLine = ev.type === 'goal' ? `**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**` : null;
-    await sendCareerLine(dm, ev, scoreLine);
-  }
-
-  let myGoals = goalEventsMine.filter((e) => e.type === 'goal' && e.player === career.name).length;
-  if (bigChanceScorer === career.name) myGoals++;
-  const result = runningA > runningB ? 'win' : runningA < runningB ? 'loss' : 'draw';
-  const resultEmoji = result === 'win' ? '🏆' : result === 'draw' ? '🤝' : '📉';
-  await dm.send({
-    embeds: [new EmbedBuilder().setTitle(`${resultEmoji} Full-Time — ${roundLabel}`)
-      .setDescription(`**${myTeamLabel}** ${runningA} - ${runningB} **${opponentLabel}**\n\n${myGoals > 0 ? `⚽ You scored ${myGoals} goal${myGoals > 1 ? 's' : ''}!` : "No goals for you personally today."}`)
-      .setColor(result === 'win' ? 0xffd700 : result === 'draw' ? 0x95a5a6 : 0xe74c3c)],
-  });
-
-  return { myGoals, result, goalsFor: runningA, goalsAgainst: runningB };
-}
-
-async function careerPenaltyShootout(dm, myTeamLabel, opponentLabel) {
-  let mine = 0, theirs = 0;
-  for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) mine++; if (Math.random() < 0.75) theirs++; }
-  while (mine === theirs) { if (Math.random() < 0.5) mine++; else theirs++; }
-  await dm.send({ embeds: [new EmbedBuilder().setTitle('🥅 Penalty Shootout').setDescription(`**${myTeamLabel}** ${mine} - ${theirs} **${opponentLabel}**`).setColor(0xf1c40f)] });
-  return mine > theirs;
-}
-
-// Full World Cup run: group stage, then knockout from Round of 32 to the Final.
-async function runCareerWorldCup(dm, guildId, userId, career) {
-  const groupOpponents = shuffle(COUNTRIES.map((c) => c.name)).slice(0, 3);
-  await dm.send({
-    embeds: [new EmbedBuilder().setTitle('🏆 World Cup Draw')
-      .setDescription(`**${career.teamName}** has been drawn into a group with:\n${groupOpponents.map((n) => `• ${n}`).join('\n')}\n\nThree group matches, then the knockout stage begins!`)
-      .setColor(0x3498db)],
-  });
-
-  let points = 0, goalsFor = 0, goalsAgainst = 0;
-  for (const opp of groupOpponents) {
-    await delay(2000);
-    const oppRatingBase = career.rating + Math.floor(Math.random() * 11) - 5;
-    const res = await playWorldCupMatch(dm, userId, career, opp, oppRatingBase, 'Group Stage');
-    career.appearances++; career.goals += res.myGoals;
-    goalsFor += res.goalsFor; goalsAgainst += res.goalsAgainst;
-    if (res.result === 'win') { career.wins++; points += 3; }
-    else if (res.result === 'draw') { career.draws++; points += 1; }
-    else career.losses++;
-    career.rating = Math.min(99, career.rating + Math.min(3, res.myGoals) + (res.result === 'win' ? 1 : 0));
-    saveData(data);
-  }
-
-  const qualified = points >= 4;
-  await dm.send({
-    embeds: [new EmbedBuilder().setTitle('📊 Group Stage Complete')
-      .setDescription(`**${career.teamName}**: ${points}pts, GF ${goalsFor} GA ${goalsAgainst}\n\n${qualified ? '✅ You qualify for the knockout stage!' : '❌ Eliminated at the group stage — better luck next World Cup!'}`)
-      .setColor(qualified ? 0x2ecc71 : 0xe74c3c)],
-  });
-  if (!qualified) return;
-
-  let roundSize = 32;
-  while (roundSize >= 2) {
-    const roundLabel = roundNameForSize(roundSize);
-    await delay(2000);
-    const oppRatingBase = career.rating + Math.floor(Math.random() * 9) - 2 + (32 - roundSize) / 4;
-    const opponentLabel = shuffle(COUNTRIES.map((c) => c.name))[0];
-    const res = await playWorldCupMatch(dm, userId, career, opponentLabel, oppRatingBase, roundLabel);
-    career.appearances++; career.goals += res.myGoals;
-    career.rating = Math.min(99, career.rating + Math.min(3, res.myGoals) + (res.result === 'win' ? 1 : 0));
-
-    let advances = res.result === 'win';
-    if (res.result === 'draw') advances = await careerPenaltyShootout(dm, career.teamName, opponentLabel);
-    if (res.result === 'win' || (res.result === 'draw' && advances)) career.wins++;
-    else if (res.result === 'draw') career.draws++;
-    else career.losses++;
-    saveData(data);
-
-    if (!advances) {
-      await dm.send({ embeds: [new EmbedBuilder().setTitle('📉 World Cup Over').setDescription(`Eliminated in the **${roundLabel}**. Heartbreaking, but what a run!`).setColor(0xe74c3c)] });
-      return;
-    }
-    roundSize /= 2;
-  }
-
-  career.worldCupsWon = (career.worldCupsWon || 0) + 1;
-  saveData(data);
-  await dm.send({
-    embeds: [new EmbedBuilder().setTitle('🏆🎉 WORLD CUP CHAMPION!')
-      .setDescription(`**${career.name}** and **${career.teamName}** have won the World Cup! An unforgettable tournament. 🐐`)
-      .setColor(0xffd700)],
-  });
 }
 
 function seedStarPlayers() {
@@ -1910,29 +1058,8 @@ function seedStarPlayers() {
 // ============================================================
 // MATCH ENGINE — goal generation, scorer commentary, animation
 // ============================================================
-// Team strength drives the score now instead of pure randomness: a squad's
-// average rating sets its attack/defense power, and the matchup between two
-// teams' ratings shifts the expected goals (Poisson mean) for each side.
-// Upsets can still happen — just far less often the bigger the gap.
-function teamOverallRating(squad) {
-  if (!squad.length) return 75; // city/custom teams with no rated players — average default
-  return squad.reduce((sum, p) => sum + (p.rating || 70), 0) / squad.length;
-}
-function poissonRandom(lambda) {
-  const L = Math.exp(-lambda);
-  let k = 0, p = 1;
-  do { k++; p *= Math.random(); } while (p > L);
-  return k - 1;
-}
-// ~1.35 goals/team is the real-world average; a full 20-rating gap swings it hard either way
-function expectedGoals(myRating, oppRating) {
-  const diff = myRating - oppRating;
-  const lambda = 1.35 + diff / 11;
-  return Math.max(0.15, Math.min(4.5, lambda));
-}
-function baseGoalCount(myRating, oppRating) {
-  return Math.min(9, poissonRandom(expectedGoals(myRating, oppRating)));
-}
+const GOAL_WEIGHTS = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5];
+function baseGoalCount() { return GOAL_WEIGHTS[Math.floor(Math.random() * GOAL_WEIGHTS.length)]; }
 
 function applyBoostsToGoals(userId, goals) {
   const boosts = getBoosts(userId);
@@ -1982,11 +1109,8 @@ function generateGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, o
 }
 
 // Extra time (91'-105', 106'-120') sees fewer goals than a normal 45 — weighted low
-// Extra time sees far fewer goals than a normal 45 — same strength model, lower baseline
-function extraTimeGoalCount(myRating, oppRating) {
-  const lambda = Math.max(0.05, Math.min(1.2, expectedGoals(myRating, oppRating) * 0.35));
-  return Math.min(4, poissonRandom(lambda));
-}
+const ET_GOAL_WEIGHTS = [0, 0, 0, 0, 0, 1, 1, 2];
+function extraTimeGoalCount() { return ET_GOAL_WEIGHTS[Math.floor(Math.random() * ET_GOAL_WEIGHTS.length)]; }
 function generateExtraTimeGoalEvents(goalCount, squadPlayers, teamName, side, oppSquad, oppTeamName, minMinute, maxMinute) {
   const events = [];
   for (let i = 0; i < goalCount; i++) {
@@ -2002,7 +1126,7 @@ function generateExtraTimeGoalEvents(goalCount, squadPlayers, teamName, side, op
 }
 function generateFlavorEvents(squadA, squadB, teamAName, teamBName) {
   const events = [];
-  const flavorCount = 7 + Math.floor(Math.random() * 6); // 7-12 flavor events, up from 3-5
+  const flavorCount = 3 + Math.floor(Math.random() * 3);
   for (let i = 0; i < flavorCount; i++) {
     const minute = Math.floor(Math.random() * 90) + 1;
     const side = Math.random() < 0.5 ? 'A' : 'B';
@@ -2011,19 +1135,30 @@ function generateFlavorEvents(squadA, squadB, teamAName, teamBName) {
     const oppSquad = side === 'A' ? squadB : squadA;
     const oppTeamName = side === 'A' ? teamBName : teamAName;
     const roll = Math.random();
-    if (roll < 0.35) {
+    if (roll < 0.3) {
       events.push({ minute, side, type: 'save', player: pickScorer(squad, teamName), gk: pickGoalkeeper(oppSquad, oppTeamName) });
-    } else if (roll < 0.55) {
+    } else if (roll < 0.48) {
       events.push({ minute, side, type: 'card', player: pickScorer(squad, teamName), card: Math.random() < 0.15 ? 'red' : 'yellow' });
-    } else if (roll < 0.7) {
+    } else if (roll < 0.62) {
       events.push({ minute, side, type: 'foul', player: pickDefender(oppSquad, oppTeamName), against: pickScorer(squad, teamName) });
-    } else if (roll < 0.85) {
+    } else if (roll < 0.74) {
       // VAR checks a penalty shout but it's not given
       events.push({ minute, side, type: 'var_no_penalty', player: pickScorer(squad, teamName) });
-    } else {
+    } else if (roll < 0.86) {
       // VAR gives the penalty, but it's missed or saved — doesn't change the score
       const outcome = Math.random() < 0.5 ? 'saved' : 'missed';
       events.push({ minute, side, type: 'var_penalty_missed', player: pickScorer(squad, teamName), gk: pickGoalkeeper(oppSquad, oppTeamName), outcome });
+    } else if (squad.length > 1) {
+      // Injury — the player goes off and a substitute comes on in their place
+      // for the rest of the match (they can be picked for goals/saves/etc.
+      // from here on, the injured player can't).
+      const idx = Math.floor(Math.random() * squad.length);
+      const injured = squad[idx];
+      const sub = { name: `${injured.position} Substitute`, position: injured.position, rating: Math.max(55, (injured.rating || 70) - 5) };
+      squad.splice(idx, 1, sub);
+      events.push({ minute, side, type: 'injury', player: injured.name, sub: sub.name });
+    } else {
+      events.push({ minute, side, type: 'card', player: pickScorer(squad, teamName), card: 'yellow' });
     }
   }
   return events;
@@ -2033,42 +1168,13 @@ function formatMinute(minute) {
   if (minute > 90) return `90+${minute - 90}'`;
   return `${minute}'`;
 }
-// ============================================================
-// COMMENTATOR — varied phrasing so the same event type doesn't always
-// read the same way. Pick a random template each time.
-// ============================================================
-const GOAL_LINES = [
-  (p) => `**${p}** rushes through, dribbles past the defense and SCORES!`,
-  (p) => `GOOOAL! **${p}** finds the top corner — the keeper had no chance!`,
-  (p) => `What a strike! **${p}** absolutely hammers it into the net!`,
-  (p) => `**${p}** is in the right place at the right time — tap-in, but it counts!`,
-  (p) => `Unbelievable composure from **${p}**, who slots it home coolly!`,
-  (p) => `**${p}** unleashes a thunderbolt from distance — the net bulges!`,
-  (p) => `Class finish from **${p}** — the crowd is on its feet!`,
-  (p) => `**${p}** ghosts in at the back post and heads it home!`,
-];
-const PENALTY_GOAL_LINES = [
-  (p) => `**${p}** steps up... and sends the keeper the wrong way!`,
-  (p) => `Ice in the veins — **${p}** buries the penalty!`,
-  (p) => `**${p}** doesn't even break stride — straight down the middle!`,
-];
-const SAVE_LINES = [
-  (p, gk) => `**${p}** shoots... but it's saved brilliantly by **${gk}**!`,
-  (p, gk) => `What a stop! **${gk}** somehow keeps out **${p}**'s effort!`,
-  (p, gk) => `**${gk}** flies across goal to deny **${p}** — world class save!`,
-  (p, gk) => `**${p}** thought that was in, but **${gk}** says no!`,
-];
-function commentaryLine(ev, flag) {
+function commentaryLine(ev) {
   const minStr = ev.et ? `${ev.minute}' (ET)` : formatMinute(ev.minute);
   if (ev.type === 'goal') {
-    const playerDisplay = flag ? `${ev.player} ${flag}` : ev.player;
-    const lines = ev.isPenalty ? PENALTY_GOAL_LINES : GOAL_LINES;
-    const line = lines[Math.floor(Math.random() * lines.length)](playerDisplay);
-    return `⚽ ${minStr} — ${line}`;
+    return `⚽ ${minStr} — **${ev.player}** rushes through, dribbles past the defense and SCORES${ev.isPenalty ? ' from the spot' : ''}!`;
   }
   if (ev.type === 'save') {
-    const line = SAVE_LINES[Math.floor(Math.random() * SAVE_LINES.length)](ev.player, ev.gk);
-    return `🧤 ${minStr} — ${line}`;
+    return `🧤 ${minStr} — **${ev.player}** shoots... but it's saved brilliantly by **${ev.gk}**!`;
   }
   if (ev.type === 'foul') {
     return `🟨 ${minStr} — **${ev.player}** brings down **${ev.against}** — foul given.`;
@@ -2082,26 +1188,18 @@ function commentaryLine(ev, flag) {
   if (ev.type === 'var_penalty_missed') {
     return `📺 ${minStr} — Penalty awarded to **${ev.player}**'s side after a VAR review!\n${ev.outcome === 'saved' ? `🧤 The spot-kick is saved by **${ev.gk}**!` : '❌ The penalty goes wide — missed!'}`;
   }
+  if (ev.type === 'injury') {
+    return `🤕 ${minStr} — **${ev.player}** goes down injured and has to be helped off... **${ev.sub}** comes on to replace them.`;
+  }
   return `${ev.card === 'red' ? '🟥' : '🟨'} ${minStr} — **${ev.player}** is shown a ${ev.card} card.`;
 }
 
 // Sends a commentary line; goals and saves get a gif attached and a
 // scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
-const CZECHIA_FLAG = flagEmoji('cz');
-const REFEREE_NAMES = ['Björn Kuipers', 'Néstor Pitana', 'Antonio Mateu Lahoz', 'Michael Oliver', 'Szymon Marciniak', 'Daniele Orsato', 'Clément Turpin', 'Ismail Elfath'];
-const WEATHER_CONDITIONS = [
-  '☀️ Clear skies and firm pitch',
-  '🌧️ Steady rain — expect a slicker surface',
-  '☁️ Overcast, mild conditions',
-  '🌫️ Light fog rolling over the stadium',
-  '🔥 Sweltering heat out there today',
-  '💨 Strong winds swirling around the ground',
-];
-async function sendEventLine(channel, ev, scoreLine, flag, guildId) {
-  let text = commentaryLine(ev, flag) + (scoreLine ? `\n${scoreLine}` : '');
-  if (ev.type === 'goal' && flag === CZECHIA_FLAG) text += '\n🥤 **Kofola!** Someone crack one open for that goal!';
+async function sendEventLine(channel, ev, scoreLine) {
+  const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
   if (ev.type === 'goal') {
-    recordGoal(guildId, ev.player);
+    recordGoal(ev.player);
     await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
   } else if (ev.type === 'save') {
     await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
@@ -2111,16 +1209,14 @@ async function sendEventLine(channel, ev, scoreLine, flag, guildId) {
 }
 
 // Groups scorers by player for the final result screen, e.g. "K. Mbappé 48', 66'"
-function formatScorerList(goalEvents, flag) {
+function formatScorerList(goalEvents) {
   const byPlayer = {};
   for (const ev of goalEvents) {
     if (ev.type !== 'goal') continue; // skip the paired VAR narrative entries, only count real goals
     byPlayer[ev.player] = byPlayer[ev.player] || [];
-    const minStr = ev.et ? `${ev.minute}' (ET)` : formatMinute(ev.minute);
-    byPlayer[ev.player].push(`${minStr}${ev.isPenalty ? ' (P)' : ''}`);
+    byPlayer[ev.player].push(`${formatMinute(ev.minute)}${ev.isPenalty ? ' (P)' : ''}`);
   }
-  const prefix = flag ? `${flag} ` : '';
-  const lines = Object.entries(byPlayer).map(([player, mins]) => `${prefix}${player} ${mins.join(', ')}`);
+  const lines = Object.entries(byPlayer).map(([player, mins]) => `${player} ${mins.join(', ')}`);
   return lines.length ? lines.join('\n') : '—';
 }
 
@@ -2141,19 +1237,14 @@ function computeTrainingBonusGoals(trainingCount) {
   return bonus;
 }
 
-async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB, squadA, squadB) {
-  const addedSeconds = 8 + Math.floor(Math.random() * 16); // +8 to +23s added time — longer breather
+async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId) {
+  const addedSeconds = 5 + Math.floor(Math.random() * 11); // +5 to +15s added time
   const totalMs = HALF_TIME_BASE_MS + addedSeconds * 1000;
   const matchToken = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
-  const MAX_SUBS = 4;
 
-  const row1 = new ActionRowBuilder().addComponents(
+  const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`train_A_${matchToken}`).setLabel(`🏋️ Train ${teamA.name}`).setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`train_B_${matchToken}`).setLabel(`🏋️ Train ${teamB.name}`).setStyle(ButtonStyle.Danger),
-  );
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`sub_A_${matchToken}`).setLabel(`🔄 Sub — ${teamA.name}`).setStyle(ButtonStyle.Secondary).setDisabled(benchA.length === 0),
-    new ButtonBuilder().setCustomId(`sub_B_${matchToken}`).setLabel(`🔄 Sub — ${teamB.name}`).setStyle(ButtonStyle.Secondary).setDisabled(benchB.length === 0),
   );
 
   const halfTimeMsg = await channel.send({
@@ -2161,62 +1252,23 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
       .setDescription(
         `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**\n\n` +
         `⏱️ Added time for the break: **+${addedSeconds}s** (total break: ${Math.round(totalMs / 1000)}s)\n` +
-        `🏋️ Train your squad — every rep improves that team's odds of a bonus goal next half! (10s cooldown per person)\n` +
-        `🔄 Each manager gets up to **${MAX_SUBS} substitutions** — pick exactly who comes off and who comes on.`
+        `Hit the buttons below to train your squad — every training rep improves that team's odds of a bonus goal in the second half! (10s cooldown per person)`
       )
       .setColor(0xf1c40f)],
-    components: [row1, row2],
+    components: [row],
   });
 
   const trainingCounts = { A: 0, B: 0 };
-  const subs = { A: [], B: [] }; // arrays of { outName, inPlayer }, up to MAX_SUBS each
-  const usedBenchIds = { A: new Set(), B: new Set() };
-  const usedOutNames = { A: new Set(), B: new Set() };
   const lastClick = new Map(); // userId -> timestamp
 
   const collector = halfTimeMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: totalMs });
   collector.on('collect', async (btn) => {
-    const isSub = btn.customId.startsWith('sub_');
-    const side = btn.customId.includes('_A_') ? 'A' : 'B';
+    const side = btn.customId.startsWith('train_A_') ? 'A' : 'B';
     const ownerId = side === 'A' ? teamAId : teamBId;
-    const teamName = side === 'A' ? teamA.name : teamB.name;
     if (btn.user.id !== ownerId) {
-      await btn.reply({ content: `🚫 Only the ${teamName} manager can manage this team!`, ephemeral: true }).catch(() => {});
+      await btn.reply({ content: `🚫 Only the ${side === 'A' ? teamA.name : teamB.name} manager can train this team!`, ephemeral: true }).catch(() => {});
       return;
     }
-
-    if (isSub) {
-      const squad = side === 'A' ? squadA : squadB;
-      const bench = (side === 'A' ? benchA : benchB).filter((p) => !usedBenchIds[side].has(p.id));
-      const eligibleOut = squad.filter((p) => p.position !== 'GK' && !usedOutNames[side].has(p.name));
-      if (subs[side].length >= MAX_SUBS) { await btn.reply({ content: `You've already used all ${MAX_SUBS} substitutions this match!`, ephemeral: true }).catch(() => {}); return; }
-      if (bench.length === 0) { await btn.reply({ content: 'No bench players left to sub on.', ephemeral: true }).catch(() => {}); return; }
-      if (eligibleOut.length === 0) { await btn.reply({ content: 'No eligible starters left to sub off.', ephemeral: true }).catch(() => {}); return; }
-
-      // Step 1: pick who comes ON
-      const inSelect = new StringSelectMenuBuilder().setCustomId(`subin_${matchToken}`).setPlaceholder('Who comes ON?')
-        .addOptions(bench.slice(0, 25).map((p) => ({ label: `${p.name} (${p.position}, ${p.rating})`, value: p.id })));
-      const inReply = await btn.reply({ content: `🔄 **${teamName}** substitution — choose who comes **ON**:`, components: [new ActionRowBuilder().addComponents(inSelect)], ephemeral: true, fetchReply: true }).catch(() => null);
-      if (!inReply) return;
-      const inPick = await inReply.awaitMessageComponent({ filter: (i) => i.user.id === btn.user.id, componentType: ComponentType.StringSelect, time: 25000 }).catch(() => null);
-      if (!inPick) { await btn.editReply({ content: '⏳ Substitution timed out — try again.', components: [] }).catch(() => {}); return; }
-      const inPlayer = bench.find((p) => p.id === inPick.values[0]);
-
-      // Step 2: pick who comes OFF
-      const outSelect = new StringSelectMenuBuilder().setCustomId(`subout_${matchToken}`).setPlaceholder('Who comes OFF?')
-        .addOptions(eligibleOut.slice(0, 25).map((p) => ({ label: `${p.name} (${p.position}, ${p.rating})`, value: p.name })));
-      await inPick.update({ content: `🔄 **${teamName}** — now choose who comes **OFF** for **${inPlayer.name}**:`, components: [new ActionRowBuilder().addComponents(outSelect)] }).catch(() => {});
-      const outPick = await inReply.awaitMessageComponent({ filter: (i) => i.user.id === btn.user.id, componentType: ComponentType.StringSelect, time: 25000 }).catch(() => null);
-      if (!outPick) { await btn.editReply({ content: '⏳ Substitution timed out — try again.', components: [] }).catch(() => {}); return; }
-      const outName = outPick.values[0];
-
-      usedBenchIds[side].add(inPlayer.id);
-      usedOutNames[side].add(outName);
-      subs[side].push({ outName, inPlayer });
-      await outPick.update({ content: `✅ Substitution ${subs[side].length}/${MAX_SUBS} queued for **${teamName}**: ${outName} ➡️ **${inPlayer.name}** — revealed at second-half kickoff!`, components: [] }).catch(() => {});
-      return;
-    }
-
     const now = Date.now();
     const last = lastClick.get(btn.user.id) || 0;
     if (now - last < 10 * 1000) {
@@ -2226,13 +1278,14 @@ async function runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, te
     }
     lastClick.set(btn.user.id, now);
     trainingCounts[side]++;
+    const teamName = side === 'A' ? teamA.name : teamB.name;
     await btn.reply({ content: `💪 Trained **${teamName}**! (${trainingCounts[side]} reps banked)`, ephemeral: true }).catch(() => {});
   });
 
   await new Promise((resolve) => collector.on('end', resolve));
   await halfTimeMsg.edit({ components: [] }).catch(() => {});
 
-  return { trainingCounts, addedSeconds, subs };
+  return { trainingCounts, addedSeconds };
 }
 
 // ============================================================
@@ -2276,31 +1329,11 @@ async function runPrediction(channel, teamA, teamB) {
 }
 
 async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
-  if (!channel) { console.error('playMatch called with no channel — aborting match.'); return null; }
-  const kind = options.kind || (options.isCity ? 'city' : 'country'); // 'country' | 'club' | 'city'
-  const isCity = kind === 'city';
-  const guildId = channel.guild?.id || channel.guildId;
-  const teamA = kind === 'city' ? getCityTeam(teamAId) : kind === 'club' ? getClub(guildId, teamAId) : getTeam(guildId, teamAId);
-  const teamB = kind === 'city' ? getCityTeam(teamBId) : kind === 'club' ? getClub(guildId, teamBId) : getTeam(guildId, teamBId);
-  let squadA = kind === 'city' ? [] : kind === 'club' ? getClubStartingXI(guildId, teamAId) : getStartingXI(guildId, teamAId);
-  let squadB = kind === 'city' ? [] : kind === 'club' ? getClubStartingXI(guildId, teamBId) : getStartingXI(guildId, teamBId);
-  const benchA = kind === 'city' ? [] : kind === 'club' ? getClubBench(guildId, teamAId) : getBench(guildId, teamAId);
-  const benchB = kind === 'city' ? [] : kind === 'club' ? getClubBench(guildId, teamBId) : getBench(guildId, teamBId);
-  const flagA = kind === 'country' ? flagEmoji(teamA.code) : '';
-  const flagB = kind === 'country' ? flagEmoji(teamB.code) : '';
-
-  // Career-mode cameo: if anyone's personal career player is signed to
-  // either side (matching by team name), they join that squad for this
-  // match — so career players actually show up in World Cup / Champions
-  // League / Premier League / etc. matches once they're signed.
-  if (!isCity && guildId) {
-    for (const career of Object.values(getGuildCareers(guildId))) {
-      if (career.stage === 'retired' || !career.teamName) continue;
-      const cameoPlayer = { name: career.name, position: career.position, rating: career.rating };
-      if (career.teamName === teamA.name) squadA = [...squadA, cameoPlayer];
-      else if (career.teamName === teamB.name) squadB = [...squadB, cameoPlayer];
-    }
-  }
+  const isCity = options.isCity || false;
+  const teamA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
+  const teamB = isCity ? getCityTeam(teamBId) : getTeam(teamBId);
+  const squadA = isCity ? [] : getSquadPlayers(teamAId);
+  const squadB = isCity ? [] : getSquadPlayers(teamBId);
 
   // ---- Cooldown: 30s minimum gap between matches in this channel ----
   const lastEnd = matchCooldowns.get(channel.id) || 0;
@@ -2308,20 +1341,10 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   if (waitLeft > 0) await delay(waitLeft);
 
   // ---- Pre-match prediction voting (one vote per person, changeable, 30s) ----
-  try {
-    await runPrediction(channel, teamA, teamB);
-  } catch (err) {
-    console.error('Prediction voting failed, continuing without it:', err);
-  }
+  await runPrediction(channel, teamA, teamB);
 
-  // A manager gives a real but capped tactical boost — top manager rating (~96) adds ~+2
-  const managerBoost = (team) => team.manager ? Math.min(2, Math.max(0, (team.manager.rating - 80) / 8)) : 0;
-  const curseA = !isCity && guildId ? consumeCurse(guildId, teamAId, kind) : false;
-  const curseB = !isCity && guildId ? consumeCurse(guildId, teamBId, kind) : false;
-  const ratingA = teamOverallRating(squadA) + managerBoost(teamA) - (curseA ? 20 : 0);
-  const ratingB = teamOverallRating(squadB) + managerBoost(teamB) - (curseB ? 20 : 0);
-  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount(ratingA, ratingB));
-  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount(ratingB, ratingA));
+  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
+  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
   goalsA = applyOpponentReduction(teamBId, goalsA); // teamB's ironWall reduces teamA's goals
   goalsB = applyOpponentReduction(teamAId, goalsB);
 
@@ -2332,59 +1355,21 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const firstHalfEvents = allEvents.filter((e) => e.minute <= 45);
   const secondHalfEvents = allEvents.filter((e) => e.minute > 45);
 
-  const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${flagA} ${teamA.name}** vs **${flagB} ${teamB.name}**`).setColor(0x2ecc71);
-  if (kind === 'country') {
-    kickoffEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) });
-    kickoffEmbed.setThumbnail(cdnFlag(teamB.code));
-  }
-  if (!isCity) await channel.send({ embeds: [buildLineupEmbed(teamA, teamB, squadA, squadB, flagA, flagB, kind)] });
-  const referee = REFEREE_NAMES[Math.floor(Math.random() * REFEREE_NAMES.length)];
-  const weather = WEATHER_CONDITIONS[Math.floor(Math.random() * WEATHER_CONDITIONS.length)];
-  await channel.send(`👨‍⚖️ Referee: **${referee}** | ${weather}`);
-  if (kind === 'country') await channel.send(`🎵 The national anthems ring out around the stadium as ${flagA} **${teamA.name}** face ${flagB} **${teamB.name}**...`);
-  await delay(2000);
-  const tossWinner = Math.random() < 0.5 ? teamA.name : teamB.name;
-  await channel.send(`🪙 Coin toss: **${tossWinner}** win the toss and get us underway.`);
-  await delay(1500);
+  const kickoffEmbed = new EmbedBuilder().setTitle(`⚽ ${roundLabel}: Kickoff!`).setDescription(`**${teamA.name}** vs **${teamB.name}**`).setColor(0x2ecc71);
+  if (!isCity) kickoffEmbed.setThumbnail(getTeamThumbnail(teamA));
   await channel.send({ embeds: [kickoffEmbed] });
 
   let runningA = 0, runningB = 0;
 
   for (const ev of firstHalfEvents) {
-    await delay(4000);
+    await delay(2500);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
+    await sendEventLine(channel, ev, scoreLine);
   }
 
   // ---- Half-time: training window, then apply bonus goals to the second half ----
-  let trainingCounts = { A: 0, B: 0 };
-  let addedSeconds = 10;
-  let subs = { A: [], B: [] };
-  try {
-    ({ trainingCounts, addedSeconds, subs } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId, benchA, benchB, squadA, squadB));
-  } catch (err) {
-    console.error('Half-time training failed, continuing without it:', err);
-    await delay(HALF_TIME_BASE_MS);
-  }
-
-  // Apply substitutions (up to 4 per team): swap a starter out for each bench
-  // player, and retroactively rename the subbed-off player in any already-
-  // generated second-half moments so the sub actually shows up in commentary.
-  function applySubs(squad, subList, sideLetter) {
-    const changes = [];
-    for (const subInfo of subList) {
-      const idx = squad.findIndex((p) => p.name === subInfo.outName);
-      if (idx === -1) continue; // shouldn't happen — chosen out-player already validated at pick time
-      const outPlayer = squad[idx];
-      squad[idx] = subInfo.inPlayer;
-      for (const ev of secondHalfEvents) { if (ev.side === sideLetter && ev.player === outPlayer.name) ev.player = subInfo.inPlayer.name; }
-      changes.push({ out: outPlayer, in: subInfo.inPlayer });
-    }
-    return changes;
-  }
-  const subsOutA = applySubs(squadA, subs.A, 'A');
-  const subsOutB = applySubs(squadB, subs.B, 'B');
+  const { trainingCounts, addedSeconds } = await runHalfTimeTraining(channel, teamA, teamB, runningA, runningB, teamAId, teamBId);
 
   const bonusA = computeTrainingBonusGoals(trainingCounts.A);
   const bonusB = computeTrainingBonusGoals(trainingCounts.B);
@@ -2405,18 +1390,16 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   secondHalfEvents.sort((a, b) => a.minute - b.minute);
 
   const kickoffLines = [`🟢 Second Half — Kickoff! (${addedSeconds}s added time played out at the break)`];
-  for (const c of subsOutA) kickoffLines.push(`🔄 **${teamA.name}** substitution: ${c.out.name} ➡️ **${c.in.name}**`);
-  for (const c of subsOutB) kickoffLines.push(`🔄 **${teamB.name}** substitution: ${c.out.name} ➡️ **${c.in.name}**`);
   if (bonusA > 0) kickoffLines.push(`🏋️ ${teamA.name}'s training paid off — **+${bonusA} bonus goal${bonusA > 1 ? 's' : ''}** coming their way!`);
   if (bonusB > 0) kickoffLines.push(`🏋️ ${teamB.name}'s training paid off — **+${bonusB} bonus goal${bonusB > 1 ? 's' : ''}** coming their way!`);
   if (bonusA === 0 && bonusB === 0) kickoffLines.push('No bonus goals earned from the training session — back to open play!');
   await channel.send({ embeds: [new EmbedBuilder().setTitle('🟢 Second Half').setDescription(kickoffLines.join('\n')).setColor(0x2ecc71)] });
 
   for (const ev of secondHalfEvents) {
-    await delay(4000);
+    await delay(2500);
     if (ev.type === 'goal') { if (ev.side === 'A') runningA++; else runningB++; }
     const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-    await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
+    await sendEventLine(channel, ev, scoreLine);
   }
   await delay(1500);
 
@@ -2431,19 +1414,17 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 
     // ET First Half: 91'-105'
     await channel.send({ embeds: [new EmbedBuilder().setTitle("🟠 Extra Time — First Half Kickoff! (91')").setColor(0xe67e22)] });
-    const etRatingA1 = teamOverallRating(squadA);
-    const etRatingB1 = teamOverallRating(squadB);
     const et1Events = [
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingA1, etRatingB1), squadA, teamA.name, 'A', squadB, teamB.name, 91, 105),
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingB1, etRatingA1), squadB, teamB.name, 'B', squadA, teamA.name, 91, 105),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadA, teamA.name, 'A', squadB, teamB.name, 91, 105),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadB, teamB.name, 'B', squadA, teamA.name, 91, 105),
     ].sort((a, b) => a.minute - b.minute);
     for (const ev of et1Events) {
-      await delay(4000);
+      await delay(2500);
       if (ev.type === 'goal') {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
       const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
+      await sendEventLine(channel, ev, scoreLine);
     }
 
     // ET Half-Time
@@ -2456,19 +1437,17 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 
     // ET Second Half: 106'-120'
     await channel.send({ embeds: [new EmbedBuilder().setTitle("🟠 Extra Time — Second Half Kickoff! (106')").setColor(0xe67e22)] });
-    const etRatingA2 = teamOverallRating(squadA);
-    const etRatingB2 = teamOverallRating(squadB);
     const et2Events = [
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingA2, etRatingB2), squadA, teamA.name, 'A', squadB, teamB.name, 106, 120),
-      ...generateExtraTimeGoalEvents(extraTimeGoalCount(etRatingB2, etRatingA2), squadB, teamB.name, 'B', squadA, teamA.name, 106, 120),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadA, teamA.name, 'A', squadB, teamB.name, 106, 120),
+      ...generateExtraTimeGoalEvents(extraTimeGoalCount(), squadB, teamB.name, 'B', squadA, teamA.name, 106, 120),
     ].sort((a, b) => a.minute - b.minute);
     for (const ev of et2Events) {
-      await delay(4000);
+      await delay(2500);
       if (ev.type === 'goal') {
         if (ev.side === 'A') { runningA++; goalsA++; goalEventsA.push(ev); } else { runningB++; goalsB++; goalEventsB.push(ev); }
       }
       const scoreLine = ev.type === 'goal' ? `**${teamA.name}** ${runningA} - ${runningB} **${teamB.name}**` : null;
-      await sendEventLine(channel, ev, scoreLine, ev.side === 'A' ? flagA : flagB, guildId);
+      await sendEventLine(channel, ev, scoreLine);
     }
     await delay(1500);
     await channel.send({
@@ -2497,62 +1476,30 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
       `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''} • <t:${Math.floor(Date.now() / 1000)}:d>`
     )
     .addFields(
-      { name: `${teamA.name} Scorers`, value: formatScorerList(goalEventsA, flagA), inline: true },
-      { name: `${teamB.name} Scorers`, value: formatScorerList(goalEventsB, flagB), inline: true },
+      { name: `${teamA.name} Scorers`, value: formatScorerList(goalEventsA), inline: true },
+      { name: `${teamB.name} Scorers`, value: formatScorerList(goalEventsB), inline: true },
     )
     .setColor(0x2ecc71);
-  if (kind === 'country') { resultEmbed.setAuthor({ name: teamA.name, iconURL: cdnFlag(teamA.code) }); resultEmbed.setThumbnail(cdnFlag(teamB.code)); }
+  if (!isCity) { resultEmbed.setAuthor({ name: teamA.name, iconURL: getTeamThumbnail(teamA) }); resultEmbed.setThumbnail(getTeamThumbnail(teamB)); }
   await channel.send({ embeds: [resultEmbed] });
-
-  // ---- Man of the Match: top scorer of the game, tiebreak toward the winning side ----
-  const allGoalEvents = [...goalEventsA.filter((e) => e.type === 'goal'), ...goalEventsB.filter((e) => e.type === 'goal')];
-  if (allGoalEvents.length) {
-    const tally = {};
-    for (const ev of allGoalEvents) tally[ev.player] = (tally[ev.player] || 0) + (ev.side === (winnerId === teamAId ? 'A' : 'B') ? 1.01 : 1);
-    const motm = Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0];
-    await channel.send({ embeds: [new EmbedBuilder().setDescription(`🌟 **Man of the Match: ${motm}**`).setColor(0xf1c40f)] });
-  }
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
   teamA.wins !== undefined && (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
   teamB.wins !== undefined && (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
   if (!isCity) addCoins(winnerId, 25); // city/league games are for fun only — no coin reward
-
-  // Credit any cameo-ing career players with the appearance/goals from this match
-  if (!isCity && guildId) {
-    for (const career of Object.values(getGuildCareers(guildId))) {
-      if (career.stage === 'retired' || !career.teamName) continue;
-      const onA = career.teamName === teamA.name, onB = career.teamName === teamB.name;
-      if (!onA && !onB) continue;
-      const myGoals = (onA ? goalEventsA : goalEventsB).filter((e) => e.type === 'goal' && e.player === career.name).length;
-      career.appearances++;
-      career.goals += myGoals;
-      const won = (onA && winnerId === teamAId) || (onB && winnerId === teamBId);
-      if (won) career.wins++; else if (goalsA === goalsB) career.draws++; else career.losses++;
-      career.rating = Math.min(99, career.rating + Math.min(3, myGoals) + (won ? 1 : 0));
-    }
-  }
-
   saveData(data);
   matchCooldowns.set(channel.id, Date.now());
 
-  return {
-    goalsA, goalsB, penalties, winnerId,
-    teamAId, teamBId, goalEventsA, goalEventsB,
-    keeperA: pickGoalkeeper(squadA, teamA.name),
-    keeperB: pickGoalkeeper(squadB, teamB.name),
-  };
+  return { goalsA, goalsB, penalties, winnerId };
 }
 
 // ============================================================
 // INSTANT (unanimated) MATCH — used for group-stage fixtures, so a
 // full group phase doesn't take forever to play through
 // ============================================================
-function simulateMatchInstant(guildId, teamAId, teamBId, kind) {
-  const ratingA = teamOverallRating(kind === 'club' ? getClubStartingXI(guildId, teamAId) : getStartingXI(guildId, teamAId));
-  const ratingB = teamOverallRating(kind === 'club' ? getClubStartingXI(guildId, teamBId) : getStartingXI(guildId, teamBId));
-  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount(ratingA, ratingB));
-  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount(ratingB, ratingA));
+function simulateMatchInstant(teamAId, teamBId) {
+  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
+  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
   goalsA = applyOpponentReduction(teamBId, goalsA);
   goalsB = applyOpponentReduction(teamAId, goalsB);
   return { goalsA, goalsB };
@@ -2587,11 +1534,8 @@ function tournamentDisplayName(t) {
   if (t.type === 'copaamerica') return 'Copa América';
   if (t.type === 'euros') return 'UEFA European Championship';
   if (t.type === 'afcon') return 'Africa Cup of Nations';
-  if (t.type === 'premierleague') return 'Premier League';
-  if (t.type === 'bundesliga') return 'Bundesliga';
   return t.name;
 }
-function getTournament(guildId) { return data.tournaments[guildId] || null; }
 async function getTournamentChannel(guild) {
   const t = getTournament(guild.id);
   if (!t?.channelId) return null;
@@ -2620,28 +1564,6 @@ function groupStandings(group, matches) {
   return Object.values(table).sort((a, b) => (b.pts - a.pts) || ((b.gf - b.ga) - (a.gf - a.ga)) || (b.gf - a.gf));
 }
 
-// Accumulates scorer/keeper/concede stats from a playMatch result onto
-// the tournament object, so end-of-tournament awards can be computed.
-function recordTournamentMatchStats(t, result) {
-  t.tourneyGoals = t.tourneyGoals || {};
-  t.tourneyGoalEvents = t.tourneyGoalEvents || [];
-  t.concededByTeam = t.concededByTeam || {};
-  t.keeperByTeam = t.keeperByTeam || {};
-
-  for (const ev of result.goalEventsA.filter((e) => e.type === 'goal')) {
-    t.tourneyGoals[ev.player] = (t.tourneyGoals[ev.player] || 0) + 1;
-    t.tourneyGoalEvents.push({ player: ev.player, minute: ev.minute, et: !!ev.et, isPenalty: !!ev.isPenalty, teamId: result.teamAId });
-  }
-  for (const ev of result.goalEventsB.filter((e) => e.type === 'goal')) {
-    t.tourneyGoals[ev.player] = (t.tourneyGoals[ev.player] || 0) + 1;
-    t.tourneyGoalEvents.push({ player: ev.player, minute: ev.minute, et: !!ev.et, isPenalty: !!ev.isPenalty, teamId: result.teamBId });
-  }
-  t.concededByTeam[result.teamAId] = (t.concededByTeam[result.teamAId] || 0) + result.goalsB;
-  t.concededByTeam[result.teamBId] = (t.concededByTeam[result.teamBId] || 0) + result.goalsA;
-  t.keeperByTeam[result.teamAId] = result.keeperA;
-  t.keeperByTeam[result.teamBId] = result.keeperB;
-}
-
 async function startNextKnockoutMatch(guild) {
   const t = getTournament(guild.id);
   if (!t || t.status !== 'knockout') return;
@@ -2660,10 +1582,9 @@ async function startNextKnockoutMatch(guild) {
       const channel = await getTournamentChannel(guild);
       if (channel) {
         await channel.send({ embeds: [new EmbedBuilder().setTitle('🥉 Third Place Playoff').setColor(0xcd7f32)] });
-        const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff', { kind: t.kind });
-        recordTournamentMatchStats(t, thirdResult);
+        const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff');
         addCoins(thirdResult.winnerId, 5000000);
-        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getCompetitionTeam(t, guild.id, thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
+        await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
       }
     }
 
@@ -2678,79 +1599,21 @@ async function startNextKnockoutMatch(guild) {
   const match = round[idx];
   const channel = await getTournamentChannel(guild);
   if (!channel) return;
-  const result = await playMatch(channel, match.p1, match.p2, roundNameForSize(round.length * 2), { kind: t.kind });
-  recordTournamentMatchStats(t, result);
+  const result = await playMatch(channel, match.p1, match.p2, roundNameForSize(round.length * 2));
   match.winner = result.winnerId;
   match.result = result;
   saveData(data);
   await startNextKnockoutMatch(guild);
 }
 
-// End-of-tournament individual awards: Golden Boot, Ballon d'Or, the ultra-rare
-// Super Ballon d'Or, Golden Glove, and Goal of the Tournament.
-async function announceTournamentAwards(guild, t) {
-  const channel = await getTournamentChannel(guild);
-  if (!channel) return;
-  const goalEntries = Object.entries(t.tourneyGoals || {}).sort((a, b) => b[1] - a[1]);
-  if (goalEntries.length === 0) return; // no scorer data captured — nothing to award
-
-  const guildId = guild.id;
-  const topScorer = goalEntries[0];
-  const goldenBootTies = goalEntries.filter(([, g]) => g === topScorer[1]).map(([n]) => n);
-
-  // Ballon d'Or — goals-weighted, with a bonus for being on the champion squad
-  const champSquadNames = new Set(getSquadPlayers(guildId, t.champion).map((p) => p.name));
-  const ballonDorRanked = goalEntries.map(([n, g]) => [n, g * 10 + (champSquadNames.has(n) ? 15 : 0)]).sort((a, b) => b[1] - a[1]);
-  const ballonDorWinner = ballonDorRanked[0]?.[0] || topScorer[0];
-
-  // Super Ballon d'Or — a legendary honor, only handed out once every
-  // 5 completed tournaments in this server (regardless of stats).
-  const completedCount = data.tournamentsCompleted[guildId] || 0;
-  const superAwarded = completedCount > 0 && completedCount % 5 === 0;
-
-  // Golden Glove — best defensive record across the tournament
-  let gloveLine = 'Not enough data to award.';
-  const concedeEntries = Object.entries(t.concededByTeam || {}).sort((a, b) => a[1] - b[1]);
-  if (concedeEntries.length) {
-    const [bestTeamId, conceded] = concedeEntries[0];
-    const keeperName = (t.keeperByTeam || {})[bestTeamId] || 'Unknown';
-    const teamName = getCompetitionTeam(t, guildId, bestTeamId)?.name || 'Unknown';
-    gloveLine = `**${keeperName}** (${teamName}) — only ${conceded} conceded all tournament`;
-  }
-
-  // Goal of the Tournament — weighted toward extra-time / stoppage-time / open-play strikes
-  let gotLine = 'No goals scored — a defensive masterclass all tournament!';
-  if (t.tourneyGoalEvents?.length) {
-    const weighted = t.tourneyGoalEvents.map((e) => ({ ...e, weight: 1 + (e.et ? 2 : 0) + (e.minute > 90 ? 1 : 0) + (e.isPenalty ? 0 : 1) }));
-    let r = Math.random() * weighted.reduce((s, e) => s + e.weight, 0);
-    let picked = weighted[0];
-    for (const e of weighted) { r -= e.weight; if (r <= 0) { picked = e; break; } }
-    const teamName = getCompetitionTeam(t, guildId, picked.teamId)?.name || '';
-    gotLine = `**${picked.player}** (${teamName}) — ${picked.et ? `${picked.minute}' (ET)` : formatMinute(picked.minute)}${picked.isPenalty ? ' from the spot' : ''}`;
-  }
-
-  await channel.send({
-    embeds: [new EmbedBuilder().setTitle('🏅 Tournament Awards').setColor(0xf1c40f)
-      .addFields(
-        { name: '👟 Golden Boot', value: `${goldenBootTies.join(', ')} — ${topScorer[1]} goal${topScorer[1] > 1 ? 's' : ''}` },
-        { name: "🥇 Ballon d'Or", value: `**${ballonDorWinner}**` },
-        { name: "🌟 Super Ballon d'Or", value: superAwarded ? `**${ballonDorWinner}** — awarded once every 5 tournaments, and this is the one!` : `Not this time — only handed out every 5th tournament (${5 - (completedCount % 5)} to go).` },
-        { name: '🏆 FIFA Best Player', value: `**${ballonDorWinner}**` },
-        { name: '🧤 Golden Glove', value: gloveLine },
-        { name: '🎯 Goal of the Tournament', value: gotLine },
-      )],
-  });
-}
-
 async function crownChampion(guild, championId) {
   const t = getTournament(guild.id);
   t.status = 'completed';
   t.champion = championId;
-  const champTeam = getCompetitionTeam(t, guild.id, championId);
+  const champTeam = getTeam(championId);
   champTeam.trophies += 1;
   const CHAMPION_PRIZE_COINS = 53000000;
   addCoins(championId, CHAMPION_PRIZE_COINS);
-  data.tournamentsCompleted[guild.id] = (data.tournamentsCompleted[guild.id] || 0) + 1;
   saveData(data);
 
   // The prize role is an ultra-rare 1-in-1000 bonus, not guaranteed
@@ -2767,34 +1630,7 @@ async function crownChampion(guild, championId) {
       (t.prizeRoleId ? (wonRole ? '\n🎉 INCREDIBLE — also won the ultra-rare (1/1000) tournament role!' : '\n(Missed the 1/1000 chance at the bonus tournament role — so close!)') : '');
     await channel.send({
       embeds: [new EmbedBuilder().setTitle(`🏆🎉 ${champTeam.name} WINS ${tournamentDisplayName(t)}!`)
-        .setDescription(desc).setThumbnail(cdnFlag(champTeam.code)).setColor(0xffd700)],
-    });
-  }
-  await announceTournamentAwards(guild, t);
-}
-
-// Groups-only format: no knockout bracket — crown the top team of each
-// group once all group matches are played.
-async function crownGroupWinners(guild, t) {
-  t.status = 'completed';
-  const letters = 'ABCDEFGH';
-  const winners = t.groups.map((g, i) => groupStandings(g, t.groupMatches[i])[0]?.id).filter(Boolean);
-  t.champions = winners;
-  const CHAMPION_PRIZE_COINS = winners.length > 1 ? 20000000 : 53000000;
-  const lines = [];
-  for (const winnerId of winners) {
-    const team = getCompetitionTeam(t, guild.id, winnerId);
-    if (!team) continue;
-    team.trophies += 1;
-    addCoins(winnerId, CHAMPION_PRIZE_COINS);
-    lines.push(`🏆 **${team.name}** — Group ${letters[t.groups.findIndex((g) => g.includes(winnerId))]} Champions (+${CHAMPION_PRIZE_COINS.toLocaleString()} coins)`);
-  }
-  saveData(data);
-  const channel = await getTournamentChannel(guild);
-  if (channel) {
-    await channel.send({
-      embeds: [new EmbedBuilder().setTitle(`🏆🎉 ${tournamentDisplayName(t)} — Group Stage Complete!`)
-        .setDescription(lines.join('\n') || 'No group winners could be determined.').setColor(0xffd700)],
+        .setDescription(desc).setThumbnail(getTeamThumbnail(champTeam)).setColor(0xffd700)],
     });
   }
 }
@@ -2802,25 +1638,22 @@ async function crownGroupWinners(guild, t) {
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
+const SQUAD_CAP = 16; // 11 starters worth of depth plus a bench for injuries/subs
 const sizeChoices = [
   { name: 'Round of 32 (32 teams)', value: '32' }, { name: 'Round of 16 (16 teams)', value: '16' },
   { name: 'Quarterfinals (8 teams)', value: '8' }, { name: 'Semifinals (4 teams)', value: '4' },
 ];
 const formatChoices = [
-  { name: 'Group Stage → Knockout', value: 'groups_knockout' },
-  { name: 'Group Stage Only (no knockout)', value: 'groups_only' },
+  { name: 'Knockout only', value: 'knockout' },
+  { name: 'Group stage → knockout', value: 'groups_knockout' },
+  { name: 'Group stage only (no bracket)', value: 'groups_only' },
 ];
 const typeChoices = [
   { name: 'FIFA World Cup', value: 'worldcup' }, { name: 'Champions League', value: 'championsleague' },
   { name: 'Europa League', value: 'europaleague' }, { name: 'Copa América', value: 'copaamerica' },
   { name: 'UEFA Euros', value: 'euros' }, { name: 'Africa Cup of Nations', value: 'afcon' },
-  { name: 'Premier League', value: 'premierleague' }, { name: 'Bundesliga', value: 'bundesliga' },
   { name: 'Custom', value: 'custom' },
 ];
-// Club-based competitions use /club teams for participants; everything else uses /team (national)
-const CLUB_TOURNAMENT_TYPES = new Set(['championsleague', 'europaleague', 'premierleague', 'bundesliga']);
-function tournamentKindForType(type) { return CLUB_TOURNAMENT_TYPES.has(type) ? 'club' : 'country'; }
-function getCompetitionTeam(t, guildId, userId) { return t.kind === 'club' ? getClub(guildId, userId) : getTeam(guildId, userId); }
 const positionChoices = [
   { name: 'Goalkeeper (GK)', value: 'GK' }, { name: 'Defender (DEF)', value: 'DEF' },
   { name: 'Midfielder (MID)', value: 'MID' }, { name: 'Forward (FWD)', value: 'FWD' },
@@ -2834,41 +1667,12 @@ const shopChoices = [
 
 const slashCommands = [
   new SlashCommandBuilder().setName('help').setDescription('List all commands.'),
-  new SlashCommandBuilder().setName('makeadmin').setDescription('Owner-only: grants Administrator in this server to you or someone else.')
-    .addUserOption((o) => o.setName('user').setDescription('Who to grant admin to (defaults to you)').setRequired(false)),
-  new SlashCommandBuilder().setName('curse').setDescription("Owner-only: curse a team's next match.")
-    .addUserOption((o) => o.setName('user').setDescription('Whose team to curse').setRequired(true))
-    .addStringOption((o) => o.setName('for').setDescription('Which team gets cursed').setRequired(true).addChoices({ name: 'Country', value: 'country' }, { name: 'Club', value: 'club' })),
+
   new SlashCommandBuilder().setName('team').setDescription('Manage your national team.')
     .addSubcommand((s) => s.setName('set').setDescription('Choose the country you represent.')
       .addStringOption((o) => o.setName('country').setDescription('Country name').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('profile').setDescription("View a team's profile.")
       .addUserOption((o) => o.setName('user').setDescription('Whose profile').setRequired(false))),
-
-  new SlashCommandBuilder().setName('club').setDescription('Manage your club team (Champions League / Premier League / Bundesliga etc).')
-    .addSubcommand((s) => s.setName('set').setDescription('Choose the club you represent.')
-      .addStringOption((o) => o.setName('club').setDescription('Club name').setRequired(true).setAutocomplete(true)))
-    .addSubcommand((s) => s.setName('profile').setDescription("View a club team's profile.")
-      .addUserOption((o) => o.setName('user').setDescription('Whose profile').setRequired(false))),
-
-  new SlashCommandBuilder().setName('clubmatch').setDescription('Play a full animated friendly between two club teams.')
-    .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
-
-  new SlashCommandBuilder().setName('manager').setDescription('Buy a real manager to boost your team.')
-    .addSubcommand((s) => s.setName('shop').setDescription('See available managers.'))
-    .addSubcommand((s) => s.setName('buy').setDescription('Hire a manager for your country or club.')
-      .addStringOption((o) => o.setName('manager').setDescription('Manager to hire').setRequired(true).addChoices(...MANAGERS.map((m) => ({ name: `${m.name} (${m.rating})`, value: m.name }))))
-      .addStringOption((o) => o.setName('for').setDescription('Which team gets the manager').setRequired(true).addChoices({ name: 'Country', value: 'country' }, { name: 'Club', value: 'club' }))),
-
-  new SlashCommandBuilder().setName('career').setDescription('Your personal player career — trial to retirement, played out via DM.')
-    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel)
-    .addSubcommand((s) => s.setName('start').setDescription('Start a new career as a trial player.')
-      .addStringOption((o) => o.setName('name').setDescription('Your player name').setRequired(true))
-      .addStringOption((o) => o.setName('position').setDescription('Your position').setRequired(true).addChoices(...positionChoices)))
-    .addSubcommand((s) => s.setName('play').setDescription('Play your next career match — sent to your DMs.'))
-    .addSubcommand((s) => s.setName('status').setDescription('View your career so far.'))
-    .addSubcommand((s) => s.setName('retire').setDescription('Retire from your career for good (until you /career start again).'))
-    .addSubcommand((s) => s.setName('worldcup').setDescription('Enter a World Cup run with your career player — groups through to the Final, live in DMs.')),
 
   new SlashCommandBuilder().setName('createplayer').setDescription('Create a custom player. Admin only.')
     .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true))
@@ -2876,19 +1680,22 @@ const slashCommands = [
     .addIntegerOption((o) => o.setName('rating').setDescription('Rating 40-99 (default random 60-90)').setRequired(false).setMinValue(40).setMaxValue(99)),
 
   new SlashCommandBuilder().setName('player').setDescription('Squad management.')
-    .addSubcommand((s) => s.setName('sign').setDescription('Sign a free-agent player to your squad (max 11).')
+    .addSubcommand((s) => s.setName('sign').setDescription(`Sign a free-agent player to your squad (max ${SQUAD_CAP}).`)
       .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('release').setDescription('Release a player from your squad back to free agency.')
       .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName('squad').setDescription("View a team's squad.")
       .addUserOption((o) => o.setName('user').setDescription('Whose squad').setRequired(false)))
-    .addSubcommand((s) => s.setName('list').setDescription('List free-agent players available to sign.')),
+    .addSubcommand((s) => s.setName('list').setDescription('List free-agent players available to sign.'))
+    .addSubcommand((s) => s.setName('transfer').setDescription('Transfer a player from your squad to someone else\'s.')
+      .addStringOption((o) => o.setName('name').setDescription('Player name').setRequired(true).setAutocomplete(true))
+      .addUserOption((o) => o.setName('to').setDescription('Who to transfer them to').setRequired(true))),
 
   new SlashCommandBuilder().setName('balance').setDescription('Check your coin balance.'),
   new SlashCommandBuilder().setName('daily').setDescription('Claim your daily coins.'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Top players.')
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
-      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' })),
+      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-L record)', value: 'record' })),
 
   new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
     .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
@@ -2913,44 +1720,54 @@ const slashCommands = [
     .addSubcommand((s) => s.setName('buy').setDescription('Buy an item.')
       .addStringOption((o) => o.setName('item').setDescription('Item to buy').setRequired(true).addChoices(...shopChoices))),
 
-  new SlashCommandBuilder().setName('creategroups').setDescription('Quickly build a group-stage tournament from everyone who already has a team set. Admin only.')
-    .addStringOption((o) => o.setName('type').setDescription('Tournament type').setRequired(true).addChoices(...typeChoices))
-    .addStringOption((o) => o.setName('prize').setDescription('Prize description').setRequired(true))
-    .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups').setRequired(true).setMinValue(2).setMaxValue(8))
-    .addStringOption((o) => o.setName('format').setDescription('Group Stage → Knockout, or Group Stage Only').setRequired(true).addChoices(...formatChoices))
-    .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size (only needed for Group→Knockout)').setRequired(false).addChoices(...sizeChoices))
-    .addStringOption((o) => o.setName('name').setDescription('Custom name (only used if type = Custom)').setRequired(false)),
-
   new SlashCommandBuilder().setName('tournament').setDescription('Tournament commands.')
     .addSubcommand((s) => s.setName('create').setDescription('Create a new tournament. Admin only.')
       .addStringOption((o) => o.setName('type').setDescription('Tournament type').setRequired(true).addChoices(...typeChoices))
-      .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size').setRequired(true).addChoices(...sizeChoices))
+      .addStringOption((o) => o.setName('format').setDescription('Knockout only, groups then knockout, or groups only').setRequired(true).addChoices(...formatChoices))
       .addStringOption((o) => o.setName('prize').setDescription('Prize description').setRequired(true))
+      .addStringOption((o) => o.setName('size').setDescription('Knockout bracket size (required unless format = groups only)').setRequired(false).addChoices(...sizeChoices))
       .addStringOption((o) => o.setName('name').setDescription('Custom name (only used if type = Custom)').setRequired(false))
       .addRoleOption((o) => o.setName('prize_role').setDescription('Role to award the champion').setRequired(false)))
     .addSubcommand((s) => s.setName('join').setDescription('Join the open tournament.'))
     .addSubcommand((s) => s.setName('leave').setDescription('Leave the open tournament.'))
     .addSubcommand((s) => s.setName('creategroups').setDescription('Split registered teams into groups. Admin only.')
-      .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups').setRequired(true).setMinValue(2).setMaxValue(8)))
+      .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups').setRequired(true).setMinValue(1).setMaxValue(8)))
     .addSubcommand((s) => s.setName('playgroups').setDescription('Simulate all remaining group-stage matches. Admin only.'))
     .addSubcommand((s) => s.setName('standings').setDescription('View group stage standings.'))
     .addSubcommand((s) => s.setName('advancegroups').setDescription('Advance top teams from groups into the knockout bracket. Admin only.')
       .addIntegerOption((o) => o.setName('top').setDescription('How many teams advance per group').setRequired(true).setMinValue(1).setMaxValue(4)))
+    .addSubcommand((s) => s.setName('finish').setDescription('End a "groups only" tournament and crown the champion from the final standings. Admin only.'))
     .addSubcommand((s) => s.setName('start').setDescription('Skip groups and start the knockout bracket directly. Admin only.'))
     .addSubcommand((s) => s.setName('bracket').setDescription('View the current knockout bracket.'))
     .addSubcommand((s) => s.setName('status').setDescription('View tournament status.'))
     .addSubcommand((s) => s.setName('end').setDescription('Cancel the current tournament. Admin only.')),
 ].map((c) => c.toJSON());
 
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-  const globalCommands = slashCommands.filter((c) => c.name === 'career');
-  const guildCommands = slashCommands.filter((c) => c.name !== 'career');
-  await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: guildCommands });
-  await rest.put(Routes.applicationCommands(client.user.id), { body: globalCommands });
-  console.log(`Registered ${guildCommands.length} guild slash commands + ${globalCommands.length} global command(s) (DM-capable). Note: global command updates can take up to ~1 hour to propagate on Discord's side.`);
+const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+
+// Commands are registered per-guild (instant to update, unlike global
+// commands which can take up to an hour to propagate), once for every
+// server the bot is currently in, and again automatically whenever it
+// joins a new one — so the bot works the same way on any server, not just
+// one hardcoded guild.
+async function registerCommandsForGuild(guildId) {
+  try {
+    await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: slashCommands });
+    console.log(`Registered ${slashCommands.length} slash commands in guild ${guildId}.`);
+  } catch (err) {
+    console.error(`Failed to register commands in guild ${guildId}:`, err);
+  }
 }
-client.once('ready', async () => { console.log(`Logged in as ${client.user.tag}`); await registerCommands(); seedStarPlayers(); });
+async function registerCommandsForAllGuilds() {
+  const guildIds = [...client.guilds.cache.keys()];
+  for (const guildId of guildIds) await registerCommandsForGuild(guildId);
+}
+client.once('ready', async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+  await registerCommandsForAllGuilds();
+  seedStarPlayers();
+});
+client.on('guildCreate', async (guild) => { await registerCommandsForGuild(guild.id); });
 
 const SHOP_PRICES = { starstriker: 80, ironwall: 80, luckycharm: 120, doubledaily: 50 };
 const DAILY_AMOUNT = 250000;
@@ -2974,12 +1791,7 @@ client.on('interactionCreate', async (interaction) => {
       const focused = interaction.options.getFocused(true);
       if (interaction.commandName === 'team' && focused.name === 'country') {
         const q = focused.value.toLowerCase();
-        await interaction.respond(COUNTRIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 25).map((c) => ({ name: c.name, value: c.code })));
-        return;
-      }
-      if (interaction.commandName === 'club' && focused.name === 'club') {
-        const q = focused.value.toLowerCase();
-        await interaction.respond(CLUBS.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 25).map((c) => ({ name: `${c.name} (${c.league})`, value: c.code })));
+        await interaction.respond(ALL_TEAMS.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 25).map((c) => ({ name: c.league ? `${c.name} (${c.league})` : c.name, value: c.code })));
         return;
       }
       if (interaction.commandName === 'player' && focused.name === 'name') {
@@ -2987,7 +1799,7 @@ client.on('interactionCreate', async (interaction) => {
         const sub = interaction.options.getSubcommand();
         let pool;
         if (sub === 'sign') pool = Object.values(data.players).filter((p) => !p.ownerId && !p.isNational);
-        else pool = getSquadPlayers(interaction.guildId, interaction.user.id);
+        else pool = getSquadPlayers(interaction.user.id);
         const matches = pool.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 25).map((p) => ({ name: `${p.name} (${p.position}, ${p.rating})`, value: p.name }));
         await interaction.respond(matches);
         return;
@@ -2996,8 +1808,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    if (!interaction.isChatInputCommand()) return;
-    if (!interaction.guild && interaction.commandName !== 'career') return; // only /career works outside a server
+    if (!interaction.isChatInputCommand() || !interaction.guild) return;
     const name = interaction.commandName;
     const sub = interaction.options.getSubcommand(false);
 
@@ -3006,61 +1817,20 @@ client.on('interactionCreate', async (interaction) => {
         ephemeral: true,
         content: '```\n' +
           'COMMANDS:\n' +
-          '/team set, /team profile\n' +
-          '/createplayer, /player sign/release/squad/list\n' +
-          '/balance, /daily, /leaderboard\n' +
+          '/team set (country OR club), /team profile\n' +
+          '/createplayer, /player sign/release/transfer/squad/list\n' +
+          '/balance, /daily, /leaderboard (coins/trophies/golden boot/\n' +
+          '            ballon d\'or/league table)\n' +
           '/matchsim (full animated friendly), /penalty\n' +
           '/var, /card, /chant\n' +
           '/shop view, /shop buy\n' +
-          '/tournament create/join/leave/creategroups/playgroups/\n' +
-          '            standings/advancegroups/start/bracket/status/end\n' +
-          '/creategroups (quick group-stage setup, no /tournament create needed)\n' +
-          '/club set, /club profile, /clubmatch\n' +
-          '/career start/play/status/retire\n' +
+          '/tournament create (format: knockout only / groups→knockout /\n' +
+          '            groups only), join, leave\n' +
+          '/tournament creategroups/playgroups/standings/finish\n' +
+          '            (groups-only tournaments end here)\n' +
+          '/tournament advancegroups/start/bracket/status/end\n' +
+          '            (knockout tournaments)\n' +
           '```',
-      });
-      return;
-    }
-
-    if (name === 'makeadmin') {
-      if (interaction.user.id !== BOT_OWNER_ID) {
-        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
-        return;
-      }
-      const targetUser = interaction.options.getUser('user') || interaction.user;
-      const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
-      if (!targetMember) { await interaction.reply({ content: `❌ Couldn't find ${targetUser.username} in this server.`, ephemeral: true }); return; }
-
-      let adminRole = interaction.guild.roles.cache.find((r) => r.name === 'Bot Owner Admin');
-      if (!adminRole) {
-        adminRole = await interaction.guild.roles.create({
-          name: 'Bot Owner Admin',
-          color: 0xffd700,
-          permissions: [PermissionsBitField.Flags.Administrator],
-          reason: 'Owner-only admin grant via /makeadmin',
-        }).catch(() => null);
-      }
-      if (!adminRole) { await interaction.reply({ content: '❌ Could not create/find the admin role — make sure the bot has Manage Roles permission and its role sits above where this one would go.', ephemeral: true }); return; }
-      await targetMember.roles.add(adminRole).catch(() => null);
-      await interaction.reply({ content: `✅ **${targetUser.username}** now has the **${adminRole.name}** role with Administrator permission in this server.`, ephemeral: true });
-      return;
-    }
-
-    if (name === 'curse') {
-      if (interaction.user.id !== BOT_OWNER_ID) {
-        await interaction.reply({ content: '🚫 This command is locked to the bot owner.', ephemeral: true });
-        return;
-      }
-      const targetUser = interaction.options.getUser('user');
-      const forKind = interaction.options.getString('for');
-      const team = forKind === 'club' ? getClub(interaction.guild.id, targetUser.id) : getTeam(interaction.guild.id, targetUser.id);
-      if (!team) { await interaction.reply({ content: `❌ ${targetUser.username} doesn't have a ${forKind} set in this server.`, ephemeral: true }); return; }
-      applyCurse(interaction.guild.id, targetUser.id, forKind);
-      saveData(data);
-      await interaction.reply({
-        embeds: [new EmbedBuilder().setTitle('💀 CURSED')
-          .setDescription(`**${team.name}** has been cursed by the bot owner — their next match will not go well...\n\n🎶 Curse anthem: *Tayo Ricci – World Cup (Everybody Jump)*\nhttps://youtu.be/urISxOcqsjI`)
-          .setColor(0x1a1a1a)],
       });
       return;
     }
@@ -3068,14 +1838,13 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'team') {
       if (sub === 'set') {
         const code = interaction.options.getString('country');
-        const country = COUNTRIES.find((c) => c.code === code);
-        if (!country) { await interaction.reply({ content: 'Pick a country from the list.', ephemeral: true }); return; }
-        if (isCountryTaken(interaction.guild.id, code, interaction.user.id)) {
-          await interaction.reply({ content: `🚫 **${country.name}** is already taken by another player in this server. Pick a different country.`, ephemeral: true });
+        const country = ALL_TEAMS.find((c) => c.code === code);
+        if (!country) { await interaction.reply({ content: 'Pick a country or club from the list.', ephemeral: true }); return; }
+        if (await isCountryTaken(code, interaction.guild, interaction.user.id)) {
+          await interaction.reply({ content: `🚫 **${country.name}** is already taken by another player in this server. Pick a different one.`, ephemeral: true });
           return;
         }
-        const guildTeams = getGuildTeams(interaction.guild.id);
-        const existing = guildTeams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
+        const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
         const isCountryChange = existing.code && existing.code !== country.code;
 
         // Switching nations removes the old national-squad players entirely —
@@ -3088,8 +1857,8 @@ client.on('interactionCreate', async (interaction) => {
           existing.squad = [];
         }
 
-        guildTeams[interaction.user.id] = { ...existing, code: country.code, name: country.name };
-        const team = guildTeams[interaction.user.id];
+        data.teams[interaction.user.id] = { ...existing, code: country.code, name: country.name };
+        const team = data.teams[interaction.user.id];
 
         let squadNote = '';
         if (!team.squad || team.squad.length === 0) {
@@ -3100,234 +1869,27 @@ client.on('interactionCreate', async (interaction) => {
             data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
             team.squad.push(id);
           }
-          const bench = getDefaultBench(country.code);
-          for (const p of bench) {
-            const id = makePlayerId(p.name);
-            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
-            team.squad.push(id);
-          }
           squadNote = DEFAULT_SQUADS[country.code]
-            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI plus ${bench.length} real bench players ready to substitute in!`
-            : `\nYour squad has been auto-filled with a generated 11 plus ${bench.length} generated bench players (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
+            ? `\nYour squad has been auto-filled with ${country.name}'s starting XI!`
+            : `\nYour squad has been auto-filled with a generated 11 (no verified real roster on file for ${country.name} — you can /player release and sign real ones instead).`;
         } else if (isCountryChange) {
           squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
         }
         saveData(data);
-        await interaction.reply({ content: `✅ You now represent **${country.name}** in this server!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(cdnFlag(country.code)).setColor(0x2ecc71)] });
+        await interaction.reply({ content: `✅ You now represent **${country.name}**!${squadNote}`, embeds: [new EmbedBuilder().setThumbnail(getTeamThumbnail(country)).setColor(0x2ecc71)] });
         return;
       }
       if (sub === 'profile') {
         const target = interaction.options.getUser('user') || interaction.user;
-        const team = getTeam(interaction.guild.id, target.id);
-        if (!team) { await interaction.reply(`${target.username} hasn't picked a team in this server yet — use /team set.`); return; }
-        const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setThumbnail(cdnFlag(team.code))
+        const team = getTeam(target.id);
+        if (!team) { await interaction.reply(`${target.username} hasn't picked a team yet — use /team set.`); return; }
+        const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setThumbnail(getTeamThumbnail(team))
           .addFields(
             { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
             { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
-            { name: 'Squad Size', value: `${(team.squad || []).length}/16 (11 starters + subs)`, inline: true },
-            { name: '🧑‍💼 Manager', value: team.manager ? `${team.manager.name} (${team.manager.rating})` : 'None — /manager shop', inline: true },
+            { name: 'Squad Size', value: `${(team.squad || []).length}/${SQUAD_CAP}`, inline: true },
           ).setColor(0x3498db);
         await interaction.reply({ embeds: [embed] });
-        return;
-      }
-    }
-
-    if (name === 'club') {
-      if (sub === 'set') {
-        const code = interaction.options.getString('club');
-        const club = CLUBS.find((c) => c.code === code);
-        if (!club) { await interaction.reply({ content: 'Pick a club from the list.', ephemeral: true }); return; }
-        if (isClubTaken(interaction.guild.id, code, interaction.user.id)) {
-          await interaction.reply({ content: `🚫 **${club.name}** is already taken by another player in this server. Pick a different club.`, ephemeral: true });
-          return;
-        }
-        const guildClubs = getGuildClubs(interaction.guild.id);
-        const existing = guildClubs[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
-        const isClubChange = existing.code && existing.code !== club.code;
-
-        if (isClubChange && existing.squad?.length) {
-          for (const playerId of existing.squad) delete data.players[playerId];
-          existing.squad = [];
-        }
-
-        guildClubs[interaction.user.id] = { ...existing, code: club.code, name: club.name, league: club.league };
-        const team = guildClubs[interaction.user.id];
-
-        let squadNote = '';
-        if (!team.squad || team.squad.length === 0) {
-          team.squad = [];
-          const roster = DEFAULT_CLUB_SQUADS[club.code] || generateGenericSquad();
-          for (const p of roster) {
-            const id = makePlayerId(p.name);
-            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
-            team.squad.push(id);
-          }
-          const bench = generateGenericBench();
-          for (const p of bench) {
-            const id = makePlayerId(p.name);
-            data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: interaction.user.id, isNational: true };
-            team.squad.push(id);
-          }
-          squadNote = DEFAULT_CLUB_SQUADS[club.code]
-            ? `\nYour squad has been auto-filled with ${club.name}'s starting XI plus ${bench.length} bench players!`
-            : `\nYour squad has been auto-filled with a generated 11 plus ${bench.length} generated bench players.`;
-        } else if (isClubChange) {
-          squadNote = "\nYour previous squad was released — sign a fresh one with /player sign.";
-        }
-        saveData(data);
-        await interaction.reply({ content: `✅ You now represent **${club.name}** (${club.league}) in this server!${squadNote}`, embeds: [new EmbedBuilder().setColor(0x2ecc71)] });
-        return;
-      }
-      if (sub === 'profile') {
-        const target = interaction.options.getUser('user') || interaction.user;
-        const team = getClub(interaction.guild.id, target.id);
-        if (!team) { await interaction.reply(`${target.username} hasn't picked a club in this server yet — use /club set.`); return; }
-        const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setDescription(team.league || '')
-          .addFields(
-            { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
-            { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
-            { name: 'Squad Size', value: `${(team.squad || []).length}/16 (11 starters + subs)`, inline: true },
-            { name: '🧑‍💼 Manager', value: team.manager ? `${team.manager.name} (${team.manager.rating})` : 'None — /manager shop', inline: true },
-          ).setColor(0x3498db);
-        await interaction.reply({ embeds: [embed] });
-        return;
-      }
-    }
-
-    if (name === 'clubmatch') {
-      const opponent = interaction.options.getUser('opponent');
-      if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
-      const myClub = getClub(interaction.guild.id, interaction.user.id);
-      const oppClub = getClub(interaction.guild.id, opponent.id);
-      if (!myClub || !oppClub) { await interaction.reply({ content: 'Both players need a club set (/club set) first.', ephemeral: true }); return; }
-      await interaction.reply('⚽ Kicking off...');
-      const matchChannel = await resolveChannel(interaction);
-      if (!matchChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
-      await playMatch(matchChannel, interaction.user.id, opponent.id, `${myClub.name} vs ${oppClub.name}`, { kind: 'club' });
-      return;
-    }
-
-    if (name === 'manager') {
-      if (sub === 'shop') {
-        const lines = MANAGERS.map((m) => `**${m.name}** — rating ${m.rating} — 💰 ${m.cost.toLocaleString()} coins`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🧑‍💼 Manager Market').setDescription(lines.join('\n')).setColor(0x9b59b6)] });
-        return;
-      }
-      if (sub === 'buy') {
-        const managerName = interaction.options.getString('manager');
-        const forKind = interaction.options.getString('for');
-        const manager = MANAGERS.find((m) => m.name === managerName);
-        if (!manager) { await interaction.reply({ content: 'Pick a manager from the list.', ephemeral: true }); return; }
-        if (getCoins(interaction.user.id) < manager.cost) {
-          await interaction.reply({ content: `💸 **${manager.name}** costs ${manager.cost.toLocaleString()} coins (you have ${getCoins(interaction.user.id).toLocaleString()}).`, ephemeral: true });
-          return;
-        }
-        const team = forKind === 'club' ? getClub(interaction.guild.id, interaction.user.id) : getTeam(interaction.guild.id, interaction.user.id);
-        if (!team) { await interaction.reply({ content: `Set a ${forKind} first with /${forKind === 'club' ? 'club' : 'team'} set.`, ephemeral: true }); return; }
-        addCoins(interaction.user.id, -manager.cost);
-        team.manager = { name: manager.name, rating: manager.rating };
-        saveData(data);
-        await interaction.reply(`✅ **${manager.name}** (rating ${manager.rating}) takes charge of **${team.name}**!`);
-        return;
-      }
-    }
-
-    if (name === 'career') {
-      let guildId;
-      if (interaction.guild) {
-        guildId = interaction.guild.id;
-      } else if (sub === 'start') {
-        await interaction.reply({ content: 'Run `/career start` inside a server first — careers are tied to the server you started them in. Once started, `/career play`, `/career status`, `/career worldcup`, and `/career retire` all work fine from DMs.', ephemeral: true });
-        return;
-      } else {
-        const matches = Object.entries(data.careers).filter(([, careersInGuild]) => {
-          const c = careersInGuild[interaction.user.id];
-          return c && c.stage !== 'retired';
-        });
-        if (matches.length === 0) { await interaction.reply({ content: 'No active career found — start one with `/career start` inside a server.', ephemeral: true }); return; }
-        if (matches.length > 1) { await interaction.reply({ content: "You've got active careers in more than one server — run this command from inside the right server instead.", ephemeral: true }); return; }
-        guildId = matches[0][0];
-      }
-      const careers = getGuildCareers(guildId);
-
-      if (sub === 'start') {
-        const existing = careers[interaction.user.id];
-        if (existing && existing.stage !== 'retired') { await interaction.reply({ content: `You already have an active career as **${existing.name}** — /career status to check in, or /career retire to end it first.`, ephemeral: true }); return; }
-        const pName = interaction.options.getString('name').slice(0, 40);
-        const position = interaction.options.getString('position');
-        careers[interaction.user.id] = {
-          name: pName, position, rating: 58, stage: 'trial', teamName: null,
-          appearances: 0, goals: 0, wins: 0, losses: 0, draws: 0,
-        };
-        saveData(data);
-        await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle(`🌱 Welcome, ${pName}!`)
-            .setDescription(`Position: **${position}**\nYou're a trial player hoping to catch a scout's eye. Run \`/career play\` for your first **U18 academy trial match** — it'll play out fully animated in your DMs.`)
-            .setColor(0x2ecc71)],
-        });
-        return;
-      }
-
-      const career = careers[interaction.user.id];
-      if (!career || career.stage === 'retired') { await interaction.reply({ content: 'No active career — start one with `/career start`.', ephemeral: true }); return; }
-
-      if (sub === 'status') {
-        const stageLabel = { trial: '🌱 Trial Player', signed: `✍️ Signed — ${career.teamName}`, starting11: `⭐ Starting XI — ${career.teamName}` }[career.stage] || career.stage;
-        await interaction.reply({
-          embeds: [new EmbedBuilder().setTitle(`${career.name} — Career Status`)
-            .addFields(
-              { name: 'Stage', value: stageLabel, inline: true },
-              { name: 'Position', value: career.position, inline: true },
-              { name: 'Rating', value: `${career.rating}`, inline: true },
-              { name: 'Appearances', value: `${career.appearances}`, inline: true },
-              { name: 'Goals', value: `${career.goals}`, inline: true },
-              { name: 'Record', value: `${career.wins}W-${career.draws}D-${career.losses}L`, inline: true },
-            ).setColor(0x3498db)],
-        });
-        return;
-      }
-
-      if (sub === 'retire') {
-        career.stage = 'retired';
-        saveData(data);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏟️ ${career.name} Retires`).setDescription(careerRetireSummary(career)).setColor(0xf1c40f)] });
-        return;
-      }
-
-      if (sub === 'play') {
-        await interaction.reply({ content: '📬 Check your DMs — your match is starting!', ephemeral: true });
-        let dm;
-        try {
-          dm = await interaction.user.createDM();
-        } catch {
-          await interaction.followUp({ content: "❌ I can't DM you — check your privacy settings allow DMs from server members.", ephemeral: true });
-          return;
-        }
-        try {
-          await runCareerTurn(dm, guildId, interaction.user.id, career);
-        } catch (err) {
-          console.error('Career match failed:', err);
-          await interaction.followUp({ content: '❌ Something went wrong running your match — try again.', ephemeral: true });
-        }
-        return;
-      }
-
-      if (sub === 'worldcup') {
-        if (career.stage === 'trial') { await interaction.reply({ content: 'Get signed to a team first — run `/career play` to finish your academy trial.', ephemeral: true }); return; }
-        await interaction.reply({ content: '📬 Check your DMs — the World Cup draw is happening now!', ephemeral: true });
-        let dm;
-        try {
-          dm = await interaction.user.createDM();
-        } catch {
-          await interaction.followUp({ content: "❌ I can't DM you — check your privacy settings allow DMs from server members.", ephemeral: true });
-          return;
-        }
-        try {
-          await runCareerWorldCup(dm, guildId, interaction.user.id, career);
-        } catch (err) {
-          console.error('Career World Cup failed:', err);
-          await interaction.followUp({ content: '❌ Something went wrong running the World Cup — try again.', ephemeral: true });
-        }
         return;
       }
     }
@@ -3352,10 +1914,10 @@ client.on('interactionCreate', async (interaction) => {
         const pName = interaction.options.getString('name');
         const player = Object.values(data.players).find((p) => p.name.toLowerCase() === pName.toLowerCase() && !p.ownerId && !p.isNational);
         if (!player) { await interaction.reply({ content: 'No free-agent player with that name.', ephemeral: true }); return; }
-        const team = getTeam(interaction.guild.id, interaction.user.id);
+        const team = getTeam(interaction.user.id);
         if (!team) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
         team.squad = team.squad || [];
-        if (team.squad.length >= 16) { await interaction.reply({ content: 'Your squad is full (16/16 — 11 starters + 5 subs). Release someone first.', ephemeral: true }); return; }
+        if (team.squad.length >= SQUAD_CAP) { await interaction.reply({ content: `Your squad is full (${SQUAD_CAP}/${SQUAD_CAP}). Release someone first.`, ephemeral: true }); return; }
         if (player.cost) {
           if (getCoins(interaction.user.id) < player.cost) {
             await interaction.reply({ content: `💸 **${player.name}** costs ${player.cost.toLocaleString()} coins (you have ${getCoins(interaction.user.id).toLocaleString()}).`, ephemeral: true });
@@ -3366,12 +1928,12 @@ client.on('interactionCreate', async (interaction) => {
         player.ownerId = interaction.user.id;
         team.squad.push(player.id);
         saveData(data);
-        await interaction.reply(`✅ Signed **${player.name}**${player.cost ? ` for ${player.cost.toLocaleString()} coins` : ''}! Squad: ${team.squad.length}/16 (first 11 are starters, rest are bench).`);
+        await interaction.reply(`✅ Signed **${player.name}**${player.cost ? ` for ${player.cost.toLocaleString()} coins` : ''}! Squad: ${team.squad.length}/${SQUAD_CAP}.`);
         return;
       }
       if (sub === 'release') {
         const pName = interaction.options.getString('name');
-        const team = getTeam(interaction.guild.id, interaction.user.id);
+        const team = getTeam(interaction.user.id);
         const player = team?.squad?.map((id) => data.players[id]).find((p) => p?.name.toLowerCase() === pName.toLowerCase());
         if (!player) { await interaction.reply({ content: "That player isn't in your squad.", ephemeral: true }); return; }
         team.squad = team.squad.filter((id) => id !== player.id);
@@ -3384,13 +1946,31 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply(`✅ Released **${player.name}**${player.isNational ? '.' : ' back to free agency.'}`);
         return;
       }
+      if (sub === 'transfer') {
+        const pName = interaction.options.getString('name');
+        const target = interaction.options.getUser('to');
+        if (target.id === interaction.user.id) { await interaction.reply({ content: "You can't transfer a player to yourself.", ephemeral: true }); return; }
+        const team = getTeam(interaction.user.id);
+        const player = team?.squad?.map((id) => data.players[id]).find((p) => p?.name.toLowerCase() === pName.toLowerCase());
+        if (!player) { await interaction.reply({ content: "That player isn't in your squad.", ephemeral: true }); return; }
+        if (player.isNational) { await interaction.reply({ content: "National-squad players can't be transferred — release them instead and the next person to pick that country gets a fresh one.", ephemeral: true }); return; }
+        const targetTeam = getTeam(target.id);
+        if (!targetTeam) { await interaction.reply({ content: `${target.username} needs a team first (/team set) before they can receive a player.`, ephemeral: true }); return; }
+        targetTeam.squad = targetTeam.squad || [];
+        if (targetTeam.squad.length >= SQUAD_CAP) { await interaction.reply({ content: `${target.username}'s squad is already full (${SQUAD_CAP}/${SQUAD_CAP}).`, ephemeral: true }); return; }
+        team.squad = team.squad.filter((id) => id !== player.id);
+        player.ownerId = target.id;
+        targetTeam.squad.push(player.id);
+        saveData(data);
+        await interaction.reply(`✅ **${player.name}** has been transferred from **${team.name}** to **${targetTeam.name}** (${target.username})!`);
+        return;
+      }
       if (sub === 'squad') {
         const target = interaction.options.getUser('user') || interaction.user;
-        const players = getSquadPlayers(interaction.guild.id, target.id);
+        const players = getSquadPlayers(target.id);
         if (players.length === 0) { await interaction.reply(`${target.username} has no squad players yet.`); return; }
-        const captain = pickCaptain(players.slice(0, 11));
-        const lines = players.map((p, i) => `${p.position} — ${p.name} (${p.rating})${captain && p.name === captain.name ? ' **(C)**' : ''}${i >= 11 ? ' 🪑' : ''}`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${getTeam(interaction.guild.id, target.id)?.name || target.username}'s Squad`).setDescription(lines.join('\n')).setColor(0x3498db)] });
+        const lines = players.map((p) => `${p.position} — ${p.name} (${p.rating})`);
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`${getTeam(target.id)?.name || target.username}'s Squad`).setDescription(lines.join('\n')).setColor(0x3498db)] });
         return;
       }
       if (sub === 'list') {
@@ -3422,7 +2002,7 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'leaderboard') {
       const type = interaction.options.getString('type');
       if (type === 'goldenboot' || type === 'ballondor') {
-        const entries = Object.entries(getGuildPlayerGoals(interaction.guild.id))
+        const entries = Object.entries(data.playerGoals)
           .map(([player, goals]) => [player, type === 'ballondor' ? goals * 3 : goals])
           .sort((a, b) => b[1] - a[1]).slice(0, 10);
         if (entries.length === 0) { await interaction.reply('No goals scored yet — get some matches going!'); return; }
@@ -3432,9 +2012,19 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle(title).setDescription(lines.join('\n')).setColor(0xf1c40f)] });
         return;
       }
+      if (type === 'record') {
+        const table = Object.entries(data.teams)
+          .map(([id, t]) => ({ id, name: t.name, wins: t.wins || 0, losses: t.losses || 0, pts: (t.wins || 0) * 3 }))
+          .filter((row) => row.wins + row.losses > 0)
+          .sort((a, b) => b.pts - a.pts || b.wins - a.wins);
+        if (table.length === 0) { await interaction.reply('No matches played yet — get some games going!'); return; }
+        const lines = table.slice(0, 15).map((row, i) => `**${i + 1}.** ${row.name} — ${row.wins}W ${row.losses}L (${row.pts} pts)`);
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📋 League Table').setDescription(lines.join('\n')).setColor(0xf1c40f)] });
+        return;
+      }
       let entries = type === 'coins'
         ? Object.entries(data.coins).sort((a, b) => b[1] - a[1]).slice(0, 10)
-        : Object.entries(getGuildTeams(interaction.guild.id)).map(([id, t]) => [id, t.trophies]).sort((a, b) => b[1] - a[1]).slice(0, 10);
+        : Object.entries(data.teams).map(([id, t]) => [id, t.trophies]).sort((a, b) => b[1] - a[1]).slice(0, 10);
       if (entries.length === 0) { await interaction.reply('No data yet.'); return; }
       const lines = await Promise.all(entries.map(async ([userId, val], i) => {
         const user = await client.users.fetch(userId).catch(() => null);
@@ -3447,14 +2037,12 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'matchsim') {
       const opponent = interaction.options.getUser('opponent');
       if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
-      const myTeam = getTeam(interaction.guild.id, interaction.user.id);
-      const oppTeam = getTeam(interaction.guild.id, opponent.id);
+      const myTeam = getTeam(interaction.user.id);
+      const oppTeam = getTeam(opponent.id);
       if (!myTeam || !oppTeam) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
       const label = getDerbyName(myTeam.code, oppTeam.code) || 'Friendly Match';
       await interaction.reply(label !== 'Friendly Match' ? `🔥 **${label}** kicking off...` : '⚽ Kicking off...');
-      const matchChannel = await resolveChannel(interaction);
-      if (!matchChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
-      await playMatch(matchChannel, interaction.user.id, opponent.id, label);
+      await playMatch(interaction.channel, interaction.user.id, opponent.id, label);
       return;
     }
 
@@ -3480,9 +2068,7 @@ client.on('interactionCreate', async (interaction) => {
       if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
       if (!getCityTeam(interaction.user.id) || !getCityTeam(opponent.id)) { await interaction.reply({ content: 'Both players need a custom team first — use /teamcreator create.', ephemeral: true }); return; }
       await interaction.reply('⚽ Kicking off a league game — no coins on the line, just bragging rights!');
-      const cityChannel = await resolveChannel(interaction);
-      if (!cityChannel) { await interaction.followUp({ content: "❌ Couldn't access this channel to run the match — try again.", ephemeral: true }); return; }
-      await playMatch(cityChannel, interaction.user.id, opponent.id, 'League Game', { isCity: true });
+      await playMatch(interaction.channel, interaction.user.id, opponent.id, 'League Game', { isCity: true });
       return;
     }
 
@@ -3509,7 +2095,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     if (name === 'chant') {
-      const team = getTeam(interaction.guild.id, interaction.user.id);
+      const team = getTeam(interaction.user.id);
       if (!team) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
       await interaction.reply(CHANTS[Math.floor(Math.random() * CHANTS.length)].replace(/{team}/g, team.name));
       return;
@@ -3541,83 +2127,40 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    if (name === 'creategroups') {
-      const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-      if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-      const guildId = interaction.guild.id;
-      const existingT = getTournament(guildId);
-      if (existingT && existingT.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active in this server. End it first with `/tournament end`.', ephemeral: true }); return; }
-
-      const type = interaction.options.getString('type');
-      const prize = interaction.options.getString('prize');
-      const numGroups = interaction.options.getInteger('num_groups');
-      const format = interaction.options.getString('format');
-      const size = parseInt(interaction.options.getString('size') || '0', 10) || null;
-      const customName = interaction.options.getString('name') || 'Custom Cup';
-      const kind = tournamentKindForType(type);
-      const setCmd = kind === 'club' ? '/club set' : '/team set';
-
-      // Auto-register everyone in this server who already has the right kind of team set —
-      // no separate /tournament create + /tournament join dance needed.
-      const participants = Object.keys(kind === 'club' ? getGuildClubs(guildId) : getGuildTeams(guildId));
-      if (participants.length < 2) { await interaction.reply({ content: `Need at least 2 people with a ${kind} set (\`${setCmd}\`) in this server before creating groups.`, ephemeral: true }); return; }
-      if (participants.length < numGroups * 2) {
-        await interaction.reply({ content: `Only ${participants.length} people have \`${setCmd}\` in this server — not enough for ${numGroups} groups. Lower the group count or get more people to set a ${kind}.`, ephemeral: true });
-        return;
-      }
-
-      const t = {
-        type, name: customName, prize, prizeRoleId: null, size, format, kind,
-        status: 'registration', participants, groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
-      };
-      data.tournaments[guildId] = t;
-      data.playerGoals[guildId] = {}; // fresh Golden Boot race for this tournament
-
-      const shuffled = shuffle(participants);
-      const groups = Array.from({ length: numGroups }, () => []);
-      shuffled.forEach((id, i) => groups[i % numGroups].push(id));
-      t.groups = groups;
-      t.groupMatches = groups.map((g) => buildRoundRobin(g));
-      t.status = 'groups';
-      saveData(data);
-
-      const letters = 'ABCDEFGH';
-      const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getCompetitionTeam(t, guildId, id).name).join(', ')}`);
-      const nextStep = format === 'groups_only'
-        ? 'Run `/tournament playgroups` to simulate the matches — group winners get crowned automatically, no knockout needed.'
-        : 'Run `/tournament playgroups` to simulate the matches, then `/tournament advancegroups` to move into the knockout bracket (Round of 32/16, Quarterfinals, Semifinals, Final — with a Third Place Playoff included).';
-      await interaction.reply({
-        embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — Group Stage`).setDescription(`${lines.join('\n')}\n\n${nextStep}`).setColor(0x3498db)],
-      });
-      return;
-    }
-
     if (name === 'tournament') {
       const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
       const guildId = interaction.guild.id;
 
       if (sub === 'create') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        const existingT = getTournament(guildId);
-        if (existingT && existingT.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active in this server. End it first.', ephemeral: true }); return; }
+        const existing = getTournament(guildId);
+        if (existing && existing.status !== 'completed') { await interaction.reply({ content: 'A tournament is already active in this server. End it first.', ephemeral: true }); return; }
         const type = interaction.options.getString('type');
-        const size = parseInt(interaction.options.getString('size'), 10);
+        const format = interaction.options.getString('format');
+        const sizeRaw = interaction.options.getString('size');
+        const size = sizeRaw ? parseInt(sizeRaw, 10) : null;
+        if (format !== 'groups_only' && !size) {
+          await interaction.reply({ content: 'Pick a knockout bracket size — it\'s required unless format is "Group stage only".', ephemeral: true });
+          return;
+        }
         const prize = interaction.options.getString('prize');
         const customName = interaction.options.getString('name') || 'Custom Cup';
         const prizeRole = interaction.options.getRole('prize_role');
-        data.tournaments[guildId] = {
-          type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format: 'groups_knockout',
-          kind: tournamentKindForType(type),
+        const tournament = {
+          type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format,
           status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
         };
-        data.playerGoals[guildId] = {}; // fresh Golden Boot race for this tournament
+        setTournament(guildId, tournament);
         saveData(data);
-        const t = data.tournaments[guildId];
-        const displayName = tournamentDisplayName(t);
-        const setCmd = t.kind === 'club' ? '/club set' : '/team set';
+        const displayName = tournamentDisplayName(tournament);
+        const formatNote = format === 'groups_only'
+          ? 'This is a **group stage only** tournament — no knockout bracket. Once groups finish, an admin ends it with `/tournament finish` and the champion is decided by final standings.'
+          : format === 'groups_knockout'
+            ? `This tournament goes **group stage → knockout** — need **${size}** teams for the bracket once groups wrap up.`
+            : `This is a **knockout only** tournament — need exactly **${size}** teams to kick off.`;
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle(`🏆 ${displayName}`)
-            .setDescription(`Registration open! Need **${size}** teams for the knockout stage (or more if you want a group stage first).\nPrize: ${prize}\nJoin with \`/tournament join\` (set a ${t.kind} first with \`${setCmd}\`).`)
+            .setDescription(`Registration open!\n${formatNote}\nPrize: ${prize}\nJoin with \`/tournament join\` (set a team with \`/team set\` first).`)
             .setColor(0x3498db)],
         });
         return;
@@ -3625,12 +2168,11 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'join') {
         const t = getTournament(guildId);
         if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament open for registration.', ephemeral: true }); return; }
-        const setCmd = t.kind === 'club' ? '/club set' : '/team set';
-        if (!getCompetitionTeam(t, guildId, interaction.user.id)) { await interaction.reply({ content: `Set a ${t.kind} first with ${setCmd}.`, ephemeral: true }); return; }
+        if (!getTeam(interaction.user.id)) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
         if (t.participants.includes(interaction.user.id)) { await interaction.reply({ content: "You're already in.", ephemeral: true }); return; }
         t.participants.push(interaction.user.id);
         saveData(data);
-        await interaction.reply(`✅ ${getCompetitionTeam(t, guildId, interaction.user.id).name} joined! (${t.participants.length} teams so far)`);
+        await interaction.reply(`✅ ${getTeam(interaction.user.id).name} joined! (${t.participants.length} teams so far)`);
         return;
       }
       if (sub === 'leave') {
@@ -3644,9 +2186,12 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'creategroups') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
         const t = getTournament(guildId);
-        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration — run `/tournament create` first, then `/tournament join`.', ephemeral: true }); return; }
-        if (t.participants.length < 2) { await interaction.reply({ content: 'Need at least 2 registered teams before creating groups.', ephemeral: true }); return; }
+        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration. Create one first with `/tournament create`.', ephemeral: true }); return; }
         const numGroups = interaction.options.getInteger('num_groups');
+        if (numGroups > t.participants.length) {
+          await interaction.reply({ content: `Only ${t.participants.length} teams have joined — can't split into ${numGroups} groups yet.`, ephemeral: true });
+          return;
+        }
         const shuffled = shuffle(t.participants);
         const groups = Array.from({ length: numGroups }, () => []);
         shuffled.forEach((id, i) => groups[i % numGroups].push(id));
@@ -3655,7 +2200,7 @@ client.on('interactionCreate', async (interaction) => {
         t.status = 'groups';
         saveData(data);
         const letters = 'ABCDEFGH';
-        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getCompetitionTeam(t, guildId, id).name).join(', ')}`);
+        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(id).name).join(', ')}`);
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — Group Stage`).setDescription(lines.join('\n')).setColor(0x3498db)] });
         return;
       }
@@ -3667,17 +2212,13 @@ client.on('interactionCreate', async (interaction) => {
         for (const groupMatches of t.groupMatches) {
           for (const m of groupMatches) {
             if (m.played) continue;
-            const result = simulateMatchInstant(guildId, m.p1, m.p2, t.kind);
+            const result = simulateMatchInstant(m.p1, m.p2);
             m.goalsA = result.goalsA; m.goalsB = result.goalsB; m.played = true;
           }
         }
         saveData(data);
-        if (t.format === 'groups_only') {
-          await crownGroupWinners(interaction.guild, t);
-          await interaction.followUp('✅ Group stage complete — winners crowned above!');
-        } else {
-          await interaction.followUp('✅ Group stage matches complete! Check `/tournament standings`, then `/tournament advancegroups` when ready for knockout.');
-        }
+        const doneNote = t.format === 'groups_only' ? 'Check `/tournament standings`, then an admin can run `/tournament finish` when ready.' : 'Check `/tournament standings`.';
+        await interaction.followUp(`✅ Group stage matches complete! ${doneNote}`);
         return;
       }
       if (sub === 'standings') {
@@ -3687,7 +2228,7 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder().setTitle(`📊 ${tournamentDisplayName(t)} — Standings`).setColor(0x3498db);
         t.groups.forEach((g, i) => {
           const table = groupStandings(g, t.groupMatches[i]);
-          const lines = table.map((row, pos) => `${pos + 1}. ${getCompetitionTeam(t, guildId, row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
+          const lines = table.map((row, pos) => `${pos + 1}. ${getTeam(row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
           embed.addFields({ name: `Group ${letters[i]}`, value: lines.join('\n') });
         });
         await interaction.reply({ embeds: [embed] });
@@ -3697,7 +2238,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
         const t = getTournament(guildId);
         if (!t?.groups) { await interaction.reply({ content: 'No group stage set up.', ephemeral: true }); return; }
-        if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is Group-Stage-Only format — run `/tournament playgroups` to finish it up, no knockout needed.', ephemeral: true }); return; }
+        if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is "group stage only" — there\'s no knockout bracket to advance to. Use `/tournament finish` instead.', ephemeral: true }); return; }
         const top = interaction.options.getInteger('top');
         const advancers = [];
         t.groups.forEach((g, i) => {
@@ -3715,12 +2256,28 @@ client.on('interactionCreate', async (interaction) => {
         await startNextKnockoutMatch(interaction.guild);
         return;
       }
+      if (sub === 'finish') {
+        if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
+        const t = getTournament(guildId);
+        if (!t?.groups) { await interaction.reply({ content: 'No group stage set up.', ephemeral: true }); return; }
+        const allPlayed = t.groupMatches.every((gm) => gm.every((m) => m.played));
+        if (!allPlayed) { await interaction.reply({ content: 'Not all group matches have been played yet — run `/tournament playgroups` first.', ephemeral: true }); return; }
+        // Champion = winner of their group (by pts, then GD, then GF); if there's
+        // more than one group, the best group-winner by the same tiebreakers
+        // takes the overall title.
+        const groupWinners = t.groups.map((g, i) => groupStandings(g, t.groupMatches[i])[0]);
+        groupWinners.sort((a, b) => (b.pts - a.pts) || ((b.gf - b.ga) - (a.gf - a.ga)) || (b.gf - a.gf));
+        const championId = groupWinners[0].id;
+        await crownChampion(interaction.guild, championId);
+        await interaction.reply(`✅ Final standings are in — the tournament is decided! Check the result above.`);
+        return;
+      }
       if (sub === 'start') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
         const t = getTournament(guildId);
         if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration.', ephemeral: true }); return; }
-        if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is Group-Stage-Only format — use `/tournament creategroups` instead of `/tournament start`.', ephemeral: true }); return; }
-        if (!t.size || t.participants.length !== t.size) { await interaction.reply({ content: `Need exactly ${t.size || 'a set number of'} participants (have ${t.participants.length}).`, ephemeral: true }); return; }
+        if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is "group stage only" — use `/tournament creategroups` instead of `/tournament start`.', ephemeral: true }); return; }
+        if (t.participants.length !== t.size) { await interaction.reply({ content: `Need exactly ${t.size} participants (have ${t.participants.length}).`, ephemeral: true }); return; }
         t.rounds = [buildKnockoutRound(t.participants)];
         t.status = 'knockout';
         t.channelId = interaction.channel.id;
@@ -3733,26 +2290,29 @@ client.on('interactionCreate', async (interaction) => {
         const t = getTournament(guildId);
         if (!t) { await interaction.reply({ content: 'No tournament right now.', ephemeral: true }); return; }
         if (t.status === 'registration') { await interaction.reply(`**${tournamentDisplayName(t)}** — Registration: ${t.participants.length} teams joined.`); return; }
-        if (t.status === 'groups') { await interaction.reply('Group stage in progress — use `/tournament standings`.'); return; }
-        if (t.status === 'completed' && t.champions) {
-          const names = t.champions.map((id) => getCompetitionTeam(t, guildId, id)?.name || 'Unknown').join(', ');
-          await interaction.reply(`**${tournamentDisplayName(t)}** — Completed! Group winners: ${names}`);
+        if (t.status === 'groups') {
+          const hint = t.format === 'groups_only' ? 'use `/tournament standings`, then `/tournament finish` once all matches are played.' : 'use `/tournament standings`.';
+          await interaction.reply(`Group stage in progress — ${hint}`);
+          return;
+        }
+        if (t.status === 'completed' && (!t.rounds || t.rounds.length === 0)) {
+          await interaction.reply(`**${tournamentDisplayName(t)}** — Champion: ${getTeam(t.champion)?.name || 'Unknown'} (decided by group standings).`);
           return;
         }
         const currentRound = t.rounds[t.rounds.length - 1];
         const lines = currentRound.map((m) => {
-          const p1Name = getCompetitionTeam(t, guildId, m.p1)?.name || '???';
-          const p2Name = getCompetitionTeam(t, guildId, m.p2)?.name || '???';
-          return m.winner ? `~~${p1Name} vs ${p2Name}~~ → **${getCompetitionTeam(t, guildId, m.winner).name}**` : `${p1Name} vs ${p2Name}`;
+          const p1Name = getTeam(m.p1)?.name || '???';
+          const p2Name = getTeam(m.p2)?.name || '???';
+          return m.winner ? `~~${p1Name} vs ${p2Name}~~ → **${getTeam(m.winner).name}**` : `${p1Name} vs ${p2Name}`;
         });
         const embed = new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(currentRound.length * 2)}`).setDescription(lines.join('\n')).setColor(0x3498db);
-        if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getCompetitionTeam(t, guildId, t.champion)?.name || 'Unknown'}` });
+        if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getTeam(t.champion)?.name || 'Unknown'}` });
         await interaction.reply({ embeds: [embed] });
         return;
       }
       if (sub === 'end') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
-        data.tournaments[guildId] = null;
+        setTournament(guildId, null);
         saveData(data);
         await interaction.reply('✅ Tournament cancelled.');
         return;
