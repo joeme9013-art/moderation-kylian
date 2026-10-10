@@ -1,9 +1,13 @@
 {
-  "name": "mod-bot",
+  "name": "football-discord-bot",
   "version": "1.0.0",
+  "description": "Football sim Discord bot",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "discord.js": "^14.14.1",
