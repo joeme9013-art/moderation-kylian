@@ -1620,6 +1620,70 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 }
 
 // ============================================================
+// QUICK (highlights-only) MATCH — used for tournament knockout matches so
+// a whole bracket doesn't take forever to play through. No prediction
+// vote, no half-time training window, no per-event animated delays —
+// just one "highlights" embed with the final score and the goals, then
+// straight on to the next match.
+// ============================================================
+async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
+  const teamA = getTeam(teamAId);
+  const teamB = getTeam(teamBId);
+  const squadA = getSquadPlayers(teamAId);
+  const squadB = getSquadPlayers(teamBId);
+  const strengthA = teamStrength(teamA, squadA);
+  const strengthB = teamStrength(teamB, squadB);
+
+  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
+  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
+  goalsA = applyOpponentReduction(teamBId, goalsA);
+  goalsB = applyOpponentReduction(teamAId, goalsB);
+  goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
+  goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+
+  const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
+  const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
+  for (const ev of goalEventsA) if (ev.type === 'goal') recordGoal(ev.player);
+  for (const ev of goalEventsB) if (ev.type === 'goal') recordGoal(ev.player);
+
+  let penalties = null;
+  let winnerId;
+  if (goalsA === goalsB) {
+    let penA = 0, penB = 0;
+    for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
+    while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
+    penalties = { penA, penB };
+    winnerId = penA > penB ? teamAId : teamBId;
+  } else {
+    winnerId = goalsA > goalsB ? teamAId : teamBId;
+  }
+
+  const highlights = [...goalEventsA, ...goalEventsB]
+    .filter((e) => e.type === 'goal')
+    .sort((a, b) => a.minute - b.minute)
+    .map((e) => `⚽ ${formatMinute(e.minute)} — ${e.player}${e.isPenalty ? ' (pen)' : ''} (${e.side === 'A' ? teamA.name : teamB.name})`);
+
+  const resultEmbed = new EmbedBuilder()
+    .setTitle(roundLabel)
+    .setDescription(
+      `**${teamA.name}**  ${goalsA} - ${goalsB}  **${teamB.name}**\n` +
+      `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''}` +
+      (highlights.length ? `\n\n**Highlights:**\n${highlights.join('\n')}` : '\n\nA quiet one — no goals.')
+    )
+    .setColor(0x2ecc71)
+    .setAuthor({ name: teamA.name, iconURL: getTeamThumbnail(teamA) })
+    .setThumbnail(getTeamThumbnail(teamB));
+  await channel.send({ embeds: [resultEmbed] }).catch((err) => console.error('playMatchQuick send failed:', err));
+
+  if (teamA.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
+  if (teamB.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+  addCoins(winnerId, 25);
+  saveData(data);
+
+  return { goalsA, goalsB, penalties, winnerId };
+}
+
+// ============================================================
 // INSTANT (unanimated) MATCH — used for group-stage fixtures, so a
 // full group phase doesn't take forever to play through
 // ============================================================
@@ -1714,7 +1778,7 @@ async function startNextKnockoutMatch(guild) {
       const channel = await getTournamentChannel(guild);
       if (channel) {
         await channel.send({ embeds: [new EmbedBuilder().setTitle('🥉 Third Place Playoff').setColor(0xcd7f32)] });
-        const thirdResult = await playMatch(channel, losers[0], losers[1], 'Third Place Playoff');
+        const thirdResult = await playMatchQuick(channel, losers[0], losers[1], 'Third Place Playoff');
         addCoins(thirdResult.winnerId, 5000000);
         await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
       }
@@ -1731,10 +1795,11 @@ async function startNextKnockoutMatch(guild) {
   const match = round[idx];
   const channel = await getTournamentChannel(guild);
   if (!channel) return;
-  const result = await playMatch(channel, match.p1, match.p2, roundNameForSize(round.length * 2));
+  const result = await playMatchQuick(channel, match.p1, match.p2, roundNameForSize(round.length * 2));
   match.winner = result.winnerId;
   match.result = result;
   saveData(data);
+  await delay(1500); // brief beat between matches so the channel is readable, not a wall of text
   await startNextKnockoutMatch(guild);
 }
 
@@ -1968,7 +2033,7 @@ client.on('interactionCreate', async (interaction) => {
           '/var, /card, /chant\n' +
           '/shop view, /shop buy\n' +
           '/tournament create (format: knockout only / groups→knockout /\n' +
-          '            groups only), join, leave\n' +
+          '            groups only), join, leave, addai (fill with AI)\n' +
           '/tournament creategroups/playgroups/standings/finish\n' +
           '            (groups-only tournaments end here)\n' +
           '/tournament advancegroups/start/bracket/status/end\n' +
