@@ -7,6 +7,14 @@ const fs = require('fs');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Without these, one unexpected error anywhere outside a try/catch (a bad
+// network blip, a Discord API hiccup) can silently kill the whole Node
+// process — which looks exactly like "the bot stops and goes offline" even
+// though Render still reports the service as live. Logging and surviving
+// is much better than a silent death with no log trail.
+process.on('unhandledRejection', (err) => console.error('Unhandled promise rejection:', err));
+process.on('uncaughtException', (err) => console.error('Uncaught exception:', err));
+
 // Render (and most free host tiers) expect a web service to bind to a port
 // and answer HTTP requests — otherwise it's treated as a failed deploy and
 // gets restarted in a loop. This bot doesn't need to serve anything, so
@@ -297,6 +305,33 @@ const CLUB_CREST_ICON = 'https://twemoji.maxcdn.com/v/latest/72x72/1f6e1.png';
 function getTeamThumbnail(team) {
   if (!team?.code) return null;
   return team.code.startsWith('c-') ? CLUB_CREST_ICON : cdnFlag(team.code);
+}
+
+// ============================================================
+// FIFA WORLD RANKING (April 2026, top 30) — national teams on this list
+// get their match "strength" from their actual rank; everyone else
+// (unranked countries and all clubs) falls back to their squad's average
+// player rating, so results still skew toward the stronger side without
+// needing an invented ranking for all ~300 teams/clubs.
+// ============================================================
+const FIFA_RANKING = {
+  fr: 1, es: 2, ar: 3, 'gb-eng': 4, pt: 5, br: 6, nl: 7, ma: 8, be: 9, de: 10,
+  hr: 11, it: 12, co: 13, sn: 14, mx: 15, us: 16, uy: 17, jp: 18, ch: 19, dk: 20,
+  ir: 21, tr: 22, ec: 23, at: 24, kr: 25, ng: 26, au: 27, dz: 28, eg: 29, ca: 30,
+};
+// Rank 1 -> 100 strength, rank 30 -> ~42 strength, roughly linear.
+function rankToStrength(rank) { return Math.max(40, 100 - (rank - 1) * 2); }
+function squadAverageRating(squadPlayers) {
+  if (!squadPlayers || squadPlayers.length === 0) return 65;
+  const sum = squadPlayers.reduce((acc, p) => acc + (p.rating || 65), 0);
+  return sum / squadPlayers.length;
+}
+// The single "how good is this team right now" number used to bias match
+// results. Ranked national teams use their real-world rank; everyone else
+// (clubs, unranked countries, custom city teams) uses their squad quality.
+function teamStrength(team, squadPlayers) {
+  if (team?.code && FIFA_RANKING[team.code]) return rankToStrength(FIFA_RANKING[team.code]);
+  return squadAverageRating(squadPlayers);
 }
 
 // ---------- Team / player helpers ----------
@@ -1059,6 +1094,55 @@ function getDefaultSquad(countryCode) {
   return DEFAULT_SQUADS[countryCode] || generateGenericSquad();
 }
 
+// ============================================================
+// AI OPPONENTS — a one-off generated team to play against when no real
+// opponent is given. It's never saved under a real Discord user, so its
+// strength is always squad-rating-based rather than a FIFA rank (its code
+// is always picked from a team that ISN'T in FIFA_RANKING, so the random
+// cosmetic flag/crest it borrows never accidentally overrides the
+// difficulty-driven rating below).
+// ============================================================
+const AI_DIFFICULTIES = {
+  easy: { label: 'Easy', min: 48, max: 64 },
+  medium: { label: 'Medium', min: 62, max: 78 },
+  hard: { label: 'Hard', min: 75, max: 88 },
+  legendary: { label: 'Legendary', min: 86, max: 98 },
+};
+const AI_POOL = ALL_TEAMS.filter((t) => !FIFA_RANKING[t.code]);
+function generateAISquad(min, max) {
+  const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
+  return positions.map((position) => ({
+    name: `${GENERIC_FIRST_NAMES[Math.floor(Math.random() * GENERIC_FIRST_NAMES.length)]} ${GENERIC_LAST_NAMES[Math.floor(Math.random() * GENERIC_LAST_NAMES.length)]}`,
+    position,
+    rating: min + Math.floor(Math.random() * (max - min + 1)),
+  }));
+}
+// Creates a throwaway team + squad in `data`, keyed by a synthetic id that
+// never collides with a real Discord user id, so the existing match engine
+// (which only knows about "team ids") can play against it unmodified.
+function spawnAIOpponent(difficultyKey) {
+  const diff = AI_DIFFICULTIES[difficultyKey] || AI_DIFFICULTIES.medium;
+  const pick = AI_POOL[Math.floor(Math.random() * AI_POOL.length)];
+  const aiId = `ai-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const roster = generateAISquad(diff.min, diff.max);
+  const squad = [];
+  for (const p of roster) {
+    const id = makePlayerId(p.name);
+    data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: aiId };
+    squad.push(id);
+  }
+  data.teams[aiId] = { code: pick.code, name: `${pick.name} (AI — ${diff.label})`, wins: 0, losses: 0, trophies: 0, squad };
+  return aiId;
+}
+// Removes the throwaway team/players/coins afterward so AI opponents never
+// clutter the leaderboard, free-agent pool, or data file long-term.
+function despawnAIOpponent(aiId) {
+  const team = data.teams[aiId];
+  if (team?.squad) for (const id of team.squad) delete data.players[id];
+  delete data.teams[aiId];
+  delete data.coins[aiId];
+}
+
 function seedStarPlayers() {
   if (data.starPlayersSeeded) return;
   for (const p of STAR_PLAYERS) {
@@ -1086,6 +1170,19 @@ function applyOpponentReduction(userId, goals) {
   const boosts = getBoosts(userId);
   let result = goals;
   if (boosts.ironWall) { result = Math.max(0, result - 1); delete boosts.ironWall; }
+  return result;
+}
+
+// Skews the goal count toward the stronger side without making weaker
+// teams hopeless — a big gap in strength (e.g. a top-5 ranked nation vs an
+// unranked one) gives a good chance of a bonus goal, and a decent chance of
+// knocking one off the weaker side, but it's all probabilistic so upsets
+// can still happen.
+function applyStrengthToGoals(goals, myStrength, oppStrength) {
+  const diff = myStrength - oppStrength;
+  let result = goals;
+  if (diff > 0 && Math.random() < Math.min(0.65, diff / 55)) result += 1;
+  if (diff < 0 && Math.random() < Math.min(0.55, -diff / 65)) result = Math.max(0, result - 1);
   return result;
 }
 
@@ -1211,14 +1308,24 @@ function commentaryLine(ev) {
 // Sends a commentary line; goals and saves get a gif attached and a
 // scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
 async function sendEventLine(channel, ev, scoreLine) {
-  const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
-  if (ev.type === 'goal') {
-    recordGoal(ev.player);
-    await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
-  } else if (ev.type === 'save') {
-    await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
-  } else {
-    await channel.send(text);
+  // A single flaky message (rate limit, a dead gif link, a permissions
+  // blip) used to throw out of here, which — because playMatch awaits
+  // every event in sequence — killed the ENTIRE match partway through and
+  // surfaced to the user as "Something went wrong." One bad line should
+  // never take the whole match down, so failures here are logged and
+  // swallowed instead of propagated.
+  try {
+    const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
+    if (ev.type === 'goal') {
+      recordGoal(ev.player);
+      await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
+    } else if (ev.type === 'save') {
+      await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
+    } else {
+      await channel.send(text);
+    }
+  } catch (err) {
+    console.error('sendEventLine failed, continuing match:', err);
   }
 }
 
@@ -1357,10 +1464,15 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   // ---- Pre-match prediction voting (one vote per person, changeable, 30s) ----
   await runPrediction(channel, teamA, teamB);
 
+  const strengthA = teamStrength(teamA, squadA);
+  const strengthB = teamStrength(teamB, squadB);
+
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
   goalsA = applyOpponentReduction(teamBId, goalsA); // teamB's ironWall reduces teamA's goals
   goalsB = applyOpponentReduction(teamAId, goalsB);
+  goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
+  goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
 
   const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
   const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
@@ -1512,10 +1624,16 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 // full group phase doesn't take forever to play through
 // ============================================================
 function simulateMatchInstant(teamAId, teamBId) {
+  const teamA = getTeam(teamAId);
+  const teamB = getTeam(teamBId);
+  const strengthA = teamStrength(teamA, getSquadPlayers(teamAId));
+  const strengthB = teamStrength(teamB, getSquadPlayers(teamBId));
   let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
   let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
   goalsA = applyOpponentReduction(teamBId, goalsA);
   goalsB = applyOpponentReduction(teamAId, goalsB);
+  goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
+  goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
   return { goalsA, goalsB };
 }
 
@@ -1647,6 +1765,11 @@ async function crownChampion(guild, championId) {
         .setDescription(desc).setThumbnail(getTeamThumbnail(champTeam)).setColor(0xffd700)],
     });
   }
+
+  // Clean up any AI teams now that the tournament is over (after the
+  // result embed above, so the champion's name/flag still had a team
+  // record to read from when it was built).
+  if (t.aiIds?.length) { for (const aiId of t.aiIds) despawnAIOpponent(aiId); saveData(data); }
 }
 
 // ============================================================
@@ -1720,8 +1843,10 @@ const slashCommands = [
   new SlashCommandBuilder().setName('citymatch').setDescription('Play a league game between custom teams — no cooldown, no coins, just for fun.')
     .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
 
-  new SlashCommandBuilder().setName('matchsim').setDescription('Play a full animated friendly match against another team.')
-    .addUserOption((o) => o.setName('opponent').setDescription('Who to play').setRequired(true)),
+  new SlashCommandBuilder().setName('matchsim').setDescription('Play a full animated friendly match against another team, or an AI opponent.')
+    .addUserOption((o) => o.setName('opponent').setDescription('Who to play (leave blank to play an AI opponent instead)').setRequired(false))
+    .addStringOption((o) => o.setName('difficulty').setDescription('AI difficulty (only used if no opponent is given)').setRequired(false)
+      .addChoices({ name: 'Easy', value: 'easy' }, { name: 'Medium', value: 'medium' }, { name: 'Hard', value: 'hard' }, { name: 'Legendary', value: 'legendary' })),
   new SlashCommandBuilder().setName('penalty').setDescription('Take a 5-kick penalty shootout for coins.'),
   new SlashCommandBuilder().setName('var').setDescription('Call for a VAR review on your last result.'),
   new SlashCommandBuilder().setName('card').setDescription('Give someone a joke yellow or red card.')
@@ -1744,6 +1869,10 @@ const slashCommands = [
       .addRoleOption((o) => o.setName('prize_role').setDescription('Role to award the champion').setRequired(false)))
     .addSubcommand((s) => s.setName('join').setDescription('Join the open tournament.'))
     .addSubcommand((s) => s.setName('leave').setDescription('Leave the open tournament.'))
+    .addSubcommand((s) => s.setName('addai').setDescription('Fill empty registration slots with AI teams. Admin only.')
+      .addIntegerOption((o) => o.setName('count').setDescription('How many AI teams to add').setRequired(true).setMinValue(1).setMaxValue(31))
+      .addStringOption((o) => o.setName('difficulty').setDescription('AI difficulty').setRequired(false)
+        .addChoices({ name: 'Easy', value: 'easy' }, { name: 'Medium', value: 'medium' }, { name: 'Hard', value: 'hard' }, { name: 'Legendary', value: 'legendary' })))
     .addSubcommand((s) => s.setName('creategroups').setDescription('Split registered teams into groups. Admin only.')
       .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups').setRequired(true).setMinValue(1).setMaxValue(8)))
     .addSubcommand((s) => s.setName('playgroups').setDescription('Simulate all remaining group-stage matches. Admin only.'))
@@ -2050,10 +2179,27 @@ client.on('interactionCreate', async (interaction) => {
 
     if (name === 'matchsim') {
       const opponent = interaction.options.getUser('opponent');
-      if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
       const myTeam = getTeam(interaction.user.id);
+      if (!myTeam) { await interaction.reply({ content: 'Set a team first with /team set.', ephemeral: true }); return; }
+
+      if (!opponent) {
+        // No opponent given — play a generated AI team instead.
+        const difficulty = interaction.options.getString('difficulty') || 'medium';
+        const aiId = spawnAIOpponent(difficulty);
+        const aiTeam = getTeam(aiId);
+        await interaction.reply(`🤖 Kicking off vs **${aiTeam.name}**...`);
+        try {
+          await playMatch(interaction.channel, interaction.user.id, aiId, `Friendly vs AI (${AI_DIFFICULTIES[difficulty]?.label || 'Medium'})`);
+        } finally {
+          despawnAIOpponent(aiId);
+          saveData(data);
+        }
+        return;
+      }
+
+      if (opponent.id === interaction.user.id) { await interaction.reply({ content: "You can't play yourself.", ephemeral: true }); return; }
       const oppTeam = getTeam(opponent.id);
-      if (!myTeam || !oppTeam) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
+      if (!oppTeam) { await interaction.reply({ content: 'Both players need a team set (/team set) first.', ephemeral: true }); return; }
       const label = getDerbyName(myTeam.code, oppTeam.code) || 'Friendly Match';
       await interaction.reply(label !== 'Friendly Match' ? `🔥 **${label}** kicking off...` : '⚽ Kicking off...');
       await playMatch(interaction.channel, interaction.user.id, opponent.id, label);
@@ -2162,7 +2308,7 @@ client.on('interactionCreate', async (interaction) => {
         const prizeRole = interaction.options.getRole('prize_role');
         const tournament = {
           type, name: customName, prize, prizeRoleId: prizeRole?.id || null, size, format,
-          status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id,
+          status: 'registration', participants: [], groups: null, groupMatches: null, rounds: [], channelId: interaction.channel.id, aiIds: [],
         };
         setTournament(guildId, tournament);
         saveData(data);
@@ -2195,6 +2341,24 @@ client.on('interactionCreate', async (interaction) => {
         t.participants = t.participants.filter((id) => id !== interaction.user.id);
         saveData(data);
         await interaction.reply('✅ You left the tournament.');
+        return;
+      }
+      if (sub === 'addai') {
+        if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
+        const t = getTournament(guildId);
+        if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration.', ephemeral: true }); return; }
+        const count = interaction.options.getInteger('count');
+        const difficulty = interaction.options.getString('difficulty') || 'medium';
+        t.aiIds = t.aiIds || [];
+        const added = [];
+        for (let i = 0; i < count; i++) {
+          const aiId = spawnAIOpponent(difficulty);
+          t.aiIds.push(aiId);
+          t.participants.push(aiId);
+          added.push(getTeam(aiId).name);
+        }
+        saveData(data);
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🤖 Added ${count} AI team${count > 1 ? 's' : ''}`).setDescription(added.join('\n')).setColor(0x3498db)] });
         return;
       }
       if (sub === 'creategroups') {
@@ -2326,6 +2490,8 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (sub === 'end') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
+        const t = getTournament(guildId);
+        if (t?.aiIds) for (const aiId of t.aiIds) despawnAIOpponent(aiId);
         setTournament(guildId, null);
         saveData(data);
         await interaction.reply('✅ Tournament cancelled.');
