@@ -351,19 +351,46 @@ function getTeamThumbnail(team) {
 }
 
 // ============================================================
-// FIFA WORLD RANKING (April 2026, top 30) — national teams on this list
-// get their match "strength" from their actual rank; everyone else
-// (unranked countries and all clubs) falls back to their squad's average
-// player rating, so results still skew toward the stronger side without
-// needing an invented ranking for all ~300 teams/clubs.
+// FIFA WORLD RANKING (official Coca-Cola Men's World Ranking, October
+// 2026 — the full published table, not just a top-30 slice). National
+// teams on this list get their match "strength" from their actual rank;
+// everyone else (unranked micro-nations and all clubs) falls back to
+// their squad's average player rating.
 // ============================================================
 const FIFA_RANKING = {
-  fr: 1, es: 2, ar: 3, 'gb-eng': 4, pt: 5, br: 6, nl: 7, ma: 8, be: 9, de: 10,
-  hr: 11, it: 12, co: 13, sn: 14, mx: 15, us: 16, uy: 17, jp: 18, ch: 19, dk: 20,
-  ir: 21, tr: 22, ec: 23, at: 24, kr: 25, ng: 26, au: 27, dz: 28, eg: 29, ca: 30,
+  es: 1, ar: 2, fr: 3, 'gb-eng': 4, pt: 5, br: 6, ma: 7, be: 8, nl: 9, mx: 10,
+  co: 11, ch: 12, de: 13, hr: 14, it: 15, us: 16, jp: 17, sn: 18, no: 19, uy: 20,
+  dk: 21, at: 22, ir: 23, ec: 24, eg: 25, au: 26, ca: 27, dz: 28, ci: 29, ng: 30,
+  tr: 31, kr: 32, py: 33, se: 34,
+  ua: 36, pl: 37, hu: 38, 'gb-wls': 39, cd: 40,
+  gr: 41, cm: 42, 'gb-sct': 43, rs: 44, sk: 45, pa: 46, ml: 47, za: 48, ve: 49, cz: 50,
+  pe: 51, si: 52, cl: 53, cr: 54, sa: 55, ie: 56, ba: 57, ro: 58, uz: 59, qa: 60,
+  tn: 61, bf: 62, iq: 63, ae: 65, al: 66, hn: 67, cv: 68, jm: 69, gh: 70,
+  mk: 71, jo: 72, is: 73, ge: 74, fi: 75, il: 77, bo: 78, me: 79,
+  om: 81, gn: 82, ht: 83, ga: 84, sy: 85, ug: 86, nz: 87, ao: 88, bj: 89, bg: 90,
+  zm: 91, ps: 92, th: 93, by: 94, gt: 95, cn: 96, bh: 97, mz: 98, vn: 99, tj: 100,
+  lu: 101, sv: 102, gq: 103, kg: 104, tt: 105, mg: 106, km: 107, gm: 109, mr: 110,
+  ne: 111, lb: 112, ly: 113, ke: 114, tz: 115, id: 116, kz: 117, sd: 118, rw: 119, tg: 120,
+  kp: 121, ee: 122, na: 123, gw: 124, cy: 125, sr: 128, mw: 129, zw: 130,
+  sl: 131, cg: 132, my: 133, kw: 134, do: 135, ph: 136, ni: 137, in: 138, tm: 139, bi: 140,
+  bw: 141, gy: 142, lv: 143, ye: 144, cf: 145, lr: 146, et: 147, lt: 148, sg: 149, ls: 150,
+  kn: 151, sb: 152, fj: 154, md: 158, mm: 159, mt: 160, vu: 161, cu: 162, ag: 163, sz: 164,
+  lc: 165, vc: 166, pg: 167, af: 168, gd: 169, ss: 170, mv: 173, bb: 174, ad: 175,
+  kh: 177, np: 178, mu: 179, bz: 180, td: 181, bd: 183, er: 184, lk: 185, dm: 186,
+  la: 188, ws: 189, mn: 190, bt: 192, st: 194, dj: 195, bn: 196, pk: 197, to: 199, so: 200,
+  tl: 202,
 };
-// Rank 1 -> 100 strength, rank 30 -> ~42 strength, roughly linear.
-function rankToStrength(rank) { return Math.max(40, 100 - (rank - 1) * 2); }
+// Top-30 nations are the elite — strength drops fast rank-to-rank there,
+// since a real gap separates #1 from #30. Past rank 30 the drop-off
+// flattens out (a #60 side and a #90 side are both "good but not elite")
+// down to a floor around 45 for the lowest-ranked nations in the table —
+// deliberately a bit below the unranked-team default, since a team with
+// no world ranking at all is usually a tiny football nation in practice,
+// not a mystery unknown.
+function rankToStrength(rank) {
+  if (rank <= 30) return 100 - (rank - 1) * 1.0; // #1 -> 100, #30 -> 71
+  return Math.max(45, 71 - (rank - 30) * ((71 - 45) / (203 - 30)));
+}
 function squadAverageRating(squadPlayers) {
   if (!squadPlayers || squadPlayers.length === 0) return 65;
   const sum = squadPlayers.reduce((acc, p) => acc + (p.rating || 65), 0);
@@ -1369,22 +1396,37 @@ function commentaryLine(ev) {
 // Sends a commentary line; goals and saves get a gif attached and a
 // scorer credit toward the all-time Golden Boot / Ballon d'Or tallies.
 async function sendEventLine(channel, ev, scoreLine) {
-  // A single flaky message (rate limit, a dead gif link, a permissions
-  // blip) used to throw out of here, which — because playMatch awaits
-  // every event in sequence — killed the ENTIRE match partway through and
-  // surfaced to the user as "Something went wrong." One bad line should
-  // never take the whole match down, so failures here are logged and
-  // swallowed instead of propagated.
-  try {
-    const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
-    if (ev.type === 'goal') {
-      recordGoal(ev.player);
-      await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(GOAL_GIFS)).setColor(0x2ecc71)] });
-    } else if (ev.type === 'save') {
-      await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(SAVE_GIFS)).setColor(0x3498db)] });
-    } else {
-      await channel.send(text);
+  const text = commentaryLine(ev) + (scoreLine ? `\n${scoreLine}` : '');
+  if (ev.type === 'goal') recordGoal(ev.player);
+
+  // Goals and saves normally go out as an embed with a gif attached. The
+  // gif links are old giphy.com IDs that can go dead over time, and if
+  // that embed send throws for ANY reason (dead link, rate limit, a
+  // permissions blip), this used to swallow the whole event silently —
+  // which is exactly why goals could go missing from the match log while
+  // plain-text lines (cards, fouls, VAR) kept showing up fine, since those
+  // don't depend on an external image at all. Now: if the gif embed fails,
+  // we immediately retry as a plain-text line instead of just dropping it,
+  // so the goal itself is never silently lost even if the gif is.
+  if (ev.type === 'goal' || ev.type === 'save') {
+    const gifList = ev.type === 'goal' ? GOAL_GIFS : SAVE_GIFS;
+    const color = ev.type === 'goal' ? 0x2ecc71 : 0x3498db;
+    try {
+      await channel.send({ embeds: [new EmbedBuilder().setDescription(text).setImage(randomGif(gifList)).setColor(color)] });
+      return;
+    } catch (err) {
+      console.error(`sendEventLine: gif embed failed for a ${ev.type}, retrying as plain text:`, err);
+      try {
+        await channel.send(text);
+      } catch (err2) {
+        console.error('sendEventLine: plain-text retry also failed, continuing match:', err2);
+      }
+      return;
     }
+  }
+
+  try {
+    await channel.send(text);
   } catch (err) {
     console.error('sendEventLine failed, continuing match:', err);
   }
