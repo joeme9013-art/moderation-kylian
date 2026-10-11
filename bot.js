@@ -381,15 +381,79 @@ const FIFA_RANKING = {
   tl: 202,
 };
 // Top-30 nations are the elite — strength drops fast rank-to-rank there,
-// since a real gap separates #1 from #30. Past rank 30 the drop-off
-// flattens out (a #60 side and a #90 side are both "good but not elite")
-// down to a floor around 45 for the lowest-ranked nations in the table —
-// deliberately a bit below the unranked-team default, since a team with
-// no world ranking at all is usually a tiny football nation in practice,
-// not a mystery unknown.
+// since a real gap separates #1 from #30. The very top of the table gets
+// an extra step up on top of that: #1, #2 and #3 are pulled further apart
+// from each other and from the rest of the top 30, so the #1 side doesn't
+// just feel marginally better than #4 — it feels like a different class
+// of team. Past rank 30 the drop-off flattens out (a #60 side and a #90
+// side are both "good but not elite") down to a floor around 45 for the
+// lowest-ranked nations in the table.
 function rankToStrength(rank) {
-  if (rank <= 30) return 100 - (rank - 1) * 1.0; // #1 -> 100, #30 -> 71
+  if (rank === 1) return 100;
+  if (rank === 2) return 90;
+  if (rank === 3) return 86;
+  if (rank <= 30) return 80 - (rank - 4) * (9 / 26); // #4 -> 80, #30 -> 71
   return Math.max(45, 71 - (rank - 30) * ((71 - 45) / (203 - 30)));
+}
+// ------------------------------------------------------------
+// LIVE WORLD RANKING — a mutable, saved copy of FIFA_RANKING that the
+// game actually plays off of. FIFA_RANKING above stays fixed as the
+// real-world baseline; data.liveRanking starts as a copy of it but can
+// shift during play (see protectTopRankTeam below), and persists across
+// restarts the same way the rest of `data` does. Lazily initialized here
+// (rather than in loadData()) so it's never read before FIFA_RANKING
+// itself has finished being declared.
+// ------------------------------------------------------------
+function ensureLiveRanking() {
+  if (!data.liveRanking) data.liveRanking = { ...FIFA_RANKING };
+  if (!data.rankProtectionSaves) data.rankProtectionSaves = {};
+}
+function getRankOneCode() {
+  ensureLiveRanking();
+  for (const code of Object.keys(data.liveRanking)) {
+    if (data.liveRanking[code] === 1) return code;
+  }
+  return null;
+}
+// How many times the #1 side has to be "saved" from a loss (see
+// protectTopRankTeam) before they get knocked off the top spot.
+const TOP_RANK_LOSS_TOLERANCE = 10;
+// The #1 ranked nation doesn't actually lose matches — on a bad day they
+// draw instead, applied as a correction to the final score (and, if it
+// still comes down to penalties, to who wins the shootout). But that
+// protection isn't free: every time it has to kick in counts as a near-miss
+// loss, and after enough of those (10) the #1 side is knocked down to #2
+// or #3 and whoever they swap with takes over the top spot — and the
+// protection — from then on. Every other matchup stays fully
+// random/upset-capable; only the very top of the table works this way.
+function recordTopRankSave(code) {
+  ensureLiveRanking();
+  data.rankProtectionSaves[code] = (data.rankProtectionSaves[code] || 0) + 1;
+  if (data.rankProtectionSaves[code] < TOP_RANK_LOSS_TOLERANCE) return null;
+  const targetRank = Math.random() < 0.5 ? 2 : 3;
+  const targetCode = Object.keys(data.liveRanking).find((c) => data.liveRanking[c] === targetRank);
+  if (!targetCode) return null;
+  data.liveRanking[code] = targetRank;
+  data.liveRanking[targetCode] = 1;
+  data.rankProtectionSaves[code] = 0;
+  return { droppedCode: code, droppedToRank: targetRank, newTopCode: targetCode };
+}
+function protectTopRankTeam(teamA, teamB, goalsA, goalsB) {
+  const rankOne = getRankOneCode();
+  if (teamA?.code === rankOne && goalsA < goalsB) return [goalsB, goalsB, recordTopRankSave(rankOne)];
+  if (teamB?.code === rankOne && goalsB < goalsA) return [goalsA, goalsA, recordTopRankSave(rankOne)];
+  return [goalsA, goalsB, null];
+}
+function protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId) {
+  const rankOne = getRankOneCode();
+  if (teamA?.code === rankOne) return teamAId;
+  if (teamB?.code === rankOne) return teamBId;
+  return defaultWinnerId;
+}
+function countryNameForCode(code) { return ALL_TEAMS.find((t) => t.code === code)?.name || code; }
+function rankChangeAnnouncement(demotion) {
+  if (!demotion) return null;
+  return `📉 **${countryNameForCode(demotion.droppedCode)}** has been ground down by too many near-losses and drops to **#${demotion.droppedToRank}** in the world ranking — **${countryNameForCode(demotion.newTopCode)}** rises to **#1**!`;
 }
 function squadAverageRating(squadPlayers) {
   if (!squadPlayers || squadPlayers.length === 0) return 65;
@@ -400,7 +464,8 @@ function squadAverageRating(squadPlayers) {
 // results. Ranked national teams use their real-world rank; everyone else
 // (clubs, unranked countries, custom city teams) uses their squad quality.
 function teamStrength(team, squadPlayers) {
-  if (team?.code && FIFA_RANKING[team.code]) return rankToStrength(FIFA_RANKING[team.code]);
+  ensureLiveRanking();
+  if (team?.code && data.liveRanking[team.code]) return rankToStrength(data.liveRanking[team.code]);
   return squadAverageRating(squadPlayers);
 }
 
@@ -1174,13 +1239,27 @@ function getDefaultSquad(countryCode) {
 // and Easy from everyone outside the ranking. A country already taken by
 // a real player in this server is never picked.
 // ============================================================
-const RANKED_CODES_SORTED = Object.keys(FIFA_RANKING).sort((a, b) => FIFA_RANKING[a] - FIFA_RANKING[b]);
-const AI_DIFFICULTIES = {
-  easy: { label: 'Easy', min: 48, max: 64, pool: COUNTRIES.map((c) => c.code).filter((code) => !FIFA_RANKING[code]) },
-  medium: { label: 'Medium', min: 62, max: 78, pool: RANKED_CODES_SORTED.slice(20, 30) }, // ranks 21-30
-  hard: { label: 'Hard', min: 75, max: 88, pool: RANKED_CODES_SORTED.slice(10, 20) }, // ranks 11-20
-  legendary: { label: 'Legendary', min: 86, max: 98, pool: RANKED_CODES_SORTED.slice(0, 10) }, // ranks 1-10
+// Pools are computed live (not fixed at startup) since the world ranking
+// can now actually shift during play (see "protectTopRankTeam" below) —
+// a Legendary AI should always be drawn from whoever's ACTUALLY ranked
+// 1-10 right now, not whoever was on top when the bot started.
+const AI_DIFFICULTY_META = {
+  easy: { label: 'Easy', min: 48, max: 64 },
+  medium: { label: 'Medium', min: 62, max: 78 },
+  hard: { label: 'Hard', min: 75, max: 88 },
+  legendary: { label: 'Legendary', min: 86, max: 98 },
 };
+function getLiveRankedCodesSorted() {
+  ensureLiveRanking();
+  return Object.keys(data.liveRanking).sort((a, b) => data.liveRanking[a] - data.liveRanking[b]);
+}
+function getAIDifficultyPool(difficultyKey) {
+  const sorted = getLiveRankedCodesSorted();
+  if (difficultyKey === 'legendary') return sorted.slice(0, 10); // ranks 1-10
+  if (difficultyKey === 'hard') return sorted.slice(10, 20); // ranks 11-20
+  if (difficultyKey === 'medium') return sorted.slice(20, 30); // ranks 21-30
+  return COUNTRIES.map((c) => c.code).filter((code) => !(code in data.liveRanking)); // easy: unranked
+}
 function generateAISquad(min, max) {
   const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
   return positions.map((position) => ({
@@ -1205,21 +1284,23 @@ async function pickAvailableCountryCode(pool, guild) {
 // never collides with a real Discord user id, so the existing match engine
 // (which only knows about "team ids") can play against it unmodified.
 async function spawnAIOpponent(difficultyKey, guild) {
-  const diff = AI_DIFFICULTIES[difficultyKey] || AI_DIFFICULTIES.medium;
-  const code = await pickAvailableCountryCode(diff.pool, guild);
+  const key = AI_DIFFICULTY_META[difficultyKey] ? difficultyKey : 'medium';
+  const meta = AI_DIFFICULTY_META[key];
+  const pool = getAIDifficultyPool(key);
+  const code = await pickAvailableCountryCode(pool, guild);
   const country = COUNTRIES.find((c) => c.code === code);
   const aiId = `ai-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   // Use the real starting XI when one's on file (most ranked nations have
   // one) so a "Legendary" Morocco actually fields Hakimi, Bounou, etc.;
   // otherwise fall back to a generated squad scaled to the difficulty.
-  const roster = DEFAULT_SQUADS[code] || generateAISquad(diff.min, diff.max);
+  const roster = DEFAULT_SQUADS[code] || generateAISquad(meta.min, meta.max);
   const squad = [];
   for (const p of roster) {
     const id = makePlayerId(p.name);
     data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: aiId };
     squad.push(id);
   }
-  data.teams[aiId] = { code, name: `${country.name} (AI — ${diff.label})`, wins: 0, losses: 0, trophies: 0, squad };
+  data.teams[aiId] = { code, name: `${country.name} (AI — ${meta.label})`, wins: 0, losses: 0, trophies: 0, squad };
   return aiId;
 }
 // Removes the throwaway team/players/coins afterward so AI opponents never
@@ -1556,6 +1637,40 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
   const isCity = options.isCity || false;
   const teamA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
   const teamB = isCity ? getCityTeam(teamBId) : getTeam(teamBId);
+
+  // This whole function used to have no outer safety net: unlike the
+  // tournament "quick match" path, a single failed channel.send (a kickoff
+  // embed, a half-time embed, a full-time embed — none of these were
+  // wrapped) or an error inside a helper like runPrediction/
+  // runHalfTimeTraining would throw straight out of here, abort the whole
+  // interaction, and surface to the user as a bare "Something went wrong."
+  // — exactly the symptom reported, including right after a normal-looking
+  // Second Half kickoff with a couple of cards shown. Same fix as the
+  // tournament path: contain it, log the real error, and settle the match
+  // with a coin flip instead of losing it entirely.
+  try {
+    return await playMatchInner(channel, teamAId, teamBId, roundLabel, options, teamA, teamB);
+  } catch (err) {
+    console.error(`playMatch crashed for ${teamA?.name || teamAId} vs ${teamB?.name || teamBId}, falling back to a coin flip:`, err);
+    const winnerId = Math.random() < 0.5 ? teamAId : teamBId;
+    await channel.send({
+      embeds: [new EmbedBuilder().setTitle(roundLabel || 'Match')
+        .setDescription(`⚠️ That match hit a glitch mid-simulation, so it's being settled by a coin flip instead.\n**${(isCity ? getCityTeam(winnerId) : getTeam(winnerId))?.name || 'Winner'}** wins.`)
+        .setColor(0xe67e22)],
+    }).catch(() => {});
+    const wA = isCity ? getCityTeam(teamAId) : getTeam(teamAId);
+    const wB = isCity ? getCityTeam(teamBId) : getTeam(teamBId);
+    if (wA?.wins !== undefined) (winnerId === teamAId ? wA.wins++ : wA.losses++);
+    if (wB?.wins !== undefined) (winnerId === teamBId ? wB.wins++ : wB.losses++);
+    if (!isCity) addCoins(winnerId, 25);
+    saveData(data);
+    matchCooldowns.set(channel.id, Date.now());
+    return { goalsA: null, goalsB: null, penalties: null, winnerId };
+  }
+}
+
+async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, teamA, teamB) {
+  const isCity = options.isCity || false;
   const squadA = isCity ? [] : getSquadPlayers(teamAId);
   const squadB = isCity ? [] : getSquadPlayers(teamBId);
 
@@ -1686,6 +1801,9 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     });
   }
 
+  let rankDemotion;
+  [goalsA, goalsB, rankDemotion] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+
   let penalties = null;
   let winnerId;
   if (goalsA === goalsB) {
@@ -1693,7 +1811,7 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
     while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
     penalties = { penA, penB };
-    winnerId = penA > penB ? teamAId : teamBId;
+    winnerId = protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, penA > penB ? teamAId : teamBId);
   } else {
     winnerId = goalsA > goalsB ? teamAId : teamBId;
   }
@@ -1711,6 +1829,8 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
     .setColor(0x2ecc71);
   if (!isCity) { resultEmbed.setAuthor({ name: teamA.name, iconURL: getTeamThumbnail(teamA) }); resultEmbed.setThumbnail(getTeamThumbnail(teamB)); }
   await channel.send({ embeds: [resultEmbed] });
+  const rankNote = rankChangeAnnouncement(rankDemotion);
+  if (rankNote) await channel.send({ embeds: [new EmbedBuilder().setDescription(rankNote).setColor(0x9b59b6)] }).catch(() => {});
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
   teamA.wins !== undefined && (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
@@ -1752,6 +1872,8 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     goalsB = applyOpponentReduction(teamAId, goalsB);
     goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
     goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+    let rankDemotion;
+    [goalsA, goalsB, rankDemotion] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
 
     const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
     const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
@@ -1765,7 +1887,7 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
       for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
       while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
       penalties = { penA, penB };
-      winnerId = penA > penB ? teamAId : teamBId;
+      winnerId = protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, penA > penB ? teamAId : teamBId);
     } else {
       winnerId = goalsA > goalsB ? teamAId : teamBId;
     }
@@ -1786,6 +1908,8 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
       .setAuthor({ name: teamA.name, iconURL: getTeamThumbnail(teamA) })
       .setThumbnail(getTeamThumbnail(teamB));
     await channel.send({ embeds: [resultEmbed] }).catch((err) => console.error('playMatchQuick send failed:', err));
+    const rankNote = rankChangeAnnouncement(rankDemotion);
+    if (rankNote) await channel.send({ embeds: [new EmbedBuilder().setDescription(rankNote).setColor(0x9b59b6)] }).catch(() => {});
 
     if (teamA.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
     if (teamB.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
@@ -1824,6 +1948,7 @@ function simulateMatchInstant(teamAId, teamBId) {
   goalsB = applyOpponentReduction(teamAId, goalsB);
   goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
   goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+  [goalsA, goalsB] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
   return { goalsA, goalsB };
 }
 
@@ -2023,7 +2148,7 @@ const slashCommands = [
   new SlashCommandBuilder().setName('daily').setDescription('Claim your daily coins.'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Top players.')
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
-      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-L record)', value: 'record' })),
+      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-L record)', value: 'record' }, { name: 'world ranking (top 100 countries)', value: 'worldranking' })),
 
   new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
     .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
@@ -2335,6 +2460,15 @@ client.on('interactionCreate', async (interaction) => {
     }
     if (name === 'leaderboard') {
       const type = interaction.options.getString('type');
+      if (type === 'worldranking') {
+        ensureLiveRanking();
+        const top100 = getLiveRankedCodesSorted().slice(0, 100);
+        const lines = top100.map((code, i) => `**${i + 1}.** ${countryNameForCode(code)}`);
+        const saves = data.rankProtectionSaves[getRankOneCode()] || 0;
+        const footer = `#1 has survived ${saves}/${TOP_RANK_LOSS_TOLERANCE} near-losses before being knocked off the top.`;
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle('🌍 FIFA World Ranking — Top 100').setDescription(lines.join('\n')).setColor(0x3498db).setFooter({ text: footer })] });
+        return;
+      }
       if (type === 'goldenboot' || type === 'ballondor') {
         const entries = Object.entries(data.playerGoals)
           .map(([player, goals]) => [player, type === 'ballondor' ? goals * 3 : goals])
