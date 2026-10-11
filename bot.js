@@ -89,7 +89,50 @@ function loadData() {
   if (p.tournament !== undefined) delete p.tournament;
   return p;
 }
-function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
+// ------------------------------------------------------------
+// Optional cloud backup (Upstash Redis free tier). Render's free
+// Web Service tier wipes the local disk on every redeploy/restart,
+// so without this, all progress is lost each time the bot updates.
+// If UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN env vars are
+// set, every saveData() also pushes a copy to Upstash, and on boot
+// the bot pulls the latest copy down before loading. If those env
+// vars aren't set, the bot just behaves as before (local file only).
+// ------------------------------------------------------------
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const REMOTE_KEY = 'football-bot-data';
+
+async function pullRemoteData() {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    const res = await fetch(`${UPSTASH_URL}/get/${REMOTE_KEY}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+    const json = await res.json();
+    if (json && json.result) {
+      fs.writeFileSync(DATA_FILE, json.result);
+      console.log('Restored saved data from cloud storage.');
+    } else {
+      console.log('No saved data in cloud storage yet — starting fresh.');
+    }
+  } catch (err) {
+    console.error('Could not reach cloud storage, falling back to local file:', err);
+  }
+}
+
+function pushRemoteData(dataObj) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  fetch(`${UPSTASH_URL}/set/${REMOTE_KEY}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'text/plain' },
+    body: JSON.stringify(dataObj),
+  }).catch((err) => console.error('Could not save data to cloud storage:', err));
+}
+
+function saveData(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  pushRemoteData(data);
+}
 let data = loadData();
 
 function getTournament(guildId) { return data.tournaments[guildId] || null; }
@@ -1096,19 +1139,21 @@ function getDefaultSquad(countryCode) {
 
 // ============================================================
 // AI OPPONENTS — a one-off generated team to play against when no real
-// opponent is given. It's never saved under a real Discord user, so its
-// strength is always squad-rating-based rather than a FIFA rank (its code
-// is always picked from a team that ISN'T in FIFA_RANKING, so the random
-// cosmetic flag/crest it borrows never accidentally overrides the
-// difficulty-driven rating below).
+// opponent is given. Always a real national team (never a club or a made
+// up name), picked from a pool graded by the same FIFA ranking used for
+// match strength, so the difficulty actually means something: Legendary
+// draws from the very best ranked nations (Morocco etc.), Hard from a
+// clear step below (Italy etc.), Medium from the rest of the ranked 30,
+// and Easy from everyone outside the ranking. A country already taken by
+// a real player in this server is never picked.
 // ============================================================
+const RANKED_CODES_SORTED = Object.keys(FIFA_RANKING).sort((a, b) => FIFA_RANKING[a] - FIFA_RANKING[b]);
 const AI_DIFFICULTIES = {
-  easy: { label: 'Easy', min: 48, max: 64 },
-  medium: { label: 'Medium', min: 62, max: 78 },
-  hard: { label: 'Hard', min: 75, max: 88 },
-  legendary: { label: 'Legendary', min: 86, max: 98 },
+  easy: { label: 'Easy', min: 48, max: 64, pool: COUNTRIES.map((c) => c.code).filter((code) => !FIFA_RANKING[code]) },
+  medium: { label: 'Medium', min: 62, max: 78, pool: RANKED_CODES_SORTED.slice(20, 30) }, // ranks 21-30
+  hard: { label: 'Hard', min: 75, max: 88, pool: RANKED_CODES_SORTED.slice(10, 20) }, // ranks 11-20
+  legendary: { label: 'Legendary', min: 86, max: 98, pool: RANKED_CODES_SORTED.slice(0, 10) }, // ranks 1-10
 };
-const AI_POOL = ALL_TEAMS.filter((t) => !FIFA_RANKING[t.code]);
 function generateAISquad(min, max) {
   const positions = ['GK', 'DEF', 'DEF', 'DEF', 'DEF', 'MID', 'MID', 'MID', 'FWD', 'FWD', 'FWD'];
   return positions.map((position) => ({
@@ -1117,21 +1162,37 @@ function generateAISquad(min, max) {
     rating: min + Math.floor(Math.random() * (max - min + 1)),
   }));
 }
+// Picks a country from the given pool that nobody in this server currently
+// holds, falling back to the full country list, and as an absolute last
+// resort just reusing a pool entry (cosmetic only — still harmless).
+async function pickAvailableCountryCode(pool, guild) {
+  for (const code of shuffle(pool)) {
+    if (!(await isCountryTaken(code, guild, null))) return code;
+  }
+  for (const code of shuffle(COUNTRIES.map((c) => c.code))) {
+    if (!(await isCountryTaken(code, guild, null))) return code;
+  }
+  return pool[0] || COUNTRIES[0].code;
+}
 // Creates a throwaway team + squad in `data`, keyed by a synthetic id that
 // never collides with a real Discord user id, so the existing match engine
 // (which only knows about "team ids") can play against it unmodified.
-function spawnAIOpponent(difficultyKey) {
+async function spawnAIOpponent(difficultyKey, guild) {
   const diff = AI_DIFFICULTIES[difficultyKey] || AI_DIFFICULTIES.medium;
-  const pick = AI_POOL[Math.floor(Math.random() * AI_POOL.length)];
+  const code = await pickAvailableCountryCode(diff.pool, guild);
+  const country = COUNTRIES.find((c) => c.code === code);
   const aiId = `ai-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-  const roster = generateAISquad(diff.min, diff.max);
+  // Use the real starting XI when one's on file (most ranked nations have
+  // one) so a "Legendary" Morocco actually fields Hakimi, Bounou, etc.;
+  // otherwise fall back to a generated squad scaled to the difficulty.
+  const roster = DEFAULT_SQUADS[code] || generateAISquad(diff.min, diff.max);
   const squad = [];
   for (const p of roster) {
     const id = makePlayerId(p.name);
     data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: aiId };
     squad.push(id);
   }
-  data.teams[aiId] = { code: pick.code, name: `${pick.name} (AI — ${diff.label})`, wins: 0, losses: 0, trophies: 0, squad };
+  data.teams[aiId] = { code, name: `${country.name} (AI — ${diff.label})`, wins: 0, losses: 0, trophies: 0, squad };
   return aiId;
 }
 // Removes the throwaway team/players/coins afterward so AI opponents never
@@ -1629,58 +1690,81 @@ async function playMatch(channel, teamAId, teamBId, roundLabel, options = {}) {
 async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
   const teamA = getTeam(teamAId);
   const teamB = getTeam(teamBId);
-  const squadA = getSquadPlayers(teamAId);
-  const squadB = getSquadPlayers(teamBId);
-  const strengthA = teamStrength(teamA, squadA);
-  const strengthB = teamStrength(teamB, squadB);
 
-  let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
-  let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
-  goalsA = applyOpponentReduction(teamBId, goalsA);
-  goalsB = applyOpponentReduction(teamAId, goalsB);
-  goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
-  goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+  // A whole knockout bracket chains dozens of these calls back to back
+  // (startNextKnockoutMatch calls itself after every match). If any one
+  // match throws for ANY reason, that used to propagate all the way up and
+  // abort the entire rest of the bracket with a generic "Something went
+  // wrong" — the exact symptom reported. Instead: log the real error (so
+  // it can actually be diagnosed) and fall back to a coin-flip result so
+  // the tournament always keeps moving.
+  try {
+    const squadA = getSquadPlayers(teamAId);
+    const squadB = getSquadPlayers(teamBId);
+    const strengthA = teamStrength(teamA, squadA);
+    const strengthB = teamStrength(teamB, squadB);
 
-  const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
-  const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
-  for (const ev of goalEventsA) if (ev.type === 'goal') recordGoal(ev.player);
-  for (const ev of goalEventsB) if (ev.type === 'goal') recordGoal(ev.player);
+    let goalsA = applyBoostsToGoals(teamAId, baseGoalCount());
+    let goalsB = applyBoostsToGoals(teamBId, baseGoalCount());
+    goalsA = applyOpponentReduction(teamBId, goalsA);
+    goalsB = applyOpponentReduction(teamAId, goalsB);
+    goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
+    goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
 
-  let penalties = null;
-  let winnerId;
-  if (goalsA === goalsB) {
-    let penA = 0, penB = 0;
-    for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
-    while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
-    penalties = { penA, penB };
-    winnerId = penA > penB ? teamAId : teamBId;
-  } else {
-    winnerId = goalsA > goalsB ? teamAId : teamBId;
+    const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
+    const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
+    for (const ev of goalEventsA) if (ev.type === 'goal') recordGoal(ev.player);
+    for (const ev of goalEventsB) if (ev.type === 'goal') recordGoal(ev.player);
+
+    let penalties = null;
+    let winnerId;
+    if (goalsA === goalsB) {
+      let penA = 0, penB = 0;
+      for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
+      while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
+      penalties = { penA, penB };
+      winnerId = penA > penB ? teamAId : teamBId;
+    } else {
+      winnerId = goalsA > goalsB ? teamAId : teamBId;
+    }
+
+    const highlights = [...goalEventsA, ...goalEventsB]
+      .filter((e) => e.type === 'goal')
+      .sort((a, b) => a.minute - b.minute)
+      .map((e) => `⚽ ${formatMinute(e.minute)} — ${e.player}${e.isPenalty ? ' (pen)' : ''} (${e.side === 'A' ? teamA.name : teamB.name})`);
+
+    const resultEmbed = new EmbedBuilder()
+      .setTitle(roundLabel)
+      .setDescription(
+        `**${teamA.name}**  ${goalsA} - ${goalsB}  **${teamB.name}**\n` +
+        `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''}` +
+        (highlights.length ? `\n\n**Highlights:**\n${highlights.join('\n')}` : '\n\nA quiet one — no goals.')
+      )
+      .setColor(0x2ecc71)
+      .setAuthor({ name: teamA.name, iconURL: getTeamThumbnail(teamA) })
+      .setThumbnail(getTeamThumbnail(teamB));
+    await channel.send({ embeds: [resultEmbed] }).catch((err) => console.error('playMatchQuick send failed:', err));
+
+    if (teamA.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
+    if (teamB.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+    addCoins(winnerId, 25);
+    saveData(data);
+
+    return { goalsA, goalsB, penalties, winnerId };
+  } catch (err) {
+    console.error(`playMatchQuick crashed for ${teamA?.name || teamAId} vs ${teamB?.name || teamBId}, falling back to a coin flip:`, err);
+    const winnerId = Math.random() < 0.5 ? teamAId : teamBId;
+    await channel.send({
+      embeds: [new EmbedBuilder().setTitle(roundLabel)
+        .setDescription(`⚠️ That match hit a glitch mid-simulation, so it's being settled by a coin flip instead.\n**${getTeam(winnerId)?.name || 'Winner'}** goes through.`)
+        .setColor(0xe67e22)],
+    }).catch(() => {});
+    if (teamA?.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
+    if (teamB?.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+    addCoins(winnerId, 25);
+    saveData(data);
+    return { goalsA: null, goalsB: null, penalties: null, winnerId };
   }
-
-  const highlights = [...goalEventsA, ...goalEventsB]
-    .filter((e) => e.type === 'goal')
-    .sort((a, b) => a.minute - b.minute)
-    .map((e) => `⚽ ${formatMinute(e.minute)} — ${e.player}${e.isPenalty ? ' (pen)' : ''} (${e.side === 'A' ? teamA.name : teamB.name})`);
-
-  const resultEmbed = new EmbedBuilder()
-    .setTitle(roundLabel)
-    .setDescription(
-      `**${teamA.name}**  ${goalsA} - ${goalsB}  **${teamB.name}**\n` +
-      `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''}` +
-      (highlights.length ? `\n\n**Highlights:**\n${highlights.join('\n')}` : '\n\nA quiet one — no goals.')
-    )
-    .setColor(0x2ecc71)
-    .setAuthor({ name: teamA.name, iconURL: getTeamThumbnail(teamA) })
-    .setThumbnail(getTeamThumbnail(teamB));
-  await channel.send({ embeds: [resultEmbed] }).catch((err) => console.error('playMatchQuick send failed:', err));
-
-  if (teamA.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
-  if (teamB.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
-  addCoins(winnerId, 25);
-  saveData(data);
-
-  return { goalsA, goalsB, penalties, winnerId };
 }
 
 // ============================================================
@@ -2250,7 +2334,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!opponent) {
         // No opponent given — play a generated AI team instead.
         const difficulty = interaction.options.getString('difficulty') || 'medium';
-        const aiId = spawnAIOpponent(difficulty);
+        const aiId = await spawnAIOpponent(difficulty, interaction.guild);
         const aiTeam = getTeam(aiId);
         await interaction.reply(`🤖 Kicking off vs **${aiTeam.name}**...`);
         try {
@@ -2417,7 +2501,7 @@ client.on('interactionCreate', async (interaction) => {
         t.aiIds = t.aiIds || [];
         const added = [];
         for (let i = 0; i < count; i++) {
-          const aiId = spawnAIOpponent(difficulty);
+          const aiId = await spawnAIOpponent(difficulty, interaction.guild);
           t.aiIds.push(aiId);
           t.participants.push(aiId);
           added.push(getTeam(aiId).name);
@@ -2570,4 +2654,11 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-client.login(process.env.BOT_TOKEN);
+(async () => {
+  // Pull the latest saved data from cloud storage (if configured) before
+  // logging in, so the bot never comes online with stale/empty data after
+  // a redeploy wipes the local disk.
+  await pullRemoteData();
+  data = loadData();
+  client.login(process.env.BOT_TOKEN);
+})();
