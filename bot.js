@@ -455,6 +455,58 @@ function rankChangeAnnouncement(demotion) {
   if (!demotion) return null;
   return `📉 **${countryNameForCode(demotion.droppedCode)}** has been ground down by too many near-losses and drops to **#${demotion.droppedToRank}** in the world ranking — **${countryNameForCode(demotion.newTopCode)}** rises to **#1**!`;
 }
+function opponentLiveRank(code) {
+  ensureLiveRanking();
+  return code ? data.liveRanking[code] || null : null;
+}
+// ------------------------------------------------------------
+// SPAIN — a fixed identity rule (not tied to who currently holds #1, the
+// way the generic protectTopRankTeam above is), graded by how good the
+// OPPONENT is right now:
+//   • opponent ranked #2-#4: a genuine toss-up — no correction, Spain can
+//     actually lose these.
+//   • everyone else (ranked #5 or lower, including unranked minnows):
+//     Spain draws at worst — a loss gets corrected to a draw, same as
+//     the generic top-rank protection, and they win it on penalties too.
+// This replaces the generic #1 protection for any match Spain plays in
+// (so the 2-4 "hard fight" tier can't be overridden by it), but leaves
+// the generic system fully in place for every other matchup.
+// ------------------------------------------------------------
+const SPAIN_CODE = 'es';
+function isSpainHardFightTier(oppRank) { return oppRank != null && oppRank >= 2 && oppRank <= 4; }
+function applySpainTierGoals(teamA, teamB, goalsA, goalsB) {
+  const aIsSpain = teamA?.code === SPAIN_CODE;
+  const bIsSpain = teamB?.code === SPAIN_CODE;
+  const oppRank = opponentLiveRank(aIsSpain ? teamB?.code : teamA?.code);
+  if (isSpainHardFightTier(oppRank)) return [goalsA, goalsB]; // hard fight — untouched
+  if (aIsSpain && goalsA < goalsB) return [goalsB, goalsB];
+  if (bIsSpain && goalsB < goalsA) return [goalsA, goalsA];
+  return [goalsA, goalsB];
+}
+function applySpainTierPenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId) {
+  const aIsSpain = teamA?.code === SPAIN_CODE;
+  const bIsSpain = teamB?.code === SPAIN_CODE;
+  const oppRank = opponentLiveRank(aIsSpain ? teamB?.code : teamA?.code);
+  if (isSpainHardFightTier(oppRank)) return defaultWinnerId; // fair shootout
+  if (aIsSpain) return teamAId;
+  if (bIsSpain) return teamBId;
+  return defaultWinnerId;
+}
+// The single entry point match code should call: routes to the Spain
+// identity rule whenever Spain's playing, otherwise falls back to the
+// generic "whoever currently holds #1" protection.
+function applyEndgameGoals(teamA, teamB, goalsA, goalsB) {
+  if (teamA?.code === SPAIN_CODE || teamB?.code === SPAIN_CODE) {
+    return [...applySpainTierGoals(teamA, teamB, goalsA, goalsB), null];
+  }
+  return protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+}
+function applyEndgamePenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId) {
+  if (teamA?.code === SPAIN_CODE || teamB?.code === SPAIN_CODE) {
+    return applySpainTierPenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId);
+  }
+  return protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId);
+}
 function squadAverageRating(squadPlayers) {
   if (!squadPlayers || squadPlayers.length === 0) return 65;
   const sum = squadPlayers.reduce((acc, p) => acc + (p.rating || 65), 0);
