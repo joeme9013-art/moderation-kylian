@@ -1,7 +1,7 @@
 require('dotenv').config();
 const {
   Client, GatewayIntentBits, PermissionsBitField, EmbedBuilder, SlashCommandBuilder, REST, Routes,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, AttachmentBuilder,
 } = require('discord.js');
 const fs = require('fs');
 
@@ -2190,6 +2190,129 @@ function groupStandings(group, matches) {
 }
 
 const TOURNAMENT_MATCH_GAP_MS = 10 * 1000;
+// ============================================================
+// BRACKET IMAGE — draws the classic two-sided tournament bracket
+// (half the field on each side, converging on the final in the middle),
+// with teams filled in as they advance. Needs @napi-rs/canvas; if it
+// isn't installed the bot falls back to the text bracket.
+// ============================================================
+let canvasLib = null;
+try {
+  canvasLib = require('@napi-rs/canvas');
+  for (const f of ['/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/dejavu/DejaVuSans.ttf', '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', '/usr/share/fonts/TTF/DejaVuSans.ttf']) {
+    try { if (fs.existsSync(f)) { canvasLib.GlobalFonts.registerFromPath(f, 'BracketFont'); break; } } catch {}
+  }
+} catch { canvasLib = null; }
+
+function bracketLayout(t) {
+  const first = t.rounds?.[0];
+  if (!first || first.length < 2) return null; // need at least semifinals
+  const N = first.length * 2;
+  const R = Math.log2(N); // levels 0..R-1
+  if (!Number.isInteger(R)) return null;
+  // box contents per level: level 0 = round-0 entrants, level l+1 = winners of round l
+  const levels = [];
+  levels.push(first.flatMap((m) => [m.p1, m.p2]));
+  for (let l = 0; l < R - 1; l++) {
+    const count = N >> (l + 1);
+    const round = t.rounds[l];
+    levels.push(Array.from({ length: count }, (_, i) => round?.[i]?.winner || null));
+  }
+  return { N, R, levels };
+}
+
+function renderBracketPng(t) {
+  if (!canvasLib) return null;
+  const lay = bracketLayout(t);
+  if (!lay) return null;
+  const { N, R, levels } = lay;
+  const bw = 170, bh = 26, step = 190, margin = 24, centerGap = 150, topPad = 90;
+  const perSide0 = N / 2;
+  const slot = 36;
+  const W = 2 * (margin + (R - 1) * step + bw) + centerGap;
+  const H = topPad + perSide0 * slot + 50;
+  const canvas = canvasLib.createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+  const FONT = canvasLib.GlobalFonts?.has?.('BracketFont') ? 'BracketFont' : 'sans-serif';
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
+
+  // y center of box j (index within its side) at level l
+  const yc = (l, j) => topPad + (j + 0.5) * slot * Math.pow(2, l) ;
+  const xLeft = (l) => margin + l * step;                 // left edge of a left-side box
+  const xRight = (l) => W - margin - bw - l * step;       // left edge of a right-side box
+  const nameOf = (id) => (id ? plainTeamName(getTeam(id)) : '');
+  const fit = (text, max) => { let s = text; while (s.length > 3 && ctx.measureText(s).width > max) s = s.slice(0, -2); return s === text ? s : s.trimEnd() + '…'; };
+
+  ctx.fillStyle = '#111'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = `bold 30px ${FONT}`;
+  ctx.fillText(fit(tournamentDisplayName(t).replace(/™/g, ''), W - 80), W / 2, 34);
+  ctx.font = `16px ${FONT}`; ctx.fillStyle = '#555';
+  ctx.fillText(`${roundNameForSize(N)} → Final`, W / 2, 62);
+
+  const boxes = []; // remember positions for connectors
+  for (let l = 0; l < R; l++) {
+    const count = levels[l].length;
+    const half = count / 2;
+    boxes[l] = [];
+    for (let i = 0; i < count; i++) {
+      const left = i < half;
+      const j = left ? i : i - half;
+      const x = left ? xLeft(l) : xRight(l);
+      const y = yc(l, j);
+      boxes[l][i] = { x, y, left };
+      const id = levels[l][i];
+      const advanced = id && t.rounds[l]?.[Math.floor(i / 2)]?.winner === id;
+      const eliminated = id && t.rounds[l]?.[Math.floor(i / 2)]?.winner && !advanced;
+      ctx.lineWidth = 1.5; ctx.strokeStyle = '#111';
+      ctx.fillStyle = advanced ? '#d5f5dc' : '#ffffff';
+      ctx.fillRect(x, y - bh / 2, bw, bh); ctx.strokeRect(x, y - bh / 2, bw, bh);
+      if (id) {
+        ctx.fillStyle = eliminated ? '#999' : '#111';
+        ctx.font = `${advanced ? 'bold ' : ''}14px ${FONT}`;
+        ctx.textAlign = 'center';
+        ctx.fillText(fit(nameOf(id), bw - 12), x + bw / 2, y + 1);
+      }
+    }
+  }
+  // connectors: box (l,i) -> parent (l+1, floor(i/2)) elbows
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
+  for (let l = 0; l < R - 1; l++) {
+    levels[l].forEach((_, i) => {
+      const b = boxes[l][i];
+      const p = boxes[l + 1][Math.floor(i / 2)];
+      const x1 = b.left ? b.x + bw : b.x;
+      const x2 = b.left ? p.x : p.x + bw;
+      const mid = (x1 + x2) / 2;
+      ctx.beginPath(); ctx.moveTo(x1, b.y); ctx.lineTo(mid, b.y); ctx.lineTo(mid, p.y); ctx.lineTo(x2, p.y); ctx.stroke();
+    });
+  }
+  // final: line between the two finalists, champion on top
+  const fl = boxes[R - 1][0], fr = boxes[R - 1][1];
+  ctx.beginPath(); ctx.moveTo(fl.x + bw, fl.y); ctx.lineTo(fr.x, fr.y); ctx.stroke();
+  const champId = t.champion || t.rounds[R - 1]?.[0]?.winner || null;
+  ctx.textAlign = 'center';
+  const cx = W / 2, cy = fl.y - 46;
+  ctx.font = `bold 20px ${FONT}`; ctx.fillStyle = '#b8860b';
+  ctx.fillText(champId ? `CHAMPION` : 'FINAL', cx, cy);
+  if (champId) { ctx.font = `bold 18px ${FONT}`; ctx.fillStyle = '#111'; ctx.fillText(fit(nameOf(champId), centerGap + 40), cx, cy + 24); }
+  return canvas.toBuffer('image/png');
+}
+
+// Sends the bracket as an image (plus the round's match list as text).
+async function sendBracketImage(channel, t, extra = {}) {
+  let png = null;
+  try { png = renderBracketPng(t); } catch (err) { console.error('bracket render failed (falling back to text):', err); }
+  if (!png) return false;
+  try {
+    const file = new AttachmentBuilder(png, { name: 'bracket.png' });
+    const embed = new EmbedBuilder().setTitle(extra.title || `🏆 ${tournamentDisplayName(t)} — Bracket`).setImage('attachment://bracket.png').setColor(0x3498db);
+    if (extra.description) embed.setDescription(extra.description);
+    if (extra.footer) embed.setFooter({ text: extra.footer });
+    await channel.send({ embeds: [embed], files: [file] });
+    return true;
+  } catch (err) { console.error('bracket image send failed:', err); return false; }
+}
+
 async function startNextKnockoutMatch(guild) {
   const t = getTournament(guild.id);
   if (!t || t.status !== 'knockout') return;
@@ -2220,6 +2343,7 @@ async function startNextKnockoutMatch(guild) {
     saveData(data);
     const channel = await getTournamentChannel(guild);
     if (channel) await channel.send({ embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(winners.length)} begins!`).setColor(0x3498db)] });
+    if (channel) await sendBracketImage(channel, t, { title: `🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(winners.length)} bracket` });
     return startNextKnockoutMatch(guild);
   }
 
@@ -2261,6 +2385,7 @@ async function crownChampion(guild, championId) {
         .setDescription(desc).setThumbnail(getTeamThumbnail(champTeam)).setColor(0xffd700)],
     });
   }
+  if (channel && t.rounds?.length) await sendBracketImage(channel, t, { title: `🏆 ${tournamentDisplayName(t)} — Final bracket` });
 
   // Clean up any AI teams now that the tournament is over (after the
   // result embed above, so the champion's name/flag still had a team
@@ -3182,6 +3307,7 @@ client.on('interactionCreate', async (interaction) => {
         t.channelId = interaction.channel.id;
         saveData(data);
         await interaction.reply(`✅ ${tournamentDisplayName(t)} is starting! First match coming up...`);
+        await sendBracketImage(interaction.channel, t, { title: `🏆 ${tournamentDisplayName(t)} — Bracket` });
         await startNextKnockoutMatch(interaction.guild);
         return;
       }
@@ -3198,6 +3324,9 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply(`**${tournamentDisplayName(t)}** — Champion: ${getTeam(t.champion)?.name || 'Unknown'} (decided by group standings).`);
           return;
         }
+        await interaction.deferReply();
+        const sentImage = await sendBracketImage(interaction.channel, t, { footer: t.status === 'completed' ? `Champion: ${getTeam(t.champion)?.name || 'Unknown'}` : undefined });
+        if (sentImage) { await interaction.deleteReply().catch(() => {}); return; }
         const currentRound = t.rounds[t.rounds.length - 1];
         const lines = currentRound.map((m) => {
           const p1Name = getTeam(m.p1)?.name || '???';
@@ -3206,7 +3335,7 @@ client.on('interactionCreate', async (interaction) => {
         });
         const embed = new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(currentRound.length * 2)}`).setDescription(lines.join('\n')).setColor(0x3498db);
         if (t.status === 'completed') embed.setFooter({ text: `Champion: ${getTeam(t.champion)?.name || 'Unknown'}` });
-        await interaction.reply({ embeds: [embed] });
+        await interaction.editReply({ embeds: [embed] });
         return;
       }
       if (sub === 'end') {
