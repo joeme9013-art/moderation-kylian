@@ -2247,6 +2247,7 @@ async function crownChampion(guild, championId) {
 // ============================================================
 const SQUAD_CAP = 16; // 11 starters worth of depth plus a bench for injuries/subs
 const sizeChoices = [
+  { name: 'World Cup style (48 teams, needs groups)', value: '48' },
   { name: 'Round of 32 (32 teams)', value: '32' }, { name: 'Round of 16 (16 teams)', value: '16' },
   { name: 'Quarterfinals (8 teams)', value: '8' }, { name: 'Semifinals (4 teams)', value: '4' },
 ];
@@ -2783,6 +2784,10 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: 'Pick a knockout bracket size — it\'s required unless format is "Group stage only".', ephemeral: true });
           return;
         }
+        if (format === 'knockout' && size && ![4, 8, 16, 32].includes(size)) {
+          await interaction.reply({ content: `A straight knockout bracket needs 4, 8, 16 or 32 teams — ${size} teams only works with a group stage. Choose "Group stage → knockout" (e.g. 12 groups of 4, then top 2 + 8 best third-placed into the Round of 32).`, ephemeral: true });
+          return;
+        }
         const prize = interaction.options.getString('prize');
         const customName = interaction.options.getString('name') || 'Custom Cup';
         const prizeRole = interaction.options.getRole('prize_role');
@@ -2796,7 +2801,9 @@ client.on('interactionCreate', async (interaction) => {
         const formatNote = format === 'groups_only'
           ? 'This is a **group stage only** tournament — no knockout bracket. Once groups finish, an admin ends it with `/tournament finish` and the champion is decided by final standings.'
           : format === 'groups_knockout'
-            ? `This tournament goes **group stage → knockout** — need **${size}** teams for the bracket once groups wrap up.`
+            ? (size === 48
+              ? `This is a **48-team World Cup style** tournament — up to **48** teams join, then \`/tournament creategroups\` (12 groups of 4), and \`/tournament advancegroups top:2 best_extra:8\` sends 32 teams into the knockout.`
+              : `This tournament goes **group stage → knockout** — up to **${size}** teams enter the bracket once groups wrap up.`)
             : `This is a **knockout only** tournament — need exactly **${size}** teams to kick off.`;
         await interaction.reply({
           embeds: [new EmbedBuilder().setTitle(`🏆 ${displayName}`)
