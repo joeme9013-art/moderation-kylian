@@ -507,13 +507,39 @@ function applyEndgameGoals(teamA, teamB, goalsA, goalsB) {
   if (teamA?.code === SPAIN_CODE || teamB?.code === SPAIN_CODE) {
     return [...applySpainTierGoals(teamA, teamB, goalsA, goalsB), null];
   }
-  return protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+  const [gA, gB, demotion] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+  const [mA, mB] = applyUpperTierGoals(teamA, teamB, gA, gB);
+  return [mA, mB, demotion];
 }
 function applyEndgamePenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId) {
   if (teamA?.code === SPAIN_CODE || teamB?.code === SPAIN_CODE) {
     return applySpainTierPenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId);
   }
+  const upper = upperTierPenaltyWinner(teamA, teamB, teamAId, teamBId);
+  if (upper) return upper;
   return protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, defaultWinnerId);
+}
+// ------------------------------------------------------------
+// RANKS #2-#4 — never lose to anyone outside the top 15 (ranked 16th or
+// lower, or unranked): a loss gets corrected to a draw and they win the
+// shootout. Against the top 15 they get no help at all. Keyed to whoever
+// currently sits at #2-#4 in the live ranking.
+// ------------------------------------------------------------
+function isUpperTierProtected(team, opp) {
+  const rank = opponentLiveRank(team?.code);
+  if (rank == null || rank < 2 || rank > 4) return false;
+  const oppRank = opponentLiveRank(opp?.code);
+  return oppRank == null || oppRank > 15;
+}
+function applyUpperTierGoals(teamA, teamB, goalsA, goalsB) {
+  if (isUpperTierProtected(teamA, teamB) && goalsA < goalsB) return [goalsB, goalsB];
+  if (isUpperTierProtected(teamB, teamA) && goalsB < goalsA) return [goalsA, goalsA];
+  return [goalsA, goalsB];
+}
+function upperTierPenaltyWinner(teamA, teamB, teamAId, teamBId) {
+  if (isUpperTierProtected(teamA, teamB)) return teamAId;
+  if (isUpperTierProtected(teamB, teamA)) return teamBId;
+  return null;
 }
 function squadAverageRating(squadPlayers) {
   if (!squadPlayers || squadPlayers.length === 0) return 65;
@@ -1345,12 +1371,19 @@ function generateAISquad(min, max) {
 // Picks a country from the given pool that nobody in this server currently
 // holds, falling back to the full country list, and as an absolute last
 // resort just reusing a pool entry (cosmetic only — still harmless).
+// AI teams also count as "holding" their country: isCountryTaken only
+// looks for real server members, and an AI id isn't a member, so without
+// this check every AI spawned in one go could land on the same country
+// (e.g. two Egypts in one tournament).
 async function pickAvailableCountryCode(pool, guild) {
+  const heldByAI = new Set(
+    Object.entries(data.teams).filter(([id]) => id.startsWith('ai-')).map(([, t]) => t.code),
+  );
   for (const code of shuffle(pool)) {
-    if (!(await isCountryTaken(code, guild, null))) return code;
+    if (!heldByAI.has(code) && !(await isCountryTaken(code, guild, null))) return code;
   }
   for (const code of shuffle(COUNTRIES.map((c) => c.code))) {
-    if (!(await isCountryTaken(code, guild, null))) return code;
+    if (!heldByAI.has(code) && !(await isCountryTaken(code, guild, null))) return code;
   }
   return pool[0] || COUNTRIES[0].code;
 }
@@ -2083,6 +2116,7 @@ function groupStandings(group, matches) {
   return Object.values(table).sort((a, b) => (b.pts - a.pts) || ((b.gf - b.ga) - (a.gf - a.ga)) || (b.gf - a.gf));
 }
 
+const TOURNAMENT_MATCH_GAP_MS = 10 * 1000;
 async function startNextKnockoutMatch(guild) {
   const t = getTournament(guild.id);
   if (!t || t.status !== 'knockout') return;
@@ -2104,6 +2138,7 @@ async function startNextKnockoutMatch(guild) {
         const thirdResult = await playMatchQuick(channel, losers[0], losers[1], 'Third Place Playoff');
         addCoins(thirdResult.winnerId, 5000000);
         await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
+        await delay(TOURNAMENT_MATCH_GAP_MS);
       }
     }
 
@@ -2122,7 +2157,7 @@ async function startNextKnockoutMatch(guild) {
   match.winner = result.winnerId;
   match.result = result;
   saveData(data);
-  await delay(1500); // brief beat between matches so the channel is readable, not a wall of text
+  await delay(TOURNAMENT_MATCH_GAP_MS); // cooldown between matches so the channel doesn't flood
   await startNextKnockoutMatch(guild);
 }
 
