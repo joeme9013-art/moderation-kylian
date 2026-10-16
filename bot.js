@@ -74,10 +74,18 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
   : './data.json';
 
 function loadData() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return { teams: {}, cityTeams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, tournaments: {} };
-  }
-  const p = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  // FOUND BUG: when DATA_FILE doesn't exist yet (a brand-new deploy — which
+  // is EVERY Render free-tier redeploy until the Upstash backup catches up,
+  // or the very first deploy ever), this used to return a bare object with
+  // no `playerGoals` key at all. The very first goal scored in ANY match
+  // afterward (recordGoal -> data.playerGoals[name] = ...) then threw
+  // "Cannot read properties of undefined", which is exactly the kind of
+  // error playMatch/playMatchQuick's try/catch was converting into a
+  // "glitch — coin flip" result on effectively every match. Fixed by
+  // always starting from one fully-defaulted shape and merging whatever
+  // was actually on disk on top of it, so no field is ever missing
+  // regardless of whether the file existed.
+  const p = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : {};
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
   p.cityTeams ??= {};
   p.playerGoals ??= {};
@@ -541,6 +549,20 @@ async function isCountryTaken(code, guild, excludeUserId) {
 }
 function getCoins(userId) { return data.coins[userId] || 0; }
 function addCoins(userId, amount) { data.coins[userId] = Math.max(0, (data.coins[userId] || 0) + amount); }
+// A match that went to penalties was a DRAW over 90 (or 120) minutes —
+// the shootout only decides who advances/gets the coin reward, so it
+// records as a draw in each team's W-L-D record for both sides, not a
+// win for the penalty winner and a loss for the penalty loser. A match
+// settled outright in normal/extra time still records as a normal win/loss.
+function recordMatchResult(teamA, teamB, teamAId, teamBId, winnerId, penalties) {
+  if (penalties) {
+    if (teamA?.wins !== undefined) teamA.draws = (teamA.draws || 0) + 1;
+    if (teamB?.wins !== undefined) teamB.draws = (teamB.draws || 0) + 1;
+    return;
+  }
+  if (teamA?.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
+  if (teamB?.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+}
 function getBoosts(userId) { data.boosts[userId] = data.boosts[userId] || {}; return data.boosts[userId]; }
 function getSquadPlayers(userId) {
   const team = getTeam(userId);
@@ -1352,7 +1374,7 @@ async function spawnAIOpponent(difficultyKey, guild) {
     data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: aiId };
     squad.push(id);
   }
-  data.teams[aiId] = { code, name: `${country.name} (AI — ${meta.label})`, wins: 0, losses: 0, trophies: 0, squad };
+  data.teams[aiId] = { code, name: `${country.name} (AI — ${meta.label})`, wins: 0, draws: 0, losses: 0, trophies: 0, squad };
   return aiId;
 }
 // Removes the throwaway team/players/coins afterward so AI opponents never
@@ -1854,7 +1876,7 @@ async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, te
   }
 
   let rankDemotion;
-  [goalsA, goalsB, rankDemotion] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+  [goalsA, goalsB, rankDemotion] = applyEndgameGoals(teamA, teamB, goalsA, goalsB);
 
   let penalties = null;
   let winnerId;
@@ -1863,7 +1885,7 @@ async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, te
     for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
     while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
     penalties = { penA, penB };
-    winnerId = protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, penA > penB ? teamAId : teamBId);
+    winnerId = applyEndgamePenaltyWinner(teamA, teamB, teamAId, teamBId, penA > penB ? teamAId : teamBId);
   } else {
     winnerId = goalsA > goalsB ? teamAId : teamBId;
   }
@@ -1885,8 +1907,7 @@ async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, te
   if (rankNote) await channel.send({ embeds: [new EmbedBuilder().setDescription(rankNote).setColor(0x9b59b6)] }).catch(() => {});
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
-  teamA.wins !== undefined && (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
-  teamB.wins !== undefined && (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+  recordMatchResult(teamA, teamB, teamAId, teamBId, winnerId, penalties);
   if (!isCity) addCoins(winnerId, 25); // city/league games are for fun only — no coin reward
   saveData(data);
   matchCooldowns.set(channel.id, Date.now());
@@ -1925,7 +1946,7 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
     goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
     let rankDemotion;
-    [goalsA, goalsB, rankDemotion] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+    [goalsA, goalsB, rankDemotion] = applyEndgameGoals(teamA, teamB, goalsA, goalsB);
 
     const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
     const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
@@ -1939,7 +1960,7 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
       for (let i = 0; i < 5; i++) { if (Math.random() < 0.75) penA++; if (Math.random() < 0.75) penB++; }
       while (penA === penB) { if (Math.random() < 0.5) penA++; else penB++; }
       penalties = { penA, penB };
-      winnerId = protectTopRankPenaltyWinner(teamA, teamB, teamAId, teamBId, penA > penB ? teamAId : teamBId);
+      winnerId = applyEndgamePenaltyWinner(teamA, teamB, teamAId, teamBId, penA > penB ? teamAId : teamBId);
     } else {
       winnerId = goalsA > goalsB ? teamAId : teamBId;
     }
@@ -1963,8 +1984,7 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     const rankNote = rankChangeAnnouncement(rankDemotion);
     if (rankNote) await channel.send({ embeds: [new EmbedBuilder().setDescription(rankNote).setColor(0x9b59b6)] }).catch(() => {});
 
-    if (teamA.wins !== undefined) (winnerId === teamAId ? teamA.wins++ : teamA.losses++);
-    if (teamB.wins !== undefined) (winnerId === teamBId ? teamB.wins++ : teamB.losses++);
+    recordMatchResult(teamA, teamB, teamAId, teamBId, winnerId, penalties);
     addCoins(winnerId, 25);
     saveData(data);
 
@@ -2000,7 +2020,7 @@ function simulateMatchInstant(teamAId, teamBId) {
   goalsB = applyOpponentReduction(teamAId, goalsB);
   goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
   goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
-  [goalsA, goalsB] = protectTopRankTeam(teamA, teamB, goalsA, goalsB);
+  [goalsA, goalsB] = applyEndgameGoals(teamA, teamB, goalsA, goalsB);
   return { goalsA, goalsB };
 }
 
@@ -2200,7 +2220,7 @@ const slashCommands = [
   new SlashCommandBuilder().setName('daily').setDescription('Claim your daily coins.'),
   new SlashCommandBuilder().setName('leaderboard').setDescription('Top players.')
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
-      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-L record)', value: 'record' }, { name: 'world ranking (top 100 countries)', value: 'worldranking' })),
+      .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-D-L record)', value: 'record' }, { name: 'world ranking (top 100 countries)', value: 'worldranking' })),
 
   new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
     .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
@@ -2355,7 +2375,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: `🚫 **${country.name}** is already taken by another player in this server. Pick a different one.`, ephemeral: true });
           return;
         }
-        const existing = data.teams[interaction.user.id] || { wins: 0, losses: 0, trophies: 0, squad: [] };
+        const existing = data.teams[interaction.user.id] || { wins: 0, draws: 0, losses: 0, trophies: 0, squad: [] };
         const isCountryChange = existing.code && existing.code !== country.code;
 
         // Switching nations removes the old national-squad players entirely —
@@ -2396,7 +2416,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!team) { await interaction.reply(`${target.username} hasn't picked a team yet — use /team set.`); return; }
         const embed = new EmbedBuilder().setTitle(`${team.name} — ${target.username}`).setThumbnail(getTeamThumbnail(team))
           .addFields(
-            { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
+            { name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Draws', value: `${team.draws || 0}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true },
             { name: '🏆 Trophies', value: `${team.trophies}`, inline: true }, { name: '💰 Coins', value: `${getCoins(target.id).toLocaleString()}`, inline: true },
             { name: 'Squad Size', value: `${(team.squad || []).length}/${SQUAD_CAP}`, inline: true },
           ).setColor(0x3498db);
@@ -2534,11 +2554,11 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (type === 'record') {
         const table = Object.entries(data.teams)
-          .map(([id, t]) => ({ id, name: t.name, wins: t.wins || 0, losses: t.losses || 0, pts: (t.wins || 0) * 3 }))
-          .filter((row) => row.wins + row.losses > 0)
+          .map(([id, t]) => ({ id, name: t.name, wins: t.wins || 0, draws: t.draws || 0, losses: t.losses || 0, pts: (t.wins || 0) * 3 + (t.draws || 0) }))
+          .filter((row) => row.wins + row.draws + row.losses > 0)
           .sort((a, b) => b.pts - a.pts || b.wins - a.wins);
         if (table.length === 0) { await interaction.reply('No matches played yet — get some games going!'); return; }
-        const lines = table.slice(0, 15).map((row, i) => `**${i + 1}.** ${row.name} — ${row.wins}W ${row.losses}L (${row.pts} pts)`);
+        const lines = table.slice(0, 15).map((row, i) => `**${i + 1}.** ${row.name} — ${row.wins}W ${row.draws}D ${row.losses}L (${row.pts} pts)`);
         await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📋 League Table').setDescription(lines.join('\n')).setColor(0xf1c40f)] });
         return;
       }
@@ -2586,7 +2606,7 @@ client.on('interactionCreate', async (interaction) => {
     if (name === 'teamcreator') {
       if (sub === 'create') {
         const teamName = interaction.options.getString('name').slice(0, 40);
-        data.cityTeams[interaction.user.id] = { ...(data.cityTeams[interaction.user.id] || { wins: 0, losses: 0 }), name: teamName };
+        data.cityTeams[interaction.user.id] = { ...(data.cityTeams[interaction.user.id] || { wins: 0, draws: 0, losses: 0 }), name: teamName };
         saveData(data);
         await interaction.reply(`✅ Your custom team is now **${teamName}**! Use it in \`/citymatch\` — league games only, it can't join \`/tournament\` (that needs a real country from \`/team set\`).`);
         return;
@@ -2595,7 +2615,7 @@ client.on('interactionCreate', async (interaction) => {
         const target = interaction.options.getUser('user') || interaction.user;
         const team = getCityTeam(target.id);
         if (!team) { await interaction.reply(`${target.username} hasn't created a custom team yet — use /teamcreator create.`); return; }
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(team.name).addFields({ name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true }).setColor(0x9b59b6)] });
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(team.name).addFields({ name: 'Wins', value: `${team.wins}`, inline: true }, { name: 'Draws', value: `${team.draws || 0}`, inline: true }, { name: 'Losses', value: `${team.losses}`, inline: true }).setColor(0x9b59b6)] });
         return;
       }
     }
@@ -2887,6 +2907,11 @@ client.on('interactionCreate', async (interaction) => {
   // logging in, so the bot never comes online with stale/empty data after
   // a redeploy wipes the local disk.
   await pullRemoteData();
-  data = loadData();
+  // Merge into the existing object in place (rather than rebinding `data`
+  // to a brand-new object) so there's no window, however small, where some
+  // other in-flight code could be holding a reference to the pre-merge
+  // object. Nothing should run before login() anyway, but this costs
+  // nothing and removes the risk entirely.
+  Object.assign(data, loadData());
   client.login(process.env.BOT_TOKEN);
 })();
