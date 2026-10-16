@@ -463,6 +463,53 @@ function rankChangeAnnouncement(demotion) {
   if (!demotion) return null;
   return `📉 **${countryNameForCode(demotion.droppedCode)}** has been ground down by too many near-losses and drops to **#${demotion.droppedToRank}** in the world ranking — **${countryNameForCode(demotion.newTopCode)}** rises to **#1**!`;
 }
+// ------------------------------------------------------------
+// GROUP DISPLAY — flag emoji + a 3-column grid of groups, like a real
+// tournament draw graphic. Inline embed fields render three across.
+// ------------------------------------------------------------
+const GROUP_LETTERS = 'ABCDEFGHIJKLMNOP';
+function flagEmoji(code) {
+  if (!code) return '🏳️';
+  if (code.startsWith('c-')) return '🛡️';
+  if (/^[a-z]{2}$/.test(code)) {
+    return String.fromCodePoint(...code.toUpperCase().split('').map((ch) => 0x1F1E6 + ch.charCodeAt(0) - 65));
+  }
+  if (/^gb-[a-z]{3}$/.test(code)) { // England / Scotland / Wales subdivision flags
+    const tag = ('gb' + code.slice(3)).split('').map((ch) => 0xE0000 + ch.charCodeAt(0));
+    return String.fromCodePoint(0x1F3F4, ...tag, 0xE007F);
+  }
+  return '🏳️';
+}
+function plainTeamName(team) { return (team?.name || 'Unknown').replace(/ \(AI — [A-Za-z]+\)$/, ''); }
+function groupsEmbed(t, title, withStandings) {
+  const embed = new EmbedBuilder().setTitle(title).setColor(0x3498db);
+  t.groups.forEach((g, i) => {
+    let lines;
+    if (withStandings) {
+      lines = groupStandings(g, t.groupMatches[i]).map((row, pos) => {
+        const team = getTeam(row.id);
+        return `${pos + 1}. ${flagEmoji(team?.code)} ${plainTeamName(team)} — ${row.pts} pts (${row.gf - row.ga >= 0 ? '+' : ''}${row.gf - row.ga})`;
+      });
+    } else {
+      lines = g.map((id) => { const team = getTeam(id); return `${flagEmoji(team?.code)} ${plainTeamName(team)}`; });
+    }
+    embed.addFields({ name: `GROUP ${GROUP_LETTERS[i]}`, value: lines.join('\n'), inline: true });
+  });
+  return embed;
+}
+// Pot-style draw: rank every team by strength, cut into pots of `numGroups`,
+// and deal one team from each pot into each group — so the top seeds are
+// spread across groups instead of random chance stacking them together.
+function drawGroups(participants, numGroups) {
+  const sorted = [...participants].sort((a, b) => teamStrength(getTeam(b), getSquadPlayers(b)) - teamStrength(getTeam(a), getSquadPlayers(a)));
+  const groups = Array.from({ length: numGroups }, () => []);
+  for (let start = 0; start < sorted.length; start += numGroups) {
+    const pot = shuffle(sorted.slice(start, start + numGroups));
+    const slots = shuffle(groups.map((_, idx) => idx)).slice(0, pot.length);
+    pot.forEach((id, k) => groups[slots[k]].push(id));
+  }
+  return groups;
+}
 function opponentLiveRank(code) {
   ensureLiveRanking();
   return code ? data.liveRanking[code] || null : null;
@@ -2293,15 +2340,16 @@ const slashCommands = [
     .addSubcommand((s) => s.setName('join').setDescription('Join the open tournament.'))
     .addSubcommand((s) => s.setName('leave').setDescription('Leave the open tournament.'))
     .addSubcommand((s) => s.setName('addai').setDescription('Fill empty registration slots with AI teams. Admin only.')
-      .addIntegerOption((o) => o.setName('count').setDescription('How many AI teams to add').setRequired(true).setMinValue(1).setMaxValue(31))
+      .addIntegerOption((o) => o.setName('count').setDescription('How many AI teams to add').setRequired(true).setMinValue(1).setMaxValue(48))
       .addStringOption((o) => o.setName('difficulty').setDescription('AI difficulty').setRequired(false)
         .addChoices({ name: 'Easy', value: 'easy' }, { name: 'Medium', value: 'medium' }, { name: 'Hard', value: 'hard' }, { name: 'Legendary', value: 'legendary' })))
     .addSubcommand((s) => s.setName('creategroups').setDescription('Split registered teams into groups. Admin only.')
-      .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups').setRequired(true).setMinValue(1).setMaxValue(8)))
+      .addIntegerOption((o) => o.setName('num_groups').setDescription('How many groups (12 = World Cup style, 4 teams each)').setRequired(true).setMinValue(1).setMaxValue(16)))
     .addSubcommand((s) => s.setName('playgroups').setDescription('Simulate all remaining group-stage matches. Admin only.'))
     .addSubcommand((s) => s.setName('standings').setDescription('View group stage standings.'))
     .addSubcommand((s) => s.setName('advancegroups').setDescription('Advance top teams from groups into the knockout bracket. Admin only.')
-      .addIntegerOption((o) => o.setName('top').setDescription('How many teams advance per group').setRequired(true).setMinValue(1).setMaxValue(4)))
+      .addIntegerOption((o) => o.setName('top').setDescription('How many teams advance per group').setRequired(true).setMinValue(1).setMaxValue(4))
+      .addIntegerOption((o) => o.setName('best_extra').setDescription('Extra best next-placed teams (e.g. 8 best third-placed with top 2)').setRequired(false).setMinValue(0).setMaxValue(16)))
     .addSubcommand((s) => s.setName('finish').setDescription('End a "groups only" tournament and crown the champion from the final standings. Admin only.'))
     .addSubcommand((s) => s.setName('start').setDescription('Skip groups and start the knockout bracket directly. Admin only.'))
     .addSubcommand((s) => s.setName('bracket').setDescription('View the current knockout bracket.'))
@@ -2802,16 +2850,12 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.reply({ content: `Only ${t.participants.length} teams have joined — can't split into ${numGroups} groups yet.`, ephemeral: true });
           return;
         }
-        const shuffled = shuffle(t.participants);
-        const groups = Array.from({ length: numGroups }, () => []);
-        shuffled.forEach((id, i) => groups[i % numGroups].push(id));
+        const groups = drawGroups(t.participants, numGroups);
         t.groups = groups;
         t.groupMatches = groups.map((g) => buildRoundRobin(g));
         t.status = 'groups';
         saveData(data);
-        const letters = 'ABCDEFGH';
-        const lines = groups.map((g, i) => `**Group ${letters[i]}:** ${g.map((id) => getTeam(id).name).join(', ')}`);
-        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — Group Stage`).setDescription(lines.join('\n')).setColor(0x3498db)] });
+        await interaction.reply({ embeds: [groupsEmbed(t, `🏆 ${tournamentDisplayName(t)} — Group Stage Draw`, false)] });
         return;
       }
       if (sub === 'playgroups') {
@@ -2834,14 +2878,7 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'standings') {
         const t = getTournament(guildId);
         if (!t?.groups) { await interaction.reply({ content: 'No group stage set up.', ephemeral: true }); return; }
-        const letters = 'ABCDEFGH';
-        const embed = new EmbedBuilder().setTitle(`📊 ${tournamentDisplayName(t)} — Standings`).setColor(0x3498db);
-        t.groups.forEach((g, i) => {
-          const table = groupStandings(g, t.groupMatches[i]);
-          const lines = table.map((row, pos) => `${pos + 1}. ${getTeam(row.id).name} — ${row.pts}pts (GD ${row.gf - row.ga})`);
-          embed.addFields({ name: `Group ${letters[i]}`, value: lines.join('\n') });
-        });
-        await interaction.reply({ embeds: [embed] });
+        await interaction.reply({ embeds: [groupsEmbed(t, `📊 ${tournamentDisplayName(t)} — Standings`, true)] });
         return;
       }
       if (sub === 'advancegroups') {
@@ -2850,13 +2887,19 @@ client.on('interactionCreate', async (interaction) => {
         if (!t?.groups) { await interaction.reply({ content: 'No group stage set up.', ephemeral: true }); return; }
         if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is "group stage only" — there\'s no knockout bracket to advance to. Use `/tournament finish` instead.', ephemeral: true }); return; }
         const top = interaction.options.getInteger('top');
+        const bestExtra = interaction.options.getInteger('best_extra') || 0;
         const advancers = [];
+        const nextBest = [];
         t.groups.forEach((g, i) => {
           const table = groupStandings(g, t.groupMatches[i]);
           advancers.push(...table.slice(0, top).map((row) => row.id));
+          if (table[top]) nextBest.push(table[top]); // best of the rest, e.g. 3rd place when top = 2
         });
+        // Like the 48-team World Cup: 12 groups, top 2 + the 8 best third-placed teams = 32.
+        nextBest.sort((a, b) => (b.pts - a.pts) || ((b.gf - b.ga) - (a.gf - a.ga)) || (b.gf - a.gf));
+        advancers.push(...nextBest.slice(0, bestExtra).map((row) => row.id));
         if (![2, 4, 8, 16, 32].includes(advancers.length)) {
-          await interaction.reply({ content: `Advancing produces ${advancers.length} teams, which isn't a valid knockout size (2/4/8/16/32). Adjust "top" or group count.`, ephemeral: true });
+          await interaction.reply({ content: `Advancing produces ${advancers.length} teams, which isn't a valid knockout size (2/4/8/16/32). Adjust "top", "best_extra" or the group count (12 groups: top 2 + 8 best third-placed = 32).`, ephemeral: true });
           return;
         }
         t.rounds = [buildKnockoutRound(advancers)];
