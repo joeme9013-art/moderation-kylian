@@ -89,6 +89,7 @@ function loadData() {
   p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
   p.cityTeams ??= {};
   p.playerGoals ??= {};
+  // (data.awards is created lazily by ensureAwards())
   p.starPlayersSeeded ??= false;
   // Tournaments are now per-server (data.tournaments[guildId]) instead of one
   // global tournament, so the bot works the same way across every server
@@ -1988,6 +1989,7 @@ async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, te
 
   const loserId = winnerId === teamAId ? teamBId : teamAId;
   recordMatchResult(teamA, teamB, teamAId, teamBId, winnerId, penalties);
+  recordMatchAwardStats(teamAId, teamBId, goalEventsA, goalEventsB, goalsA, goalsB, winnerId);
   if (!isCity) addCoins(winnerId, 25); // city/league games are for fun only — no coin reward
   saveData(data);
   matchCooldowns.set(channel.id, Date.now());
@@ -2002,6 +2004,20 @@ async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, te
 // just one "highlights" embed with the final score and the goals, then
 // straight on to the next match.
 // ============================================================
+// Knockout ties: the vast majority are settled in extra time (a decisive
+// goal, favouring the stronger side) so penalties are the rare exception,
+// not what every tournament match comes down to.
+const EXTRA_TIME_DECIDES_CHANCE = 0.92;
+function breakKnockoutTie(teamA, teamB, teamAId, teamBId, goalsA, goalsB, strengthA, strengthB) {
+  if (goalsA !== goalsB || Math.random() > EXTRA_TIME_DECIDES_CHANCE) return { goalsA, goalsB, etSide: null };
+  const pA = Math.min(0.75, Math.max(0.25, 0.5 + (strengthA - strengthB) / 200));
+  const dflt = Math.random() < pA ? teamAId : teamBId;
+  // Rank protections still decide who gets the decisive extra-time goal.
+  const winnerId = applyEndgamePenaltyWinner(teamA, teamB, teamAId, teamBId, dflt);
+  const etSide = winnerId === teamAId ? 'A' : 'B';
+  return { goalsA: goalsA + (etSide === 'A' ? 1 : 0), goalsB: goalsB + (etSide === 'B' ? 1 : 0), etSide };
+}
+
 async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
   const teamA = getTeam(teamAId);
   const teamB = getTeam(teamBId);
@@ -2027,9 +2043,18 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
     let rankDemotion;
     [goalsA, goalsB, rankDemotion] = applyEndgameGoals(teamA, teamB, goalsA, goalsB);
+    let etSide;
+    ({ goalsA, goalsB, etSide } = breakKnockoutTie(teamA, teamB, teamAId, teamBId, goalsA, goalsB, strengthA, strengthB));
 
     const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
     const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
+    // If extra time settled it (and the result stood), move that side's last goal into ET.
+    const decidedInET = !!etSide && goalsA !== goalsB && (etSide === 'A' ? goalsA > goalsB : goalsB > goalsA);
+    if (decidedInET) {
+      const evs = (etSide === 'A' ? goalEventsA : goalEventsB).filter((e) => e.type === 'goal');
+      const last = evs[evs.length - 1];
+      if (last) { last.minute = 91 + Math.floor(Math.random() * 29); last.et = true; }
+    }
     for (const ev of goalEventsA) if (ev.type === 'goal') recordGoal(ev.player);
     for (const ev of goalEventsB) if (ev.type === 'goal') recordGoal(ev.player);
 
@@ -2048,13 +2073,13 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     const highlights = [...goalEventsA, ...goalEventsB]
       .filter((e) => e.type === 'goal')
       .sort((a, b) => a.minute - b.minute)
-      .map((e) => `⚽ ${formatMinute(e.minute)} — ${e.player}${e.isPenalty ? ' (pen)' : ''} (${e.side === 'A' ? teamA.name : teamB.name})`);
+      .map((e) => `⚽ ${e.et ? `${e.minute}'` : formatMinute(e.minute)} — ${e.player}${e.isPenalty ? ' (pen)' : ''}${e.et ? ' (ET)' : ''} (${e.side === 'A' ? teamA.name : teamB.name})`);
 
     const resultEmbed = new EmbedBuilder()
       .setTitle(roundLabel)
       .setDescription(
         `**${teamA.name}**  ${goalsA} - ${goalsB}  **${teamB.name}**\n` +
-        `🏁 Full-Time${penalties ? ` (pens: ${penalties.penA}-${penalties.penB})` : ''}` +
+        `🏁 ${penalties ? `Full-Time (pens: ${penalties.penA}-${penalties.penB})` : decidedInET ? 'Full-Time (a.e.t.)' : 'Full-Time'}` +
         (highlights.length ? `\n\n**Highlights:**\n${highlights.join('\n')}` : '\n\nA quiet one — no goals.')
       )
       .setColor(0x2ecc71)
@@ -2065,6 +2090,7 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     if (rankNote) await channel.send({ embeds: [new EmbedBuilder().setDescription(rankNote).setColor(0x9b59b6)] }).catch(() => {});
 
     recordMatchResult(teamA, teamB, teamAId, teamBId, winnerId, penalties);
+    recordMatchAwardStats(teamAId, teamBId, goalEventsA, goalEventsB, goalsA, goalsB, winnerId);
     addCoins(winnerId, 25);
     saveData(data);
 
@@ -2245,6 +2271,161 @@ async function crownChampion(guild, championId) {
 // ============================================================
 // SLASH COMMANDS
 // ============================================================
+// ============================================================
+// AWARDS — real Ballon d'Or history + the bot's own yearly individual
+// awards (Ballon d'Or, Golden Boot, Playmaker, Golden Glove, ...), worked
+// out from the goals/assists/clean sheets/man-of-the-match stats players
+// pile up in every match (quick tournament games and full sims alike).
+// ============================================================
+const REAL_BALLON_DOR = [
+  [1956, 'Stanley Matthews', 'Blackpool'], [1957, 'Alfredo Di Stéfano', 'Real Madrid'], [1958, 'Raymond Kopa', 'Real Madrid'],
+  [1959, 'Alfredo Di Stéfano', 'Real Madrid'], [1960, 'Luis Suárez', 'Barcelona'], [1961, 'Omar Sívori', 'Juventus'],
+  [1962, 'Josef Masopust', 'Dukla Prague'], [1963, 'Lev Yashin', 'Dynamo Moscow'], [1964, 'Denis Law', 'Manchester United'],
+  [1965, 'Eusébio', 'Benfica'], [1966, 'Bobby Charlton', 'Manchester United'], [1967, 'Flórián Albert', 'Ferencváros'],
+  [1968, 'George Best', 'Manchester United'], [1969, 'Gianni Rivera', 'AC Milan'], [1970, 'Gerd Müller', 'Bayern Munich'],
+  [1971, 'Johan Cruyff', 'Ajax'], [1972, 'Franz Beckenbauer', 'Bayern Munich'], [1973, 'Johan Cruyff', 'Barcelona'],
+  [1974, 'Johan Cruyff', 'Barcelona'], [1975, 'Oleg Blokhin', 'Dynamo Kyiv'], [1976, 'Franz Beckenbauer', 'Bayern Munich'],
+  [1977, 'Allan Simonsen', 'Borussia Mönchengladbach'], [1978, 'Kevin Keegan', 'Hamburg'], [1979, 'Kevin Keegan', 'Hamburg'],
+  [1980, 'Karl-Heinz Rummenigge', 'Bayern Munich'], [1981, 'Karl-Heinz Rummenigge', 'Bayern Munich'], [1982, 'Paolo Rossi', 'Juventus'],
+  [1983, 'Michel Platini', 'Juventus'], [1984, 'Michel Platini', 'Juventus'], [1985, 'Michel Platini', 'Juventus'],
+  [1986, 'Igor Belanov', 'Dynamo Kyiv'], [1987, 'Ruud Gullit', 'AC Milan'], [1988, 'Marco van Basten', 'AC Milan'],
+  [1989, 'Marco van Basten', 'AC Milan'], [1990, 'Lothar Matthäus', 'Inter Milan'], [1991, 'Jean-Pierre Papin', 'Marseille'],
+  [1992, 'Marco van Basten', 'AC Milan'], [1993, 'Roberto Baggio', 'Juventus'], [1994, 'Hristo Stoichkov', 'Barcelona'],
+  [1995, 'George Weah', 'AC Milan'], [1996, 'Matthias Sammer', 'Borussia Dortmund'], [1997, 'Ronaldo', 'Inter Milan'],
+  [1998, 'Zinedine Zidane', 'Juventus'], [1999, 'Rivaldo', 'Barcelona'], [2000, 'Luís Figo', 'Real Madrid'],
+  [2001, 'Michael Owen', 'Liverpool'], [2002, 'Ronaldo', 'Real Madrid'], [2003, 'Pavel Nedvěd', 'Juventus'],
+  [2004, 'Andriy Shevchenko', 'AC Milan'], [2005, 'Ronaldinho', 'Barcelona'], [2006, 'Fabio Cannavaro', 'Real Madrid'],
+  [2007, 'Kaká', 'AC Milan'], [2008, 'Cristiano Ronaldo', 'Manchester United'], [2009, 'Lionel Messi', 'Barcelona'],
+  [2010, 'Lionel Messi', 'Barcelona'], [2011, 'Lionel Messi', 'Barcelona'], [2012, 'Lionel Messi', 'Barcelona'],
+  [2013, 'Cristiano Ronaldo', 'Real Madrid'], [2014, 'Cristiano Ronaldo', 'Real Madrid'], [2015, 'Lionel Messi', 'Barcelona'],
+  [2016, 'Cristiano Ronaldo', 'Real Madrid'], [2017, 'Cristiano Ronaldo', 'Real Madrid'], [2018, 'Luka Modrić', 'Real Madrid'],
+  [2019, 'Lionel Messi', 'Barcelona'], [2020, null, null], [2021, 'Lionel Messi', 'Paris Saint-Germain'],
+  [2022, 'Karim Benzema', 'Real Madrid'], [2023, 'Lionel Messi', 'Inter Miami'], [2024, 'Rodri', 'Manchester City'],
+  [2025, 'Ousmane Dembélé', 'Paris Saint-Germain'],
+];
+
+function newAwardsState() {
+  return { season: new Date().getFullYear(), stats: { goals: {}, assists: {}, cleanSheets: {}, motm: {} }, meta: {}, teamWins: {}, goalLog: [], veterans: {}, history: {} };
+}
+function ensureAwards() {
+  data.awards ??= newAwardsState();
+  const a = data.awards;
+  a.stats ??= { goals: {}, assists: {}, cleanSheets: {}, motm: {} };
+  for (const k of ['goals', 'assists', 'cleanSheets', 'motm']) a.stats[k] ??= {};
+  a.meta ??= {}; a.teamWins ??= {}; a.goalLog ??= []; a.veterans ??= {}; a.history ??= {};
+  a.season ??= new Date().getFullYear();
+  return a;
+}
+function bump(obj, key, n = 1) { obj[key] = (obj[key] || 0) + n; }
+
+// Called once per finished match with the squads and goal events.
+function recordMatchAwardStats(teamAId, teamBId, goalEventsA, goalEventsB, goalsA, goalsB, winnerId) {
+  try {
+    const a = ensureAwards();
+    rolloverSeasonIfNeeded();
+    const teamA = getTeam(teamAId), teamB = getTeam(teamBId);
+    const sides = [
+      { id: teamAId, team: teamA, opp: teamB, squad: getSquadPlayers(teamAId), events: goalEventsA, scored: goalsA, conceded: goalsB },
+      { id: teamBId, team: teamB, opp: teamA, squad: getSquadPlayers(teamBId), events: goalEventsB, scored: goalsB, conceded: goalsA },
+    ];
+    for (const s of sides) {
+      for (const p of s.squad) a.meta[p.name] = { team: s.team?.name || '?', pos: p.position };
+      const scorers = {};
+      for (const ev of (s.events || [])) {
+        if (ev.type !== 'goal') continue;
+        bump(a.stats.goals, ev.player); bump(scorers, ev.player);
+        // An assist for most non-penalty goals, from a different outfield teammate
+        if (!ev.isPenalty && Math.random() < 0.75) {
+          const mates = s.squad.filter((p) => p.position !== 'GK' && p.name !== ev.player);
+          if (mates.length) bump(a.stats.assists, mates[Math.floor(Math.random() * mates.length)].name);
+        }
+        const entry = { player: ev.player, team: s.team?.name || '?', opp: s.opp?.name || '?', minute: ev.minute, season: a.season };
+        if (a.goalLog.length < 150) a.goalLog.push(entry); else a.goalLog[Math.floor(Math.random() * 150)] = entry;
+      }
+      if (s.conceded === 0 && s.squad.length) {
+        const gk = s.squad.find((p) => p.position === 'GK');
+        if (gk) bump(a.stats.cleanSheets, gk.name);
+        s.squad.filter((p) => p.position === 'DEF').sort((x, y) => (y.rating || 0) - (x.rating || 0)).slice(0, 4).forEach((p) => bump(a.stats.cleanSheets, p.name));
+      }
+      if (s.id === winnerId && s.squad.length) {
+        // Man of the match: top scorer of the winners, else the GK on a clean sheet, else their best player
+        const top = Object.entries(scorers).sort((x, y) => y[1] - x[1])[0];
+        let motm = top?.[0];
+        if (!motm && s.conceded === 0) motm = s.squad.find((p) => p.position === 'GK')?.name;
+        if (!motm) motm = [...s.squad].sort((x, y) => (y.rating || 0) - (x.rating || 0))[0]?.name;
+        if (motm) bump(a.stats.motm, motm);
+      }
+      if (s.id === winnerId && !String(s.id).startsWith('ai-')) bump(a.teamWins, s.id);
+    }
+  } catch (err) { console.error('recordMatchAwardStats failed (ignored):', err); }
+}
+
+function ballonScore(name) {
+  const st = ensureAwards().stats;
+  const pos = ensureAwards().meta[name]?.pos;
+  return (st.goals[name] || 0) * 3 + (st.assists[name] || 0) * 2 + (st.motm[name] || 0) * 3 + ((pos === 'GK' || pos === 'DEF') ? (st.cleanSheets[name] || 0) * 1.5 : 0);
+}
+function topOf(counts, filter) {
+  const rows = Object.entries(counts).filter(([n]) => !filter || filter(n)).sort((x, y) => y[1] - x[1]);
+  return rows[0] || null;
+}
+function allStatNames() {
+  const st = ensureAwards().stats;
+  return [...new Set([...Object.keys(st.goals), ...Object.keys(st.assists), ...Object.keys(st.cleanSheets), ...Object.keys(st.motm)])];
+}
+// Works out the current leaders for every individual award.
+function computeAwardWinners() {
+  const a = ensureAwards();
+  const meta = (n) => a.meta[n]?.team || '';
+  const out = [];
+  const names = allStatNames();
+  const ballon = topOf(Object.fromEntries(names.map((n) => [n, ballonScore(n)])));
+  if (ballon && ballon[1] > 0) out.push({ key: 'ballondor', emoji: '🥇', label: "Ballon d'Or", winner: ballon[0], team: meta(ballon[0]), detail: `${ballon[1]} pts` });
+  const boot = topOf(a.stats.goals);
+  if (boot) out.push({ key: 'boot', emoji: '👟', label: 'Golden Boot', winner: boot[0], team: meta(boot[0]), detail: `${boot[1]} goals` });
+  const play = topOf(a.stats.assists);
+  if (play) out.push({ key: 'playmaker', emoji: '🎯', label: 'Playmaker Award', winner: play[0], team: meta(play[0]), detail: `${play[1]} assists` });
+  const glove = topOf(a.stats.cleanSheets, (n) => a.meta[n]?.pos === 'GK');
+  if (glove) out.push({ key: 'glove', emoji: '🧤', label: 'Golden Glove', winner: glove[0], team: meta(glove[0]), detail: `${glove[1]} clean sheets` });
+  const def = topOf(a.stats.cleanSheets, (n) => a.meta[n]?.pos === 'DEF');
+  if (def) out.push({ key: 'defender', emoji: '🛡️', label: 'Best Defender', winner: def[0], team: meta(def[0]), detail: `${def[1]} clean sheets` });
+  const mid = topOf(Object.fromEntries(names.filter((n) => a.meta[n]?.pos === 'MID').map((n) => [n, ballonScore(n)])));
+  if (mid && mid[1] > 0) out.push({ key: 'midfielder', emoji: '🎼', label: 'Midfielder of the Year', winner: mid[0], team: meta(mid[0]), detail: `${mid[1]} pts` });
+  const motm = topOf(a.stats.motm);
+  if (motm) out.push({ key: 'motm', emoji: '⭐', label: 'Man of the Season', winner: motm[0], team: meta(motm[0]), detail: `${motm[1]} MOTM awards` });
+  const rookie = topOf(Object.fromEntries(names.filter((n) => !a.veterans[n]).map((n) => [n, ballonScore(n)])));
+  if (rookie && rookie[1] > 0) out.push({ key: 'rookie', emoji: '🌱', label: 'Rookie of the Year', winner: rookie[0], team: meta(rookie[0]), detail: `${rookie[1]} pts` });
+  const mgr = topOf(a.teamWins, (id) => getTeam(id));
+  if (mgr) out.push({ key: 'manager', emoji: '🧑‍💼', label: 'Manager of the Year', winner: getTeam(mgr[0]).name, team: '', detail: `${mgr[1]} wins` });
+  if (a.goalLog.length) {
+    const g = a.goalLog[Math.floor(Math.random() * a.goalLog.length)];
+    out.push({ key: 'puskas', emoji: '🚀', label: 'Puskás Award (Goal of the Season)', winner: g.player, team: g.team, detail: `vs ${g.opp}, ${g.minute}'` });
+  }
+  return out;
+}
+function awardLines(winners) {
+  return winners.map((w) => `${w.emoji} **${w.label}** — ${w.winner}${w.team ? ` (${w.team})` : ''} · ${w.detail}`);
+}
+// Closes the season: archives winners, resets the stats, starts the next season.
+function closeAwardsSeason() {
+  const a = ensureAwards();
+  const winners = computeAwardWinners();
+  let key = String(a.season);
+  if (a.history[key]) { let n = 2; while (a.history[`${key} (${n})`]) n++; key = `${key} (${n})`; }
+  a.history[key] = winners;
+  for (const n of allStatNames()) a.veterans[n] = true;
+  a.stats = { goals: {}, assists: {}, cleanSheets: {}, motm: {} };
+  a.teamWins = {}; a.goalLog = [];
+  a.season = Math.max(a.season + 1, new Date().getFullYear());
+  saveData(data);
+  return { key, winners };
+}
+function rolloverSeasonIfNeeded() {
+  const a = ensureAwards();
+  if (a.season < new Date().getFullYear() && allStatNames().length) closeAwardsSeason();
+  else if (a.season < new Date().getFullYear()) a.season = new Date().getFullYear();
+}
+
 const SQUAD_CAP = 16; // 11 starters worth of depth plus a bench for injuries/subs
 const sizeChoices = [
   { name: 'World Cup style (48 teams, needs groups)', value: '48' },
@@ -2304,6 +2485,14 @@ const slashCommands = [
   new SlashCommandBuilder().setName('leaderboard').setDescription('Top players.')
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
       .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-D-L record)', value: 'record' }, { name: 'world ranking (top 100 countries)', value: 'worldranking' })),
+
+  new SlashCommandBuilder().setName('awards').setDescription("Ballon d'Or winners and yearly individual awards.")
+    .addSubcommand((s) => s.setName('history').setDescription("Real Ballon d'Or winners, year by year.")
+      .addIntegerOption((o) => o.setName('year').setDescription('Show one year (e.g. 2012) — leave empty for the full list').setRequired(false)))
+    .addSubcommand((s) => s.setName('race').setDescription('Who is leading every award this season.'))
+    .addSubcommand((s) => s.setName('winners').setDescription("Past winners of the bot's own awards.")
+      .addStringOption((o) => o.setName('season').setDescription('Season (e.g. 2026) — leave empty for the latest').setRequired(false)))
+    .addSubcommand((s) => s.setName('ceremony').setDescription('Hold the awards ceremony now and start a new season. Admin only.')),
 
   new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
     .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
@@ -2434,6 +2623,7 @@ client.on('interactionCreate', async (interaction) => {
           'COMMANDS:\n' +
           '/team set (country OR club), /team profile\n' +
           '/createplayer, /player sign/release/transfer/squad/list\n' +
+          '/awards history/race/winners/ceremony (ballon d\'or + more)\n' +
           '/balance, /daily, /leaderboard (coins/trophies/golden boot/\n' +
           '            ballon d\'or/league table)\n' +
           '/matchsim (full animated friendly), /penalty\n' +
@@ -2613,6 +2803,55 @@ client.on('interactionCreate', async (interaction) => {
       saveData(data);
       await interaction.reply(`💰 Claimed **${amount.toLocaleString()} coins**! Balance: ${getCoins(interaction.user.id).toLocaleString()}.`);
       return;
+    }
+    if (name === 'awards') {
+      const sub = interaction.options.getSubcommand();
+      const a = ensureAwards();
+      if (sub === 'history') {
+        const year = interaction.options.getInteger('year');
+        if (year) {
+          const row = REAL_BALLON_DOR.find((r) => r[0] === year);
+          if (!row) { await interaction.reply({ content: `No Ballon d'Or record for ${year} (it started in 1956 and goes up to 2025).`, ephemeral: true }); return; }
+          const text = row[1] ? `🥇 **${row[1]}** (${row[2]})` : 'Not awarded — the 2020 ceremony was cancelled.';
+          await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏅 Ballon d'Or ${year}`).setDescription(text).setColor(0xf1c40f)] });
+          return;
+        }
+        const lines = REAL_BALLON_DOR.map(([y, n, c]) => `**${y}** — ${n ? `${n} (${c})` : 'not awarded'}`);
+        const wins = {};
+        for (const [, n] of REAL_BALLON_DOR) if (n) wins[n] = (wins[n] || 0) + 1;
+        const most = Object.entries(wins).sort((x, y) => y[1] - x[1]).slice(0, 5).map(([n, c]) => `${n} ${c}`).join(' · ');
+        const chunks = [];
+        for (let i = 0; i < lines.length; i += 13) chunks.push(lines.slice(i, i + 13).join('\n'));
+        const embed = new EmbedBuilder().setTitle("🏅 Ballon d'Or — every winner").setColor(0xf1c40f).setFooter({ text: `Most wins: ${most}` });
+        chunks.forEach((c, i) => embed.addFields({ name: i === 0 ? '\u200b' : '\u200b', value: c, inline: false }));
+        await interaction.reply({ embeds: [embed] });
+        return;
+      }
+      if (sub === 'race') {
+        const winners = computeAwardWinners();
+        if (!winners.length) { await interaction.reply('No stats yet this season — play some matches first!'); return; }
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏆 Awards Race — Season ${a.season}`).setDescription(awardLines(winners).join('\n')).setColor(0x3498db)
+          .setFooter({ text: 'Final winners are crowned at the end of the year (or by an admin with /awards ceremony).' })] });
+        return;
+      }
+      if (sub === 'winners') {
+        const keys = Object.keys(a.history);
+        if (!keys.length) { await interaction.reply('No award ceremony has been held yet. See `/awards race` for this season.'); return; }
+        const want = interaction.options.getString('season');
+        const key = want && a.history[want] ? want : keys[keys.length - 1];
+        if (want && !a.history[want]) { await interaction.reply({ content: `No ceremony for "${want}". Held so far: ${keys.join(', ')}.`, ephemeral: true }); return; }
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🏆 Award Winners — ${key}`).setDescription(awardLines(a.history[key]).join('\n')).setColor(0xf1c40f)
+          .setFooter({ text: `Ceremonies held: ${keys.join(', ')}` })] });
+        return;
+      }
+      if (sub === 'ceremony') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
+        if (!computeAwardWinners().length) { await interaction.reply({ content: 'No stats yet this season — nothing to award.', ephemeral: true }); return; }
+        const { key, winners } = closeAwardsSeason();
+        await interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🎉 ${key} Awards Ceremony`).setDescription(awardLines(winners).join('\n')).setColor(0xffd700)
+          .setFooter({ text: 'A new season has started — stats reset.' })] });
+        return;
+      }
     }
     if (name === 'leaderboard') {
       const type = interaction.options.getString('type');
