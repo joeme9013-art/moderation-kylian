@@ -1502,6 +1502,27 @@ function applyOpponentReduction(userId, goals) {
 // unranked one) gives a good chance of a bonus goal, and a decent chance of
 // knocking one off the weaker side, but it's all probabilistic so upsets
 // can still happen.
+// Top-5 sides crush the smaller nations: when a top-5 team meets someone
+// outside the top 15 (or unranked), most of the time it's a proper
+// hammering — 4-0, 6-0, 7-2 — not a narrow win. Applied to the raw score
+// BEFORE the match events are generated so goals and highlights match.
+const DOMINANCE_CHANCE = 0.88;
+const DOMINANT_WINNER_GOALS = [4, 4, 5, 5, 6, 6, 7];
+const DOMINANT_LOSER_GOALS = [0, 0, 0, 0, 1, 1, 2];
+function isDominantOver(team, opp) {
+  const r = opponentLiveRank(team?.code);
+  if (r == null || r > 5) return false;
+  const o = opponentLiveRank(opp?.code);
+  return o == null || o > 15;
+}
+function applyDominanceGoals(teamA, teamB, goalsA, goalsB) {
+  const aDom = isDominantOver(teamA, teamB), bDom = isDominantOver(teamB, teamA);
+  if (aDom === bDom || Math.random() > DOMINANCE_CHANCE) return [goalsA, goalsB];
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const w = Math.max(pick(DOMINANT_WINNER_GOALS), (aDom ? goalsA : goalsB));
+  const l = Math.min(pick(DOMINANT_LOSER_GOALS), w - 3, (aDom ? goalsB : goalsA) + 1);
+  return aDom ? [w, Math.max(0, l)] : [Math.max(0, l), w];
+}
 function applyStrengthToGoals(goals, myStrength, oppStrength) {
   const diff = myStrength - oppStrength;
   let result = goals;
@@ -1846,6 +1867,7 @@ async function playMatchInner(channel, teamAId, teamBId, roundLabel, options, te
   goalsB = applyOpponentReduction(teamAId, goalsB);
   goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
   goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+  [goalsA, goalsB] = applyDominanceGoals(teamA, teamB, goalsA, goalsB);
 
   const goalEventsA = generateGoalEvents(goalsA, squadA, teamA.name, 'A', squadB, teamB.name);
   const goalEventsB = generateGoalEvents(goalsB, squadB, teamB.name, 'B', squadA, teamA.name);
@@ -2041,6 +2063,7 @@ async function playMatchQuick(channel, teamAId, teamBId, roundLabel) {
     goalsB = applyOpponentReduction(teamAId, goalsB);
     goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
     goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+    [goalsA, goalsB] = applyDominanceGoals(teamA, teamB, goalsA, goalsB);
     let rankDemotion;
     [goalsA, goalsB, rankDemotion] = applyEndgameGoals(teamA, teamB, goalsA, goalsB);
     let etSide;
@@ -2126,6 +2149,7 @@ function simulateMatchInstant(teamAId, teamBId) {
   goalsB = applyOpponentReduction(teamAId, goalsB);
   goalsA = applyStrengthToGoals(goalsA, strengthA, strengthB);
   goalsB = applyStrengthToGoals(goalsB, strengthB, strengthA);
+  [goalsA, goalsB] = applyDominanceGoals(teamA, teamB, goalsA, goalsB);
   [goalsA, goalsB] = applyEndgameGoals(teamA, teamB, goalsA, goalsB);
   return { goalsA, goalsB };
 }
@@ -2146,8 +2170,11 @@ function shuffle(arr) {
   for (let i = copy.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [copy[i], copy[j]] = [copy[j], copy[i]]; }
   return copy;
 }
-function buildKnockoutRound(participants) {
-  const shuffled = shuffle(participants);
+// The first round is drawn at random; every later round keeps bracket order
+// (winner of match 1 plays winner of match 2, and so on) so the bracket tree
+// stays consistent instead of re-shuffling the survivors each round.
+function buildKnockoutRound(participants, keepOrder = false) {
+  const shuffled = keepOrder ? [...participants] : shuffle(participants);
   const matches = [];
   for (let i = 0; i < shuffled.length; i += 2) matches.push({ p1: shuffled[i], p2: shuffled[i + 1], winner: null, result: null });
   return matches;
@@ -2230,7 +2257,7 @@ function renderBracketPng(t) {
   const perSide0 = N / 2;
   const slot = 36;
   const W = 2 * (margin + (R - 1) * step + bw) + centerGap;
-  const H = topPad + perSide0 * slot + 50;
+  const H = Math.max(topPad + perSide0 * slot + 50, 420);
   const canvas = canvasLib.createCanvas(W, H);
   const ctx = canvas.getContext('2d');
   const FONT = canvasLib.GlobalFonts?.has?.('BracketFont') ? 'BracketFont' : 'sans-serif';
@@ -2295,6 +2322,25 @@ function renderBracketPng(t) {
   ctx.font = `bold 20px ${FONT}`; ctx.fillStyle = '#b8860b';
   ctx.fillText(champId ? `CHAMPION` : 'FINAL', cx, cy);
   if (champId) { ctx.font = `bold 18px ${FONT}`; ctx.fillStyle = '#111'; ctx.fillText(fit(nameOf(champId), centerGap + 40), cx, cy + 24); }
+  // third-place playoff, tucked under the final
+  const sf = t.rounds[R - 2];
+  let tp = t.thirdPlace;
+  if (!tp && sf && sf.length === 2 && sf.every((m) => m.winner)) {
+    const ls = sf.map((m) => (m.winner === m.p1 ? m.p2 : m.p1));
+    tp = { p1: ls[0], p2: ls[1], winner: null };
+  }
+  const ty = Math.max(fl.y + 90, H - 120);
+  ctx.textAlign = 'center'; ctx.font = `bold 16px ${FONT}`; ctx.fillStyle = '#8c5a2b';
+  ctx.fillText('3RD PLACE', cx, ty - 22);
+  [tp?.p1, tp?.p2].forEach((id, k) => {
+    const y = ty + k * 32;
+    const won = id && tp?.winner === id;
+    const lost = id && tp?.winner && !won;
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#111';
+    ctx.fillStyle = won ? '#f3dcc0' : '#ffffff';
+    ctx.fillRect(cx - bw / 2, y - bh / 2, bw, bh); ctx.strokeRect(cx - bw / 2, y - bh / 2, bw, bh);
+    if (id) { ctx.fillStyle = lost ? '#999' : '#111'; ctx.font = `${won ? 'bold ' : ''}14px ${FONT}`; ctx.fillText(fit(nameOf(id), bw - 12), cx, y + 1); }
+  });
   return canvas.toBuffer('image/png');
 }
 
@@ -2315,7 +2361,7 @@ async function sendBracketImage(channel, t, extra = {}) {
 
 async function startNextKnockoutMatch(guild) {
   const t = getTournament(guild.id);
-  if (!t || t.status !== 'knockout') return;
+  if (!t || t.status !== 'knockout' || t.knockoutPending) return;
   const round = t.rounds[t.rounds.length - 1];
   const idx = round.findIndex((m) => !m.winner);
 
@@ -2327,11 +2373,14 @@ async function startNextKnockoutMatch(guild) {
     if (round.length === 2 && !t.thirdPlacePlayed) {
       t.thirdPlacePlayed = true;
       const losers = round.map((m) => (m.winner === m.p1 ? m.p2 : m.p1));
+      t.thirdPlace = { p1: losers[0], p2: losers[1], winner: null };
       saveData(data);
       const channel = await getTournamentChannel(guild);
       if (channel) {
         await channel.send({ embeds: [new EmbedBuilder().setTitle('🥉 Third Place Playoff').setColor(0xcd7f32)] });
         const thirdResult = await playMatchQuick(channel, losers[0], losers[1], 'Third Place Playoff');
+        t.thirdPlace.winner = thirdResult.winnerId;
+        saveData(data);
         addCoins(thirdResult.winnerId, 5000000);
         await channel.send({ embeds: [new EmbedBuilder().setTitle(`🥉 ${getTeam(thirdResult.winnerId).name} takes third place!`).setDescription('+5,000,000 coins').setColor(0xcd7f32)] });
         await delay(TOURNAMENT_MATCH_GAP_MS);
@@ -2339,7 +2388,7 @@ async function startNextKnockoutMatch(guild) {
     }
 
     if (winners.length === 1) { await crownChampion(guild, winners[0]); return; }
-    t.rounds.push(buildKnockoutRound(winners));
+    t.rounds.push(buildKnockoutRound(winners, true));
     saveData(data);
     const channel = await getTournamentChannel(guild);
     if (channel) await channel.send({ embeds: [new EmbedBuilder().setTitle(`🏆 ${tournamentDisplayName(t)} — ${roundNameForSize(winners.length)} begins!`).setColor(0x3498db)] });
@@ -3275,9 +3324,15 @@ client.on('interactionCreate', async (interaction) => {
         }
         t.rounds = [buildKnockoutRound(advancers)];
         t.status = 'knockout';
+        t.knockoutPending = true; // draw is out; matches wait for /tournament start
+        t.channelId = interaction.channel.id;
         saveData(data);
-        await interaction.reply(`✅ ${advancers.length} teams advance to the ${roundNameForSize(advancers.length)}! First match coming up...`);
-        await startNextKnockoutMatch(interaction.guild);
+        await interaction.reply(`✅ ${advancers.length} teams advance to the ${roundNameForSize(advancers.length)}! Here's the knockout draw — nothing has been played yet. Run \`/tournament start\` when you're ready to kick off.`);
+        const shown = await sendBracketImage(interaction.channel, t, { title: `🏆 ${tournamentDisplayName(t)} — Knockout draw` });
+        if (!shown) {
+          const lines = t.rounds[0].map((m) => `${getTeam(m.p1)?.name || '???'} vs ${getTeam(m.p2)?.name || '???'}`);
+          await interaction.channel.send({ embeds: [new EmbedBuilder().setTitle(`🏆 ${roundNameForSize(advancers.length)} draw`).setDescription(lines.join('\n')).setColor(0x3498db)] });
+        }
         return;
       }
       if (sub === 'finish') {
@@ -3299,6 +3354,14 @@ client.on('interactionCreate', async (interaction) => {
       if (sub === 'start') {
         if (!isAdmin) { await interaction.reply({ content: 'Admin only.', ephemeral: true }); return; }
         const t = getTournament(guildId);
+        if (t && t.status === 'knockout' && t.knockoutPending) {
+          t.knockoutPending = false;
+          t.channelId = interaction.channel.id;
+          saveData(data);
+          await interaction.reply(`✅ ${tournamentDisplayName(t)} knockout is starting! First match coming up...`);
+          await startNextKnockoutMatch(interaction.guild);
+          return;
+        }
         if (!t || t.status !== 'registration') { await interaction.reply({ content: 'No tournament in registration.', ephemeral: true }); return; }
         if (t.format === 'groups_only') { await interaction.reply({ content: 'This tournament is "group stage only" — use `/tournament creategroups` instead of `/tournament start`.', ephemeral: true }); return; }
         if (t.participants.length !== t.size) { await interaction.reply({ content: `Need exactly ${t.size} participants (have ${t.participants.length}).`, ephemeral: true }); return; }
