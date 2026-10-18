@@ -73,6 +73,64 @@ const DATA_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/data.json`
   : './data.json';
 
+// ============================================================
+// SEPARATE DATA PER SERVER — every Discord server gets its own completely
+// independent copy of: teams/countries, coins, squads & free agents, boosts,
+// city teams, goal stats, awards and the world ranking. A country claimed in
+// one server is never claimed in another, and nothing leaks between them.
+//
+// The rest of the code just reads `data.teams`, `data.coins`, ... — those are
+// accessors that resolve to the server the current command is running in
+// (AsyncLocalStorage keeps that straight even across the minutes-long
+// awaits inside a match or tournament, with many servers active at once).
+// Real storage lives in data.guilds[guildId]. Tournaments were already keyed
+// by server. Outside a server (DMs, startup, tests) a '__global__' store is used.
+// ============================================================
+const { AsyncLocalStorage } = require('async_hooks');
+const guildContext = new AsyncLocalStorage();
+const GUILD_KEYS = ['teams', 'coins', 'lastDaily', 'boosts', 'players', 'cityTeams', 'playerGoals', 'awards', 'liveRanking', 'rankProtectionSaves', 'starPlayersSeeded'];
+function newGuildStore() {
+  return { teams: {}, coins: {}, lastDaily: {}, boosts: {}, players: {}, cityTeams: {}, playerGoals: {}, starPlayersSeeded: false };
+}
+function currentGuildId() { return guildContext.getStore()?.guildId || '__global__'; }
+function installGuildAccessors(obj) {
+  obj.guilds ??= {};
+  const store = () => (obj.guilds[currentGuildId()] ??= newGuildStore());
+  for (const key of GUILD_KEYS) {
+    Object.defineProperty(obj, key, { get: () => store()[key], set: (v) => { store()[key] = v; }, enumerable: false, configurable: true });
+  }
+  return obj;
+}
+// One-time carry-over for people who played before servers were separated:
+// the first time a player uses the bot in a server, their old team, coins,
+// boosts and squad are copied in (each server gets its own independent copy).
+function carryOverLegacyData(guildId, userId) {
+  const legacy = data.legacy;
+  if (!guildId || !legacy?.teams?.[userId]) return;
+  const store = (data.guilds[guildId] ??= newGuildStore());
+  store.carried ??= {};
+  if (store.carried[userId] || store.teams[userId]) { store.carried[userId] = true; return; }
+  store.carried[userId] = true;
+  const old = legacy.teams[userId];
+  // If someone else in this server already holds that country, the newcomer
+  // keeps their coins/boosts but has to pick a country again with /team set.
+  const conflict = Object.entries(store.teams).some(([uid, t]) => uid !== userId && t.code === old.code);
+  const squad = [];
+  for (const pid of conflict ? [] : (old.squad || [])) {
+    const op = legacy.players?.[pid];
+    if (!op) continue;
+    const nid = makePlayerId(op.name);
+    store.players[nid] = { ...op, id: nid, ownerId: userId };
+    squad.push(nid);
+  }
+  if (!conflict) store.teams[userId] = { ...old, squad };
+  if (legacy.coins?.[userId] !== undefined) store.coins[userId] = legacy.coins[userId];
+  if (legacy.lastDaily?.[userId] !== undefined) store.lastDaily[userId] = legacy.lastDaily[userId];
+  if (legacy.boosts?.[userId]) store.boosts[userId] = JSON.parse(JSON.stringify(legacy.boosts[userId]));
+  if (legacy.cityTeams?.[userId]) store.cityTeams[userId] = JSON.parse(JSON.stringify(legacy.cityTeams[userId]));
+  saveData(data);
+}
+
 function loadData() {
   // FOUND BUG: when DATA_FILE doesn't exist yet (a brand-new deploy — which
   // is EVERY Render free-tier redeploy until the Upstash backup catches up,
@@ -85,18 +143,23 @@ function loadData() {
   // always starting from one fully-defaulted shape and merging whatever
   // was actually on disk on top of it, so no field is ever missing
   // regardless of whether the file existed.
-  const p = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : {};
-  p.teams ??= {}; p.coins ??= {}; p.lastDaily ??= {}; p.boosts ??= {}; p.players ??= {};
-  p.cityTeams ??= {};
-  p.playerGoals ??= {};
-  // (data.awards is created lazily by ensureAwards())
-  p.starPlayersSeeded ??= false;
-  // Tournaments are now per-server (data.tournaments[guildId]) instead of one
-  // global tournament, so the bot works the same way across every server
-  // it's in. Any old single global tournament is dropped on first load.
-  p.tournaments ??= {};
-  if (p.tournament !== undefined) delete p.tournament;
-  return p;
+  const raw = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')) : {};
+  const p = { guilds: raw.guilds || {}, tournaments: raw.tournaments || {} };
+  // Data saved before servers were separated was one big shared pool. Keep it
+  // as `legacy` so each player's team/coins/squad can be copied into every
+  // server they use (see carryOverLegacyData) — nothing is lost.
+  if (raw.legacy) p.legacy = raw.legacy;
+  else if (raw.teams || raw.coins || raw.players) {
+    p.legacy = {};
+    for (const k of GUILD_KEYS) if (raw[k] !== undefined) p.legacy[k] = raw[k];
+  }
+  // Every server store always has the full default shape (no missing keys —
+  // see the playerGoals crash note above).
+  for (const gid of Object.keys(p.guilds)) p.guilds[gid] = { ...newGuildStore(), ...p.guilds[gid] };
+  // Tournaments are per-server (data.tournaments[guildId]). Any old single
+  // global tournament is dropped on first load.
+  if (raw.tournament !== undefined) delete p.tournament;
+  return installGuildAccessors(p);
 }
 // ------------------------------------------------------------
 // Optional cloud backup (Upstash Redis free tier). Render's free
@@ -612,14 +675,9 @@ function getCityTeam(userId) { return data.cityTeams[userId] || null; }
 // squad, trophies, etc. all stay global), so this just checks whether
 // anyone else CURRENTLY IN THIS GUILD already has that code.
 async function isCountryTaken(code, guild, excludeUserId) {
-  const holders = Object.entries(data.teams).filter(([uid, t]) => t.code === code && uid !== excludeUserId);
-  if (holders.length === 0) return false;
-  if (!guild) return holders.length > 0;
-  for (const [uid] of holders) {
-    const member = await guild.members.fetch(uid).catch(() => null);
-    if (member) return true;
-  }
-  return false;
+  // Every server has its own separate data, so "taken" only ever means
+  // taken by someone (human or AI) in THIS server.
+  return Object.entries(data.teams).some(([uid, t]) => t.code === code && uid !== excludeUserId);
 }
 function getCoins(userId) { return data.coins[userId] || 0; }
 function addCoins(userId, amount) { data.coins[userId] = Math.max(0, (data.coins[userId] || 0) + amount); }
@@ -1424,8 +1482,9 @@ function generateAISquad(min, max) {
 // this check every AI spawned in one go could land on the same country
 // (e.g. two Egypts in one tournament).
 async function pickAvailableCountryCode(pool, guild) {
+  const gid = guild?.id || null;
   const heldByAI = new Set(
-    Object.entries(data.teams).filter(([id]) => id.startsWith('ai-')).map(([, t]) => t.code),
+    Object.entries(data.teams).filter(([id, t]) => id.startsWith('ai-') && (t.guildId || null) === gid).map(([, t]) => t.code),
   );
   for (const code of shuffle(pool)) {
     if (!heldByAI.has(code) && !(await isCountryTaken(code, guild, null))) return code;
@@ -1455,7 +1514,7 @@ async function spawnAIOpponent(difficultyKey, guild) {
     data.players[id] = { id, name: p.name, position: p.position, rating: p.rating, ownerId: aiId };
     squad.push(id);
   }
-  data.teams[aiId] = { code, name: `${country.name} (AI — ${meta.label})`, wins: 0, draws: 0, losses: 0, trophies: 0, squad };
+  data.teams[aiId] = { code, name: `${country.name} (AI — ${meta.label})`, wins: 0, draws: 0, losses: 0, trophies: 0, squad, guildId: guild?.id || null };
   return aiId;
 }
 // Removes the throwaway team/players/coins afterward so AI opponents never
@@ -2743,7 +2802,6 @@ async function registerCommandsForAllGuilds() {
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommandsForAllGuilds();
-  seedStarPlayers();
 });
 client.on('guildCreate', async (guild) => { await registerCommandsForGuild(guild.id); });
 
@@ -2763,8 +2821,10 @@ const CHANTS = [
 ];
 const CARD_QUOTES = { yellow: ['a reckless challenge', 'excessive celebrating', 'dissent', 'time-wasting'], red: ['a two-footed lunge', 'violent conduct', 'denying a clear goalscoring opportunity'] };
 
-client.on('interactionCreate', async (interaction) => {
+client.on('interactionCreate', (interaction) => guildContext.run({ guildId: interaction.guildId || null }, async () => {
   try {
+    seedStarPlayers(); // free-agent pool for THIS server (no-op once seeded)
+    carryOverLegacyData(interaction.guildId, interaction.user.id);
     if (interaction.isAutocomplete()) {
       const focused = interaction.options.getFocused(true);
       if (interaction.commandName === 'team' && focused.name === 'country') {
@@ -3416,7 +3476,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.replied || interaction.deferred) await interaction.followUp({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
     else await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
   }
-});
+}));
 
 (async () => {
   // Pull the latest saved data from cloud storage (if configured) before
