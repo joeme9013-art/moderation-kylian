@@ -2727,6 +2727,14 @@ const slashCommands = [
       .addStringOption((o) => o.setName('season').setDescription('Season (e.g. 2026) — leave empty for the latest').setRequired(false)))
     .addSubcommand((s) => s.setName('ceremony').setDescription('Hold the awards ceremony now and start a new season. Admin only.')),
 
+  new SlashCommandBuilder().setName('say').setDescription('Owner only: make the bot say something, optionally speaking as another user.')
+    .addStringOption((o) => o.setName('message').setDescription('What to say').setRequired(true))
+    .addUserOption((o) => o.setName('as_user').setDescription('Speak as this person (their name and avatar)').setRequired(false)),
+  new SlashCommandBuilder().setName('execute').setDescription('Owner only: dramatically execute someone (optionally with a real timeout).')
+    .addUserOption((o) => o.setName('user').setDescription('Who to execute').setRequired(true))
+    .addStringOption((o) => o.setName('reason').setDescription('Their crime').setRequired(false))
+    .addIntegerOption((o) => o.setName('timeout_minutes').setDescription('Also time them out for this many minutes (0 = just the show)').setRequired(false)),
+
   new SlashCommandBuilder().setName('teamcreator').setDescription('Create a custom city/club team for league games (no country restriction).')
     .addSubcommand((s) => s.setName('create').setDescription('Create or rename your custom team.')
       .addStringOption((o) => o.setName('name').setDescription('Any team name you want').setRequired(true)))
@@ -2821,6 +2829,20 @@ const CHANTS = [
 ];
 const CARD_QUOTES = { yellow: ['a reckless challenge', 'excessive celebrating', 'dissent', 'time-wasting'], red: ['a two-footed lunge', 'violent conduct', 'denying a clear goalscoring opportunity'] };
 
+// Owner-only commands (/say, /execute). Only this Discord user id may use them.
+const OWNER_ID = process.env.OWNER_ID || '1198527966972477505';
+const EXECUTION_LINES = [
+  'was marched to the gallows at dawn', 'faced the firing squad of angry football fans', 'was sent off... permanently',
+  'got a straight red card from the Supreme Referee', 'was shown the guillotine of VAR', 'lost a penalty shootout against the grim reaper',
+];
+async function getSayWebhook(channel) {
+  const target = channel.isThread?.() ? channel.parent : channel;
+  if (!target?.fetchWebhooks) return null;
+  const hooks = await target.fetchWebhooks().catch(() => null);
+  let hook = hooks?.find((h) => h.owner?.id === client.user.id && h.name === 'FootballBot Say');
+  if (!hook) hook = await target.createWebhook({ name: 'FootballBot Say' }).catch(() => null);
+  return hook ? { hook, threadId: channel.isThread?.() ? channel.id : undefined } : null;
+}
 client.on('interactionCreate', (interaction) => guildContext.run({ guildId: interaction.guildId || null }, async () => {
   try {
     seedStarPlayers(); // free-agent pool for THIS server (no-op once seeded)
@@ -3036,6 +3058,53 @@ client.on('interactionCreate', (interaction) => guildContext.run({ guildId: inte
       addCoins(interaction.user.id, amount);
       saveData(data);
       await interaction.reply(`💰 Claimed **${amount.toLocaleString()} coins**! Balance: ${getCoins(interaction.user.id).toLocaleString()}.`);
+      return;
+    }
+    if (name === 'say' || name === 'execute') {
+      if (interaction.user.id !== OWNER_ID) { await interaction.reply({ content: '🚫 This command is only for the bot owner.', ephemeral: true }); return; }
+    }
+    if (name === 'say') {
+      const message = interaction.options.getString('message').slice(0, 2000);
+      const asUser = interaction.options.getUser('as_user');
+      await interaction.deferReply({ ephemeral: true });
+      try {
+        if (asUser) {
+          const member = await interaction.guild?.members.fetch(asUser.id).catch(() => null);
+          const wh = await getSayWebhook(interaction.channel);
+          if (!wh) { await interaction.editReply('❌ I need the **Manage Webhooks** permission in this channel to speak as someone.'); return; }
+          await wh.hook.send({
+            content: message,
+            username: (member?.displayName || asUser.displayName || asUser.username).slice(0, 80),
+            avatarURL: (member || asUser).displayAvatarURL({ size: 256 }),
+            allowedMentions: { parse: [] },
+            threadId: wh.threadId,
+          });
+        } else {
+          await interaction.channel.send({ content: message, allowedMentions: { parse: [] } });
+        }
+        await interaction.editReply('✅ Sent.');
+      } catch (err) {
+        console.error('/say failed:', err);
+        await interaction.editReply('❌ Couldn\'t send that (check my permissions in this channel).');
+      }
+      return;
+    }
+    if (name === 'execute') {
+      const target = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason') || 'Crimes against football';
+      const minutes = Math.max(0, Math.min(40320, interaction.options.getInteger('timeout_minutes') || 0));
+      let note = '';
+      if (minutes > 0) {
+        const member = await interaction.guild?.members.fetch(target.id).catch(() => null);
+        const ok = member ? await member.timeout(minutes * 60 * 1000, `Executed by owner: ${reason}`).then(() => true).catch(() => false) : false;
+        note = ok ? `\n⏳ Timed out for **${minutes}** minute(s).` : '\n⚠️ Couldn\'t apply the timeout (they may outrank me, or I lack the Timeout permission).';
+      }
+      const line = EXECUTION_LINES[Math.floor(Math.random() * EXECUTION_LINES.length)];
+      await interaction.reply({
+        embeds: [new EmbedBuilder().setTitle('⚰️ EXECUTED').setColor(0x992d22)
+          .setDescription(`**${target.displayName || target.username}** ${line}.\n**Charge:** ${reason}${note}`)],
+        allowedMentions: { parse: [] },
+      });
       return;
     }
     if (name === 'awards') {
