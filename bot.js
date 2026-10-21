@@ -2727,9 +2727,13 @@ const slashCommands = [
       .addStringOption((o) => o.setName('season').setDescription('Season (e.g. 2026) — leave empty for the latest').setRequired(false)))
     .addSubcommand((s) => s.setName('ceremony').setDescription('Hold the awards ceremony now and start a new season. Admin only.')),
 
-  new SlashCommandBuilder().setName('say').setDescription('Owner only: make the bot say something, optionally speaking as another user.')
-    .addStringOption((o) => o.setName('message').setDescription('What to say').setRequired(true))
-    .addUserOption((o) => o.setName('as_user').setDescription('Speak as this person (their name and avatar)').setRequired(false)),
+  new SlashCommandBuilder().setName('say').setDescription("Owner only: make the bot talk, run one of its own commands as itself, or speak as another user.")
+    .addStringOption((o) => o.setName('message').setDescription('What to say (not needed when running a command)').setRequired(false))
+    .addUserOption((o) => o.setName('as_user').setDescription('Speak as this person (their name and avatar)').setRequired(false))
+    .addStringOption((o) => o.setName('command').setDescription('Run one of the bot\'s own commands as the bot').setRequired(false)
+      .addChoices({ name: 'card', value: 'card' }, { name: 'var', value: 'var' }, { name: 'leaderboard', value: 'leaderboard' }, { name: 'awards', value: 'awards' }))
+    .addUserOption((o) => o.setName('target').setDescription('For card: who gets carded').setRequired(false))
+    .addStringOption((o) => o.setName('text').setDescription('card: the offense · leaderboard: coins/trophies/goldenboot/ballondor/record/worldranking · awards: race/history/winners').setRequired(false)),
   new SlashCommandBuilder().setName('execute').setDescription('Owner only: dramatically execute someone (optionally with a real timeout).')
     .addUserOption((o) => o.setName('user').setDescription('Who to execute').setRequired(true))
     .addStringOption((o) => o.setName('reason').setDescription('Their crime').setRequired(false))
@@ -2843,7 +2847,7 @@ async function getSayWebhook(channel) {
   if (!hook) hook = await target.createWebhook({ name: 'FootballBot Say' }).catch(() => null);
   return hook ? { hook, threadId: channel.isThread?.() ? channel.id : undefined } : null;
 }
-client.on('interactionCreate', (interaction) => guildContext.run({ guildId: interaction.guildId || null }, async () => {
+const handleInteraction = (interaction) => guildContext.run({ guildId: interaction.guildId || null }, async () => {
   try {
     seedStarPlayers(); // free-agent pool for THIS server (no-op once seeded)
     carryOverLegacyData(interaction.guildId, interaction.user.id);
@@ -3064,7 +3068,46 @@ client.on('interactionCreate', (interaction) => guildContext.run({ guildId: inte
       if (interaction.user.id !== OWNER_ID) { await interaction.reply({ content: '🚫 This command is only for the bot owner.', ephemeral: true }); return; }
     }
     if (name === 'say') {
-      const message = interaction.options.getString('message').slice(0, 2000);
+      const botCommand = interaction.options.getString('command');
+      if (botCommand) {
+        // Run the bot's own command AS THE BOT: the result is posted as a normal
+        // bot message (no "<owner> used /command" header — Discord always labels
+        // real slash-command replies with whoever invoked them and that can't be
+        // changed, so the bot posts the output itself with its own "used" line).
+        const text = interaction.options.getString('text');
+        const target = interaction.options.getUser('target');
+        const optMap = {
+          card: { user: target, reason: text },
+          var: {},
+          leaderboard: { type: text || 'worldranking' },
+          awards: { sub: text || 'race' },
+        }[botCommand] || {};
+        if (botCommand === 'card' && !target) { await interaction.reply({ content: 'Pick a `target` for the card.', ephemeral: true }); return; }
+        const channel = interaction.channel;
+        const botName = client.user.displayName || client.user.username;
+        const prefix = `-# 🤖 **${botName}** used \`/${botCommand}${botCommand === 'awards' ? ' ' + optMap.sub : ''}\``;
+        const post = async (payload) => {
+          if (typeof payload === 'string') payload = { content: payload };
+          if (payload.ephemeral) { await interaction.followUp({ content: payload.content || 'That command can\'t run right now.', ephemeral: true }).catch(() => {}); return; }
+          const { ephemeral, ...rest } = payload;
+          return channel.send({ ...rest, content: rest.content ? `${prefix}\n${rest.content}` : prefix });
+        };
+        const fake = Object.create(interaction);
+        Object.defineProperties(fake, {
+          commandName: { value: botCommand }, user: { value: client.user }, replied: { value: false }, deferred: { value: false },
+          options: { value: {
+            getString: (k) => optMap[k] ?? null, getUser: (k) => optMap[k] ?? null, getInteger: () => null, getBoolean: () => null,
+            getSubcommand: () => optMap.sub ?? null, getSubcommandGroup: () => null,
+          } },
+          reply: { value: post }, followUp: { value: post }, editReply: { value: post }, deferReply: { value: async () => {} },
+        });
+        await interaction.deferReply({ ephemeral: true });
+        await handleInteraction(fake);
+        await interaction.editReply(`✅ Ran /${botCommand} as the bot.`).catch(() => {});
+        return;
+      }
+      const message = (interaction.options.getString('message') || '').slice(0, 2000);
+      if (!message) { await interaction.reply({ content: 'Give me a `message` to say, or pick a `command` to run.', ephemeral: true }); return; }
       const asUser = interaction.options.getUser('as_user');
       await interaction.deferReply({ ephemeral: true });
       try {
@@ -3545,7 +3588,8 @@ client.on('interactionCreate', (interaction) => guildContext.run({ guildId: inte
     if (interaction.replied || interaction.deferred) await interaction.followUp({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
     else await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
   }
-}));
+});
+client.on('interactionCreate', handleInteraction);
 
 (async () => {
   // Pull the latest saved data from cloud storage (if configured) before
