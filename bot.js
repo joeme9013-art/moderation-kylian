@@ -2730,10 +2730,11 @@ const slashCommands = [
   new SlashCommandBuilder().setName('say').setDescription("Owner only: make the bot talk, run one of its own commands as itself, or speak as another user.")
     .addStringOption((o) => o.setName('message').setDescription('What to say (not needed when running a command)').setRequired(false))
     .addUserOption((o) => o.setName('as_user').setDescription('Speak as this person (their name and avatar)').setRequired(false))
+    .addStringOption((o) => o.setName('as_user_id').setDescription('Speak as ANY user by their ID, even if they are not in this server').setRequired(false))
     .addStringOption((o) => o.setName('command').setDescription('Run one of the bot\'s own commands as the bot').setRequired(false)
       .addChoices({ name: 'card', value: 'card' }, { name: 'var', value: 'var' }, { name: 'leaderboard', value: 'leaderboard' }, { name: 'awards', value: 'awards' }))
     .addUserOption((o) => o.setName('target').setDescription('For card: who gets carded').setRequired(false))
-    .addStringOption((o) => o.setName('text').setDescription('card: the offense · leaderboard: coins/trophies/goldenboot/ballondor/record/worldranking · awards: race/history/winners').setRequired(false)),
+    .addStringOption((o) => o.setName('text').setDescription('card: offense | leaderboard: type (e.g. goldenboot, worldranking) | awards: race/history/winners').setRequired(false)),
   new SlashCommandBuilder().setName('execute').setDescription('Owner only: dramatically execute someone (optionally with a real timeout).')
     .addUserOption((o) => o.setName('user').setDescription('Who to execute').setRequired(true))
     .addStringOption((o) => o.setName('reason').setDescription('Their crime').setRequired(false))
@@ -3108,8 +3109,14 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
       }
       const message = (interaction.options.getString('message') || '').slice(0, 2000);
       if (!message) { await interaction.reply({ content: 'Give me a `message` to say, or pick a `command` to run.', ephemeral: true }); return; }
-      const asUser = interaction.options.getUser('as_user');
+      let asUser = interaction.options.getUser('as_user');
+      const asUserId = (interaction.options.getString('as_user_id') || '').replace(/\D/g, '');
       await interaction.deferReply({ ephemeral: true });
+      if (!asUser && interaction.options.getString('as_user_id')) {
+        // Look the account up by ID — works for anyone on Discord, in this server or not.
+        asUser = asUserId ? await client.users.fetch(asUserId).catch(() => null) : null;
+        if (!asUser) { await interaction.editReply('❌ I couldn\'t find a Discord user with that ID.'); return; }
+      }
       try {
         if (asUser) {
           const member = await interaction.guild?.members.fetch(asUser.id).catch(() => null);
