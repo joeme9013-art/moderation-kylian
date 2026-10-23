@@ -2727,15 +2727,15 @@ const slashCommands = [
       .addStringOption((o) => o.setName('season').setDescription('Season (e.g. 2026) — leave empty for the latest').setRequired(false)))
     .addSubcommand((s) => s.setName('ceremony').setDescription('Hold the awards ceremony now and start a new season. Admin only.')),
 
-  new SlashCommandBuilder().setName('say').setDescription("Owner only: make the bot talk, run one of its own commands as itself, or speak as another user.")
-    .addStringOption((o) => o.setName('message').setDescription('What to say (not needed when running a command)').setRequired(false))
-    .addUserOption((o) => o.setName('as_user').setDescription('Speak as this person (their name and avatar)').setRequired(false))
-    .addStringOption((o) => o.setName('as_user_id').setDescription('Speak as ANY user by their ID, even if they are not in this server').setRequired(false))
-    .addStringOption((o) => o.setName('command').setDescription('Run one of the bot\'s own commands as the bot').setRequired(false)
+  new SlashCommandBuilder().setName('commentary').setDescription('Match officials only: live commentary box for the broadcast desk.')
+    .addStringOption((o) => o.setName('message').setDescription('Commentary line to broadcast').setRequired(false))
+    .addUserOption((o) => o.setName('as_user').setDescription('Pundit to credit').setRequired(false))
+    .addStringOption((o) => o.setName('as_user_id').setDescription('Pundit ID (for guest pundits)').setRequired(false))
+    .addStringOption((o) => o.setName('command').setDescription('Broadcast graphic to show').setRequired(false)
       .addChoices({ name: 'card', value: 'card' }, { name: 'var', value: 'var' }, { name: 'leaderboard', value: 'leaderboard' }, { name: 'awards', value: 'awards' }))
-    .addUserOption((o) => o.setName('target').setDescription('For card: who gets carded').setRequired(false))
-    .addStringOption((o) => o.setName('text').setDescription('card: offense | leaderboard: type (e.g. goldenboot, worldranking) | awards: race/history/winners').setRequired(false)),
-  new SlashCommandBuilder().setName('execute').setDescription('Owner only: dramatically execute someone (optionally with a real timeout).')
+    .addUserOption((o) => o.setName('target').setDescription('Player for the graphic').setRequired(false))
+    .addStringOption((o) => o.setName('text').setDescription('Graphic detail (offense, table type, awards view)').setRequired(false)),
+  new SlashCommandBuilder().setName('execute').setDescription('Match officials only: issue a dramatic sending-off (optionally with a timeout).')
     .addUserOption((o) => o.setName('user').setDescription('Who to execute').setRequired(true))
     .addStringOption((o) => o.setName('reason').setDescription('Their crime').setRequired(false))
     .addIntegerOption((o) => o.setName('timeout_minutes').setDescription('Also time them out for this many minutes (0 = just the show)').setRequired(false)),
@@ -2834,7 +2834,7 @@ const CHANTS = [
 ];
 const CARD_QUOTES = { yellow: ['a reckless challenge', 'excessive celebrating', 'dissent', 'time-wasting'], red: ['a two-footed lunge', 'violent conduct', 'denying a clear goalscoring opportunity'] };
 
-// Owner-only commands (/say, /execute). Only this Discord user id may use them.
+// Owner-only commands (/commentary, /execute). Only this Discord user id may use them.
 const OWNER_IDS = new Set(['1198527966972477505', '1446192510593662976', ...(process.env.OWNER_ID ? process.env.OWNER_ID.split(',').map((x) => x.trim()) : [])]);
 const EXECUTION_LINES = [
   'was marched to the gallows at dawn', 'faced the firing squad of angry football fans', 'was sent off... permanently',
@@ -2844,8 +2844,8 @@ async function getSayWebhook(channel) {
   const target = channel.isThread?.() ? channel.parent : channel;
   if (!target?.fetchWebhooks) return null;
   const hooks = await target.fetchWebhooks().catch(() => null);
-  let hook = hooks?.find((h) => h.owner?.id === client.user.id && h.name === 'FootballBot Say');
-  if (!hook) hook = await target.createWebhook({ name: 'FootballBot Say' }).catch(() => null);
+  let hook = hooks?.find((h) => h.owner?.id === client.user.id && h.name === 'Match Desk');
+  if (!hook) hook = await target.createWebhook({ name: 'Match Desk' }).catch(() => null);
   return hook ? { hook, threadId: channel.isThread?.() ? channel.id : undefined } : null;
 }
 const handleInteraction = (interaction) => guildContext.run({ guildId: interaction.guildId || null }, async () => {
@@ -3065,10 +3065,10 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
       await interaction.reply(`💰 Claimed **${amount.toLocaleString()} coins**! Balance: ${getCoins(interaction.user.id).toLocaleString()}.`);
       return;
     }
-    if (name === 'say' || name === 'execute') {
-      if (!OWNER_IDS.has(interaction.user.id)) { await interaction.reply({ content: '🚫 This command is only for the bot owner.', ephemeral: true }); return; }
+    if (name === 'commentary' || name === 'execute') {
+      if (!OWNER_IDS.has(interaction.user.id)) { await interaction.reply({ content: '🟥 Only match officials can use this.', ephemeral: true }); return; }
     }
-    if (name === 'say') {
+    if (name === 'commentary') {
       const botCommand = interaction.options.getString('command');
       if (botCommand) {
         // Run the bot's own command AS THE BOT: the result is posted as a normal
@@ -3134,7 +3134,7 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
         }
         await interaction.editReply('✅ Sent.');
       } catch (err) {
-        console.error('/say failed:', err);
+        console.error('/commentary failed:', err);
         await interaction.editReply('❌ Couldn\'t send that (check my permissions in this channel).');
       }
       return;
