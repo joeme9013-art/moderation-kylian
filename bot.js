@@ -196,7 +196,7 @@ async function pullRemoteData() {
 // match), which would burn through Upstash's free command limit and slow the
 // bot down, so changes are pushed at most once every few seconds — and once
 // more right away when Render stops/redeploys the bot (SIGTERM).
-let remoteDirty = false, remoteTimer = null, remoteLatest = null;
+let remoteDirty = false, remoteTimer = null, remoteLatest = null, remoteLoggedOk = false;
 async function pushRemoteNow() {
   if (!UPSTASH_URL || !UPSTASH_TOKEN || !remoteDirty || !remoteLatest) return;
   remoteDirty = false;
@@ -210,7 +210,11 @@ async function pushRemoteNow() {
     if (!res.ok) {
       remoteDirty = true;
       console.error(`CLOUD SAVE FAILED: Upstash replied ${res.status} ${await res.text().catch(() => '')} (data size ${(body.length / 1024).toFixed(0)} KB)`);
-    } else if (body.length > 900 * 1024) {
+    } else if (!remoteLoggedOk) {
+      remoteLoggedOk = true;
+      console.log(`Cloud save OK — wrote ${(body.length / 1024).toFixed(1)} KB to Upstash.`);
+    }
+    if (res.ok && body.length > 900 * 1024) {
       console.warn(`Cloud save OK but the data is ${(body.length / 1024).toFixed(0)} KB — close to Upstash's 1 MB request limit.`);
     }
   } catch (err) {
@@ -3642,5 +3646,6 @@ client.on('interactionCreate', handleInteraction);
   // object. Nothing should run before login() anyway, but this costs
   // nothing and removes the risk entirely.
   Object.assign(data, loadData());
+  saveData(data); // first cloud save at startup, so problems (wrong token etc.) show in the logs right away
   client.login(process.env.BOT_TOKEN);
 })();
