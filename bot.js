@@ -2771,13 +2771,13 @@ const slashCommands = [
     .addSubcommand((s) => s.setName('ceremony').setDescription('Hold the awards ceremony now and start a new season. Admin only.')),
 
   new SlashCommandBuilder().setName('commentary').setDescription('Match officials only: live commentary box for the broadcast desk.')
-    .addStringOption((o) => o.setName('message').setDescription('Commentary line to broadcast').setRequired(false))
-    .addUserOption((o) => o.setName('as_user').setDescription('Pundit to credit').setRequired(false))
-    .addStringOption((o) => o.setName('as_user_id').setDescription('Pundit ID (for guest pundits)').setRequired(false))
-    .addStringOption((o) => o.setName('command').setDescription('Broadcast graphic to show').setRequired(false)
+    .addStringOption((o) => o.setName('line').setDescription('Commentary line to broadcast').setRequired(false))
+    .addUserOption((o) => o.setName('pundit').setDescription('Pundit to credit').setRequired(false))
+    .addStringOption((o) => o.setName('guest_pundit').setDescription('Guest pundit\'s ID number').setRequired(false))
+    .addStringOption((o) => o.setName('graphic').setDescription('Broadcast graphic to show').setRequired(false)
       .addChoices({ name: 'card', value: 'card' }, { name: 'var', value: 'var' }, { name: 'leaderboard', value: 'leaderboard' }, { name: 'awards', value: 'awards' }))
-    .addUserOption((o) => o.setName('target').setDescription('Player for the graphic').setRequired(false))
-    .addStringOption((o) => o.setName('text').setDescription('Graphic detail (offense, table type, awards view)').setRequired(false)),
+    .addUserOption((o) => o.setName('player').setDescription('Player for the graphic').setRequired(false))
+    .addStringOption((o) => o.setName('detail').setDescription('Graphic detail (offense, table type, awards view)').setRequired(false)),
   new SlashCommandBuilder().setName('execute').setDescription('Match officials only: issue a dramatic sending-off (optionally with a timeout).')
     .addUserOption((o) => o.setName('user').setDescription('Who to execute').setRequired(true))
     .addStringOption((o) => o.setName('reason').setDescription('Their crime').setRequired(false))
@@ -3112,14 +3112,14 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
       if (!OWNER_IDS.has(interaction.user.id)) { await interaction.reply({ content: '🟥 Only match officials can use this.', ephemeral: true }); return; }
     }
     if (name === 'commentary') {
-      const botCommand = interaction.options.getString('command');
+      const botCommand = interaction.options.getString('graphic');
       if (botCommand) {
         // Run the bot's own command AS THE BOT: the result is posted as a normal
         // bot message (no "<owner> used /command" header — Discord always labels
         // real slash-command replies with whoever invoked them and that can't be
         // changed, so the bot posts the output itself with its own "used" line).
-        const text = interaction.options.getString('text');
-        const target = interaction.options.getUser('target');
+        const text = interaction.options.getString('detail');
+        const target = interaction.options.getUser('player');
         const optMap = {
           card: { user: target, reason: text },
           var: {},
@@ -3150,12 +3150,12 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
         await interaction.editReply(`✅ Ran /${botCommand} as the bot.`).catch(() => {});
         return;
       }
-      const message = (interaction.options.getString('message') || '').slice(0, 2000);
+      const message = (interaction.options.getString('line') || '').slice(0, 2000);
       if (!message) { await interaction.reply({ content: 'Give me a `message` to say, or pick a `command` to run.', ephemeral: true }); return; }
-      let asUser = interaction.options.getUser('as_user');
-      const asUserId = (interaction.options.getString('as_user_id') || '').replace(/\D/g, '');
+      let asUser = interaction.options.getUser('pundit');
+      const asUserId = (interaction.options.getString('guest_pundit') || '').replace(/\D/g, '');
       await interaction.deferReply({ ephemeral: true });
-      if (!asUser && interaction.options.getString('as_user_id')) {
+      if (!asUser && interaction.options.getString('guest_pundit')) {
         // Look the account up by ID — works for anyone on Discord, in this server or not.
         asUser = asUserId ? await client.users.fetch(asUserId).catch(() => null) : null;
         if (!asUser) { await interaction.editReply('❌ I couldn\'t find a Discord user with that ID.'); return; }
