@@ -170,8 +170,12 @@ function loadData() {
 // the bot pulls the latest copy down before loading. If those env
 // vars aren't set, the bot just behaves as before (local file only).
 // ------------------------------------------------------------
-const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+// Tolerate common copy/paste slips in the Render environment variables:
+// surrounding spaces/quotes, a trailing slash, a missing https://.
+const cleanEnv = (v) => (v || '').trim().replace(/^["'`]+|["'`]+$/g, '').trim();
+let UPSTASH_URL = cleanEnv(process.env.UPSTASH_REDIS_REST_URL).replace(/\/+$/, '');
+if (UPSTASH_URL && !/^https?:\/\//i.test(UPSTASH_URL)) UPSTASH_URL = 'https://' + UPSTASH_URL;
+const UPSTASH_TOKEN = cleanEnv(process.env.UPSTASH_REDIS_REST_TOKEN);
 const REMOTE_KEY = 'football-bot-data';
 
 async function pullRemoteData() {
@@ -180,8 +184,10 @@ async function pullRemoteData() {
     const res = await fetch(`${UPSTASH_URL}/get/${REMOTE_KEY}`, {
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
     });
-    const json = await res.json();
-    if (json && json.result) {
+    const json = await res.json().catch(() => null);
+    if (!res.ok || json?.error) {
+      console.error(`CLOUD LOAD FAILED: Upstash replied ${res.status} ${json?.error || ''} — check UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN on Render.`);
+    } else if (json && json.result) {
       fs.writeFileSync(DATA_FILE, json.result);
       console.log('Restored saved data from cloud storage.');
     } else {
@@ -2872,7 +2878,7 @@ const CHANTS = [
 const CARD_QUOTES = { yellow: ['a reckless challenge', 'excessive celebrating', 'dissent', 'time-wasting'], red: ['a two-footed lunge', 'violent conduct', 'denying a clear goalscoring opportunity'] };
 
 // Owner-only commands (/commentary, /execute). Only this Discord user id may use them.
-const OWNER_IDS = new Set(['1198527966972477505', '1446192510593662976', ...(process.env.OWNER_ID ? process.env.OWNER_ID.split(',').map((x) => x.trim()) : [])]);
+const OWNER_IDS = new Set(['1198527966972477505', '1446192510593662976', '1210348629378867240', ...(process.env.OWNER_ID ? process.env.OWNER_ID.split(',').map((x) => x.trim()) : [])]);
 const EXECUTION_LINES = [
   'was marched to the gallows at dawn', 'faced the firing squad of angry football fans', 'was sent off... permanently',
   'got a straight red card from the Supreme Referee', 'was shown the guillotine of VAR', 'lost a penalty shootout against the grim reaper',
@@ -3649,3 +3655,4 @@ client.on('interactionCreate', handleInteraction);
   saveData(data); // first cloud save at startup, so problems (wrong token etc.) show in the logs right away
   client.login(process.env.BOT_TOKEN);
 })();
+
