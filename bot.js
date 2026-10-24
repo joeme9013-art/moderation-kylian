@@ -192,14 +192,47 @@ async function pullRemoteData() {
   }
 }
 
+// Cloud saves are batched: saveData() runs very often (every goal, every
+// match), which would burn through Upstash's free command limit and slow the
+// bot down, so changes are pushed at most once every few seconds — and once
+// more right away when Render stops/redeploys the bot (SIGTERM).
+let remoteDirty = false, remoteTimer = null, remoteLatest = null;
+async function pushRemoteNow() {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN || !remoteDirty || !remoteLatest) return;
+  remoteDirty = false;
+  const body = JSON.stringify(remoteLatest);
+  try {
+    const res = await fetch(`${UPSTASH_URL}/set/${REMOTE_KEY}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'text/plain' },
+      body,
+    });
+    if (!res.ok) {
+      remoteDirty = true;
+      console.error(`CLOUD SAVE FAILED: Upstash replied ${res.status} ${await res.text().catch(() => '')} (data size ${(body.length / 1024).toFixed(0)} KB)`);
+    } else if (body.length > 900 * 1024) {
+      console.warn(`Cloud save OK but the data is ${(body.length / 1024).toFixed(0)} KB — close to Upstash's 1 MB request limit.`);
+    }
+  } catch (err) {
+    remoteDirty = true;
+    console.error('Could not save data to cloud storage:', err);
+  }
+}
 function pushRemoteData(dataObj) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
-  fetch(`${UPSTASH_URL}/set/${REMOTE_KEY}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'text/plain' },
-    body: JSON.stringify(dataObj),
-  }).catch((err) => console.error('Could not save data to cloud storage:', err));
+  remoteLatest = dataObj; remoteDirty = true;
+  if (!remoteTimer) remoteTimer = setTimeout(() => { remoteTimer = null; pushRemoteNow(); }, 5000);
 }
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, async () => {
+    console.log(`${sig} received — saving data before shutdown...`);
+    try { if (remoteLatest) { remoteDirty = true; await Promise.race([pushRemoteNow(), new Promise((r) => setTimeout(r, 6000))]); } } catch {}
+    process.exit(0);
+  });
+}
+console.log(UPSTASH_URL && UPSTASH_TOKEN
+  ? 'Cloud save: ON (Upstash) — data survives Render redeploys.'
+  : 'Cloud save: OFF — set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN or data is lost on every redeploy/restart!');
 
 function saveData(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
