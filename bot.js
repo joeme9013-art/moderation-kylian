@@ -2878,7 +2878,7 @@ const CHANTS = [
 const CARD_QUOTES = { yellow: ['a reckless challenge', 'excessive celebrating', 'dissent', 'time-wasting'], red: ['a two-footed lunge', 'violent conduct', 'denying a clear goalscoring opportunity'] };
 
 // Owner-only commands (/commentary, /execute). Only this Discord user id may use them.
-const OWNER_IDS = new Set(['1198527966972477505', '1446192510593662976', '1210348629378867240', ...(process.env.OWNER_ID ? process.env.OWNER_ID.split(',').map((x) => x.trim()) : [])]);
+const OWNER_IDS = new Set(['1198527966972477505', '1446192510593662976', '1210348629378867240', '1412118143706595372', ...(process.env.OWNER_ID ? process.env.OWNER_ID.split(',').map((x) => x.trim()) : [])]);
 const EXECUTION_LINES = [
   'was marched to the gallows at dawn', 'faced the firing squad of angry football fans', 'was sent off... permanently',
   'got a straight red card from the Supreme Referee', 'was shown the guillotine of VAR', 'lost a penalty shootout against the grim reaper',
@@ -3655,4 +3655,3 @@ client.on('interactionCreate', handleInteraction);
   saveData(data); // first cloud save at startup, so problems (wrong token etc.) show in the logs right away
   client.login(process.env.BOT_TOKEN);
 })();
-
