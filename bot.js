@@ -2764,7 +2764,7 @@ const slashCommands = [
 
   new SlashCommandBuilder().setName('purge').setDescription('Admins: bulk-delete messages in this channel, including very old ones.')
     .addSubcommand((s) => s.setName('start').setDescription('Start deleting messages (runs in the background).')
-      .addIntegerOption((o) => o.setName('amount').setDescription('How many messages to delete (up to 5,000,000)').setRequired(true).setMinValue(1).setMaxValue(5000000))
+      .addIntegerOption((o) => o.setName('amount').setDescription('How many messages to delete (up to 500,000)').setRequired(true).setMinValue(1).setMaxValue(500000))
       .addIntegerOption((o) => o.setName('older_than_days').setDescription('Only messages at least this many days old (5 years = 1825). Empty = any age').setRequired(false).setMinValue(0))
       .addIntegerOption((o) => o.setName('newer_than_days').setDescription('Only messages at most this many days old. Empty = any age').setRequired(false).setMinValue(1))
       .addUserOption((o) => o.setName('from_user').setDescription('Only delete messages from this person').setRequired(false))
@@ -3831,3 +3831,4 @@ client.on('interactionCreate', handleInteraction);
   saveData(data); // first cloud save at startup, so problems (wrong token etc.) show in the logs right away
   client.login(process.env.BOT_TOKEN);
 })();
+
