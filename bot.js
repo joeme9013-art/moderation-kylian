@@ -3829,6 +3829,10 @@ client.on('interactionCreate', handleInteraction);
   // nothing and removes the risk entirely.
   Object.assign(data, loadData());
   saveData(data); // first cloud save at startup, so problems (wrong token etc.) show in the logs right away
-  client.login(process.env.BOT_TOKEN);
+  if (!process.env.BOT_TOKEN) console.error('BOT_TOKEN is missing! Add it in Render > Environment.');
+  console.log('Logging in to Discord...');
+  const loginWatch = setTimeout(() => console.error('Still not logged in after 45s — Discord is not answering (token wrong, or this Render IP is temporarily rate-limited). Wait a few minutes and redeploy.'), 45000);
+  client.once('ready', () => clearTimeout(loginWatch));
+  client.on('error', (e) => console.error('Discord client error:', e));
+  client.login(process.env.BOT_TOKEN).catch((e) => console.error('LOGIN FAILED:', e && e.message ? e.message : e));
 })();
-
