@@ -2762,6 +2762,16 @@ const slashCommands = [
     .addStringOption((o) => o.setName('type').setDescription('Rank by').setRequired(true)
       .addChoices({ name: 'coins', value: 'coins' }, { name: 'trophies', value: 'trophies' }, { name: 'golden boot (goals)', value: 'goldenboot' }, { name: "ballon d'or", value: 'ballondor' }, { name: 'league table (W-D-L record)', value: 'record' }, { name: 'world ranking (top 100 countries)', value: 'worldranking' })),
 
+  new SlashCommandBuilder().setName('purge').setDescription('Admins: bulk-delete messages in this channel, including very old ones.')
+    .addSubcommand((s) => s.setName('start').setDescription('Start deleting messages (runs in the background).')
+      .addIntegerOption((o) => o.setName('amount').setDescription('How many messages to delete (up to 5,000,000)').setRequired(true).setMinValue(1).setMaxValue(5000000))
+      .addIntegerOption((o) => o.setName('older_than_days').setDescription('Only messages at least this many days old (5 years = 1825). Empty = any age').setRequired(false).setMinValue(0))
+      .addIntegerOption((o) => o.setName('newer_than_days').setDescription('Only messages at most this many days old. Empty = any age').setRequired(false).setMinValue(1))
+      .addUserOption((o) => o.setName('from_user').setDescription('Only delete messages from this person').setRequired(false))
+      .addStringOption((o) => o.setName('order').setDescription('Which messages first (default: oldest first)').setRequired(false)
+        .addChoices({ name: 'oldest first', value: 'oldest' }, { name: 'newest first', value: 'newest' })))
+    .addSubcommand((s) => s.setName('stop').setDescription('Stop the purge running in this channel.'))
+    .addSubcommand((s) => s.setName('status').setDescription('Show the purge running in this channel.')),
   new SlashCommandBuilder().setName('awards').setDescription("Ballon d'Or winners and yearly individual awards.")
     .addSubcommand((s) => s.setName('history').setDescription("Real Ballon d'Or winners, year by year.")
       .addIntegerOption((o) => o.setName('year').setDescription('Show one year (e.g. 2012) — leave empty for the full list').setRequired(false)))
@@ -2877,6 +2887,122 @@ const CHANTS = [
 ];
 const CARD_QUOTES = { yellow: ['a reckless challenge', 'excessive celebrating', 'dissent', 'time-wasting'], red: ['a two-footed lunge', 'violent conduct', 'denying a clear goalscoring opportunity'] };
 
+// ============================================================
+// PURGE — deletes lots of messages, including ones older than 14 days
+// (which Discord's bulk-delete refuses), one by one at the speed Discord
+// allows. 80,000+ messages takes HOURS — Discord rate-limits deletions —
+// so it runs in the background with a live progress message.
+// Oldest-first mode pages up from the very first message in the channel, so
+// "older than 5 years" jumps straight to the old stuff instead of scanning
+// everything newer first.
+// ============================================================
+const purgeJobs = new Map(); // channelId -> job
+const BULK_MAX_AGE_MS = 13.5 * 24 * 3600 * 1000; // bulkDelete only works under 14 days
+const snowflakeCmp = (a, b) => (BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0);
+function fmtDuration(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'under a minute';
+  if (m < 90) return `${m} min`;
+  return `${(m / 60).toFixed(1)} hours`;
+}
+// Only these Discord users may run /purge (separate from the owner list).
+// How many single deletes are kept in flight at once. Discord's own rate limit
+// is the real ceiling (about 5 deletions/second per channel); keeping many
+// queued just means the bot never sits idle waiting between them.
+const PURGE_PARALLEL = 30;
+const PURGE_USER_IDS = new Set(['1222684836091658330', '1198527966972477505']);
+async function runPurge(channel, job) {
+  const startedAt = Date.now();
+  // Everything the purge reports is PRIVATE to whoever started it: live
+  // progress goes into their ephemeral reply (Discord only lets a bot edit
+  // that for ~15 minutes), and the final result is an ephemeral follow-up —
+  // or, if the job outlasted the 15 minutes, a DM. Nothing is posted publicly.
+  const tokenValid = () => Date.now() - job.interaction.createdTimestamp < 14 * 60 * 1000;
+  let lastEdit = 0;
+  const progressText = (final) => {
+    const elapsed = Date.now() - startedAt;
+    const rate = job.deleted / Math.max(1, elapsed / 1000);
+    const left = Math.max(0, job.amount - job.deleted);
+    const eta = rate > 0 && !final ? ` · ~${fmtDuration((left / rate) * 1000)} left` : '';
+    return `🧹 **Purge ${final || 'running'}** — deleted **${job.deleted.toLocaleString()}** / ${job.amount.toLocaleString()} (scanned ${job.scanned.toLocaleString()}, skipped ${job.skipped.toLocaleString()})${final ? '' : ` · ${rate.toFixed(1)}/sec${eta}`}`;
+  };
+  const edit = async (force) => {
+    if (!force && Date.now() - lastEdit < 15000) return;
+    lastEdit = Date.now();
+    if (tokenValid()) await job.interaction.editReply({ content: progressText(), components: [] }).catch(() => {});
+  };
+  const DISCORD_EPOCH = 1420070400000n;
+  const snowflakeAt = (ts) => String((BigInt(Math.max(0, Math.floor(ts))) - DISCORD_EPOCH) << 22n);
+  // Jump straight to the part of the channel inside the age range
+  let cursor;
+  if (job.newestFirst) cursor = job.olderCutoffMs < Date.now() ? snowflakeAt(job.olderCutoffMs + 1000) : undefined;
+  else cursor = job.newerCutoffMs > 0 ? snowflakeAt(job.newerCutoffMs - 1000) : '0';
+  let reason = 'finished';
+  try {
+    const fetchPage = (c) => {
+      const opts = { limit: 100 };
+      if (job.newestFirst) { if (c) opts.before = c; } else opts.after = c;
+      return channel.messages.fetch(opts);
+    };
+    let pending = fetchPage(cursor);
+    outer: while (!job.cancel && job.deleted < job.amount) {
+      const batch = await pending;
+      if (!batch.size) { reason = 'reached the end of the channel'; break; }
+      const msgs = [...batch.values()].sort((a, b) => snowflakeCmp(a.id, b.id));
+      cursor = job.newestFirst ? msgs[0].id : msgs[msgs.length - 1].id;
+      // Start downloading the next page NOW so fetching overlaps with deleting
+      pending = fetchPage(cursor);
+      pending.catch(() => {});
+      const todo = [];
+      for (const m of job.newestFirst ? [...msgs].reverse() : msgs) {
+        job.scanned++;
+        if (m.createdTimestamp > job.olderCutoffMs) {
+          if (!job.newestFirst) { reason = 'reached the end of the age range'; todo.push(null); break; }
+          job.skipped++; continue; // newest-first: keep scanning down into the range
+        }
+        if (m.createdTimestamp < job.newerCutoffMs) {
+          if (job.newestFirst) { reason = 'reached the end of the age range'; todo.push(null); break; }
+          job.skipped++; continue;
+        }
+        if (m.pinned || job.skipIds.has(m.id) || (job.userId && m.author?.id !== job.userId)) { job.skipped++; continue; }
+        if (job.deleted + todo.length >= job.amount) break;
+        todo.push(m);
+      }
+      const reachedLimit = todo[todo.length - 1] === null;
+      const list = todo.filter(Boolean);
+      const young = list.filter((m) => Date.now() - m.createdTimestamp < BULK_MAX_AGE_MS);
+      const old = list.filter((m) => Date.now() - m.createdTimestamp >= BULK_MAX_AGE_MS);
+      if (young.length > 1) {
+        const res = await channel.bulkDelete(young.map((m) => m.id), true).catch(() => null);
+        job.deleted += res ? res.size : 0;
+        if (res) { for (const m of young) if (!res.has(m.id)) old.push(m); } else old.push(...young);
+      } else old.push(...young);
+      // Old messages one at a time (a few in parallel; discord.js queues around the rate limit)
+      for (let i = 0; i < old.length && !job.cancel; i += PURGE_PARALLEL) {
+        const results = await Promise.allSettled(old.slice(i, i + PURGE_PARALLEL).map((m) => m.delete()));
+        for (const r of results) {
+          if (r.status === 'fulfilled') job.deleted++;
+          else if (r.reason?.code === 10008) job.skipped++; // already gone
+          else if (r.reason?.code === 50013 || r.reason?.code === 50001) { reason = 'the bot lacks permission (needs Manage Messages + Read Message History)'; job.cancel = true; break; }
+          else job.skipped++;
+        }
+        await edit(false);
+      }
+      await edit(false);
+      if (reachedLimit) break outer;
+    }
+    if (job.cancel && reason === 'finished') reason = 'stopped';
+    if (!job.cancel && job.deleted >= job.amount) reason = 'reached the amount requested';
+  } catch (err) {
+    console.error('purge failed:', err);
+    reason = `stopped by an error (${err.message || err})`;
+  }
+  purgeJobs.delete(channel.id);
+  const summary = `✅ Purge ${reason}. Deleted **${job.deleted.toLocaleString()}** message(s) in ${fmtDuration(Date.now() - startedAt)} (skipped ${job.skipped.toLocaleString()}).`;
+  if (tokenValid()) await job.interaction.followUp({ content: summary, ephemeral: true }).catch(() => {});
+  else await job.interaction.user.send(summary).catch(() => {});
+}
+
 // Owner-only commands (/commentary, /execute). Only this Discord user id may use them.
 const OWNER_IDS = new Set(['1198527966972477505', '1446192510593662976', '1210348629378867240', '1412118143706595372', ...(process.env.OWNER_ID ? process.env.OWNER_ID.split(',').map((x) => x.trim()) : [])]);
 const EXECUTION_LINES = [
@@ -2928,6 +3054,7 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
           '/team set (country OR club), /team profile\n' +
           '/createplayer, /player sign/release/transfer/squad/list\n' +
           '/awards history/race/winners/ceremony (ballon d\'or + more)\n' +
+          '/purge start/stop/status (admins: bulk delete messages)\n' +
           '/balance, /daily, /leaderboard (coins/trophies/golden boot/\n' +
           '            ballon d\'or/league table)\n' +
           '/matchsim (full animated friendly), /penalty\n' +
@@ -3198,6 +3325,55 @@ const handleInteraction = (interaction) => guildContext.run({ guildId: interacti
           .setDescription(`**${target.displayName || target.username}** ${line}.\n**Charge:** ${reason}${note}`)],
         allowedMentions: { parse: [] },
       });
+      return;
+    }
+    if (name === 'purge') {
+      const sub = interaction.options.getSubcommand();
+      const channel = interaction.channel;
+      if (!interaction.guild || !channel?.messages) { await interaction.reply({ content: 'Use this in a server channel.', ephemeral: true }); return; }
+      if (!PURGE_USER_IDS.has(interaction.user.id)) { await interaction.reply({ content: '🟥 Only match officials can use this.', ephemeral: true }); return; }
+      const existing = purgeJobs.get(channel.id);
+      if (sub === 'stop') {
+        if (!existing) { await interaction.reply({ content: 'No purge is running in this channel.', ephemeral: true }); return; }
+        existing.cancel = true;
+        await interaction.reply({ content: '🛑 Stopping the purge after the current batch…', ephemeral: true });
+        return;
+      }
+      if (sub === 'status') {
+        await interaction.reply({ content: existing ? `🧹 Purge running: deleted **${existing.deleted.toLocaleString()}** / ${existing.amount.toLocaleString()} (scanned ${existing.scanned.toLocaleString()}).` : 'No purge is running in this channel.', ephemeral: true });
+        return;
+      }
+      // start
+      if (existing) { await interaction.reply({ content: 'A purge is already running here — use `/purge status` or `/purge stop`.', ephemeral: true }); return; }
+      const needed = ['ManageMessages', 'ReadMessageHistory', 'ViewChannel'];
+      if (interaction.appPermissions && !interaction.appPermissions.has(needed.map((n) => PermissionsBitField.Flags[n]))) {
+        await interaction.reply({ content: '❌ I need **Manage Messages**, **Read Message History** and **View Channel** in this channel first.', ephemeral: true });
+        return;
+      }
+      const amount = interaction.options.getInteger('amount');
+      const olderDays = interaction.options.getInteger('older_than_days') || 0;
+      const newerDays = interaction.options.getInteger('newer_than_days') || 0;
+      if (newerDays && olderDays >= newerDays) { await interaction.reply({ content: '❌ `older_than_days` must be smaller than `newer_than_days` (e.g. older 30, newer 1825 = between 1 month and 5 years old).', ephemeral: true }); return; }
+      const fromUser = interaction.options.getUser('from_user');
+      const newestFirst = interaction.options.getString('order') === 'newest';
+      const estHours = (amount / 1.5 / 3600).toFixed(1);
+      const summary = `Delete up to **${amount.toLocaleString()}** messages in <#${channel.id}>` +
+        `${olderDays || newerDays ? `, only those ${olderDays ? `at least **${olderDays}** day(s) old (~${(olderDays / 365).toFixed(1)} yrs)` : ''}${olderDays && newerDays ? ' and ' : ''}${newerDays ? `at most **${newerDays}** day(s) old (~${(newerDays / 365).toFixed(1)} yrs)` : ''}` : ', of **any age** (newer and older than 5 years alike)'}` +
+        `${fromUser ? `, only from **${fromUser.username}**` : ''}, ${newestFirst ? 'newest' : 'oldest'} first. Pinned messages are skipped.\n` +
+        `⏱️ Discord limits how fast messages can be deleted — roughly **${estHours}+ hours** for this many. **This cannot be undone.**`;
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('purge_yes').setLabel('Yes, delete').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('purge_no').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+      );
+      const reply = await interaction.reply({ content: summary, components: [row], ephemeral: true, fetchReply: true });
+      let click;
+      try { click = await reply.awaitMessageComponent({ filter: (i) => i.user.id === interaction.user.id, time: 60000 }); }
+      catch { await interaction.editReply({ content: 'Timed out — nothing was deleted.', components: [] }).catch(() => {}); return; }
+      if (click.customId !== 'purge_yes') { await click.update({ content: 'Cancelled — nothing was deleted.', components: [] }); return; }
+      await click.update({ content: '🧹 Started. Only you can see progress here (and the result — by DM if it takes over ~15 min). Stop any time with `/purge stop`.', components: [] });
+      const job = { amount, olderCutoffMs: Date.now() - olderDays * 86400000, newerCutoffMs: newerDays ? Date.now() - newerDays * 86400000 : 0, userId: fromUser?.id || null, newestFirst, deleted: 0, scanned: 0, skipped: 0, cancel: false, skipIds: new Set(), interaction };
+      purgeJobs.set(channel.id, job);
+      runPurge(channel, job); // runs in the background
       return;
     }
     if (name === 'awards') {
